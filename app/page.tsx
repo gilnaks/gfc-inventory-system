@@ -7,10 +7,10 @@ export default function HomePage() {
   const router = useRouter()
 
   useEffect(() => {
-    // Redirect to dashboard after a short delay
+    // Redirect to order page after a short delay
     const timer = setTimeout(() => {
-      router.push('/dashboard')
-    }, 3000)
+      router.push('/order')
+    }, 10000)
 
     return () => clearTimeout(timer)
   }, [router])
@@ -73,7 +73,7 @@ export default function HomePage() {
         {/* Auto-redirect notice */}
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <p className="text-blue-800">
-            <strong>Auto-redirecting to dashboard in 3 seconds...</strong>
+            <strong>Auto-redirecting to order page in 10 seconds...</strong>
           </p>
           <p className="text-blue-600 text-sm mt-1">
             Or click the buttons above to navigate manually

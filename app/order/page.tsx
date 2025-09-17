@@ -1054,7 +1054,7 @@ export default function OrderPage() {
             
             <div class="category-summary">
               ${(() => {
-                const categoryTotals = {}
+                const categoryTotals: { [key: string]: { quantity: number; amount: number } } = {}
                 order.order_details.forEach(detail => {
                   const category = detail.product?.category || detail.products?.category || 'General'
                   if (!categoryTotals[category]) {
