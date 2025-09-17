@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS locations (
   brand_id UUID REFERENCES brands(id) ON DELETE CASCADE,
   franchisee VARCHAR(100),
   contact_number VARCHAR(20),
+  company_owned BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -53,11 +54,26 @@ CREATE TABLE IF NOT EXISTS customer_orders (
   brand_id UUID NOT NULL REFERENCES brands(id) ON DELETE CASCADE,
   customer_name VARCHAR(100),
   customer_contact VARCHAR(100),
-  status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending, approved, released, cancelled
+  status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending, approved, released, paid, complete, cancelled
   total_amount DECIMAL(10,2) DEFAULT 0,
+  delivery_type VARCHAR(10) NOT NULL DEFAULT 'delivery', -- delivery, pickup
+  deposit_slip_url TEXT,
   notes TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Logistics assignments table
+CREATE TABLE IF NOT EXISTS logistics_assignments (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  order_id UUID NOT NULL REFERENCES customer_orders(id) ON DELETE CASCADE,
+  date DATE NOT NULL,
+  time_slot VARCHAR(10) NOT NULL CHECK (time_slot IN ('morning', 'afternoon')),
+  status VARCHAR(20) NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'in_transit', 'delivered', 'cancelled')),
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  UNIQUE(order_id, date, time_slot) -- Prevent double booking
 );
 
 -- Order details table
@@ -145,6 +161,30 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'locations' AND column_name = 'contact_number') THEN
         ALTER TABLE locations ADD COLUMN contact_number VARCHAR(20);
+    END IF;
+END $$;
+
+-- Check and add company_owned column to locations table if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'locations' AND column_name = 'company_owned') THEN
+        ALTER TABLE locations ADD COLUMN company_owned BOOLEAN DEFAULT FALSE;
+    END IF;
+END $$;
+
+-- Check and add deposit_slip_url column to customer_orders table if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'customer_orders' AND column_name = 'deposit_slip_url') THEN
+        ALTER TABLE customer_orders ADD COLUMN deposit_slip_url TEXT;
+    END IF;
+END $$;
+
+-- Check and add delivery_type column to customer_orders table if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'customer_orders' AND column_name = 'delivery_type') THEN
+        ALTER TABLE customer_orders ADD COLUMN delivery_type VARCHAR(10) NOT NULL DEFAULT 'delivery';
     END IF;
 END $$;
 
@@ -268,10 +308,45 @@ CREATE INDEX IF NOT EXISTS idx_daily_stock_summaries_date ON daily_stock_summari
 -- 7. REALTIME CONFIGURATION
 -- =============================================
 
--- Enable realtime for tables that need live updates
-ALTER PUBLICATION supabase_realtime ADD TABLE products;
-ALTER PUBLICATION supabase_realtime ADD TABLE customer_orders;
-ALTER PUBLICATION supabase_realtime ADD TABLE order_details;
+-- Enable realtime for tables that need live updates (with error handling)
+DO $$
+BEGIN
+    -- Add products table to realtime publication if not already added
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE products;
+    EXCEPTION
+        WHEN duplicate_object THEN
+            -- Table already in publication, ignore error
+            NULL;
+    END;
+    
+    -- Add customer_orders table to realtime publication if not already added
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE customer_orders;
+    EXCEPTION
+        WHEN duplicate_object THEN
+            -- Table already in publication, ignore error
+            NULL;
+    END;
+    
+    -- Add order_details table to realtime publication if not already added
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE order_details;
+    EXCEPTION
+        WHEN duplicate_object THEN
+            -- Table already in publication, ignore error
+            NULL;
+    END;
+    
+    -- Add logistics_assignments table to realtime publication if not already added
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE logistics_assignments;
+    EXCEPTION
+        WHEN duplicate_object THEN
+            -- Table already in publication, ignore error
+            NULL;
+    END;
+END $$;
 
 -- =============================================
 -- SCHEMA COMPLETE

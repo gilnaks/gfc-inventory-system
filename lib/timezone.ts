@@ -8,8 +8,11 @@ export const PHILIPPINES_TIMEZONE = 'Asia/Manila'
  */
 export function toPhilippinesTime(utcDate: string | Date): Date {
   const date = new Date(utcDate)
-  // Convert to Philippines timezone
-  return new Date(date.toLocaleString("en-US", {timeZone: PHILIPPINES_TIMEZONE}))
+  // Get the timezone offset for Philippines (UTC+8)
+  const philippinesOffset = 8 * 60 // 8 hours in minutes
+  const utcTime = date.getTime() + (date.getTimezoneOffset() * 60000)
+  const philippinesTime = new Date(utcTime + (philippinesOffset * 60000))
+  return philippinesTime
 }
 
 /**

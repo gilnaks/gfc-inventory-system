@@ -305,6 +305,13 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   const handleFinalizeStock = async () => {
     if (!selectedBrand) return
 
+    // Require password
+    const password = prompt('Please enter Wendy\'s birthdate to finalize stock:')
+    if (password !== '030199') {
+      alert('Invalid birthdate. Stock finalization cancelled.')
+      return
+    }
+
     if (!confirm('Are you sure you want to finalize the stock? This will move final stock to initial stock and clear production/released quantities for all products.')) {
       return
     }

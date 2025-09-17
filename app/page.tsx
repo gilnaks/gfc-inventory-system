@@ -27,7 +27,7 @@ export default function HomePage() {
             GFC Portal
           </h1>
           <p className="text-xl text-gray-600 mb-8">
-            Complete inventory and order management solution
+            GFC inventory and order management system
           </p>
         </div>
 

@@ -42,6 +42,9 @@ export default function OrderPage() {
   const [success, setSuccess] = useState('')
   const [showPastOrders, setShowPastOrders] = useState(false)
   const [showCartModal, setShowCartModal] = useState(false)
+  const [uploadingPhoto, setUploadingPhoto] = useState(false)
+  const [uploadingOrderId, setUploadingOrderId] = useState<string | null>(null)
+  const [deliveryType, setDeliveryType] = useState<'pickup' | 'delivery'>('delivery')
 
   // Initialize on mount
   useEffect(() => {
@@ -77,6 +80,37 @@ export default function OrderPage() {
 
     initializeApp()
   }, [])
+
+  // Real-time subscription for order updates
+  useEffect(() => {
+    if (!location) return
+
+    const channel = supabase
+      .channel('order-updates')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'customer_orders',
+          filter: `location_id=eq.${location.id}`
+        },
+        (payload) => {
+          console.log('Order update received:', payload)
+          
+          // Refresh orders when any order is updated
+          if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT' || payload.eventType === 'DELETE') {
+            checkPendingOrders(location.id)
+            fetchPastOrders(location.id)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [location])
 
   // Prevent navigation to products view when there's a pending order
   useEffect(() => {
@@ -191,14 +225,14 @@ export default function OrderPage() {
       const { data, error } = await supabase
         .from('customer_orders')
         .select(`
-          id, status, created_at, total_amount,
+          id, status, created_at, total_amount, delivery_type, deposit_slip_url,
           order_details (
             id, product_id, quantity, unit_price,
-            products (id, name, price, unit)
+            products (id, name, price, unit, category)
           )
         `)
         .eq('location_id', locationId)
-        .in('status', ['pending', 'approved'])
+        .in('status', ['pending', 'approved', 'released', 'paid'])
         .order('created_at', { ascending: false })
         .limit(1)
       
@@ -219,14 +253,14 @@ export default function OrderPage() {
       const { data, error } = await supabase
         .from('customer_orders')
         .select(`
-          id, status, created_at, total_amount,
+          id, status, created_at, total_amount, delivery_type, deposit_slip_url,
           order_details (
             id, product_id, quantity, unit_price,
-            products (id, name, price, unit)
+            products (id, name, price, unit, category)
           )
         `)
         .eq('location_id', locationId)
-        .in('status', ['released', 'cancelled'])
+        .in('status', ['released', 'paid', 'complete', 'cancelled'])
         .order('created_at', { ascending: false })
       
       if (error) throw error
@@ -294,6 +328,18 @@ export default function OrderPage() {
   }
 
   const calculateTotal = () => {
+    const subtotal = cartItems.reduce((total, item) => total + (item.product.price || 0) * item.quantity, 0)
+    
+    if (deliveryType === 'delivery') {
+      // Delivery fee is waived if total exceeds 10k
+      return subtotal >= 10000 ? subtotal : subtotal + 500
+    } else {
+      // Pickup discount only applies if total exceeds 10k
+      return subtotal >= 10000 ? subtotal * 0.95 : subtotal
+    }
+  }
+
+  const calculateSubtotal = () => {
     return cartItems.reduce((total, item) => total + (item.product.price || 0) * item.quantity, 0)
   }
 
@@ -414,7 +460,8 @@ export default function OrderPage() {
           brand_id: location.brand_id,
           customer_name: `${location.name} Order`,
           status: 'pending',
-          total_amount: totalAmount
+          total_amount: totalAmount,
+          delivery_type: deliveryType
         }])
         .select()
 
@@ -507,11 +554,14 @@ export default function OrderPage() {
         .from('order_details')
         .insert(orderDetails)
 
-      // Update order total
+      // Update order total and delivery type
       const totalAmount = calculateTotal()
       await supabase
         .from('customer_orders')
-        .update({ total_amount: totalAmount })
+        .update({ 
+          total_amount: totalAmount,
+          delivery_type: deliveryType
+        })
         .eq('id', pendingOrder.id)
 
       setSuccess('Order updated successfully!')
@@ -535,6 +585,7 @@ export default function OrderPage() {
         product: detail.products
       }))
       setCartItems(cartItems)
+      setDeliveryType(pendingOrder.delivery_type || 'delivery')
       setCurrentView('modify')
     }
   }
@@ -552,6 +603,57 @@ export default function OrderPage() {
 
   const getTotalAmount = (order: any) => {
     return order.order_details.reduce((total: number, detail: any) => total + (detail.unit_price * detail.quantity), 0)
+  }
+
+  const handlePhotoUpload = async (orderId: string, file: File) => {
+    setUploadingPhoto(true)
+    setUploadingOrderId(orderId)
+    
+    try {
+      // Create a unique filename
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${orderId}_${Date.now()}.${fileExt}`
+      
+      // Upload to Supabase Storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('deposit-slips')
+        .upload(fileName, file)
+      
+      if (uploadError) throw uploadError
+      
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('deposit-slips')
+        .getPublicUrl(fileName)
+      
+      // Update order with deposit slip URL and change status to 'paid'
+      const { error: updateError } = await supabase
+        .from('customer_orders')
+        .update({ 
+          deposit_slip_url: publicUrl,
+          status: 'paid',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', orderId)
+      
+      if (updateError) throw updateError
+      
+      setSuccess('Deposit slip uploaded successfully! Order status updated to Paid.')
+      
+      // Refresh orders
+      if (location) {
+        await Promise.all([
+          checkPendingOrders(location.id),
+          fetchPastOrders(location.id)
+        ])
+      }
+    } catch (error) {
+      console.error('Error uploading photo:', error)
+      setError('Failed to upload deposit slip. Please try again.')
+    } finally {
+      setUploadingPhoto(false)
+      setUploadingOrderId(null)
+    }
   }
 
   const printReceipt = (order: any) => {
@@ -579,63 +681,72 @@ export default function OrderPage() {
               width: 100%;
               margin: 0;
               background: white;
-              box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-              border-radius: 8px;
+              box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+              border-radius: 12px;
               overflow: hidden;
               display: flex;
               flex-direction: column;
               min-height: 100vh;
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             }
             
             .header { 
               text-align: center; 
-              padding: 16px 20px;
-              background: white;
-              color: black;
-              border-bottom: 2px solid black;
+              padding: 24px 20px;
+              background: ${currentTheme === 'green' ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' :
+                           currentTheme === 'red' ? 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' :
+                           currentTheme === 'yellow' ? 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' :
+                           'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)'};
+              color: white;
+              border-bottom: none;
             }
             
             .company-name { 
-              font-size: 23px; 
-              font-weight: bold; 
-              margin-bottom: 4px;
-              color: black;
+              font-size: 26px; 
+              font-weight: 700; 
+              margin-bottom: 6px;
+              color: white;
+              letter-spacing: 0.025em;
             }
             
             .receipt-title { 
-              font-size: 15px; 
-              font-weight: normal; 
-              color: black;
+              font-size: 16px; 
+              font-weight: 400; 
+              color: rgba(255, 255, 255, 0.9);
+              text-transform: uppercase;
+              letter-spacing: 0.05em;
             }
             
             .order-info { 
-              padding: 8px 12px; 
-              background: white;
-              border-bottom: 1px solid black;
+              padding: 16px 20px; 
+              background: #f8fafc;
+              border-bottom: 1px solid #e2e8f0;
             }
             
             .info-grid {
               display: grid;
-              grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-              gap: 4px 12px;
+              grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+              gap: 12px 16px;
             }
             
             .info-item {
               display: flex;
               flex-direction: column;
+              text-align: center;
             }
             
             .info-label { 
-              font-weight: normal; 
-              color: #666;
-              font-size: 12px;
+              font-weight: 600; 
+              color: #6b7280;
+              font-size: 11px;
               text-transform: uppercase;
-              margin-bottom: 1px;
+              margin-bottom: 4px;
+              letter-spacing: 0.025em;
             }
             
             .info-value { 
-              font-weight: normal; 
-              color: black;
+              font-weight: 600; 
+              color: #111827;
               font-size: 13px;
             }
             
@@ -654,62 +765,50 @@ export default function OrderPage() {
             .status-cancelled { background: white; color: black; }
             
             .items { 
-              padding: 8px 12px;
+              padding: 16px 20px;
               flex: 1;
+              background: white;
             }
             
             .items-title {
-              font-size: 13px;
-              font-weight: bold;
-              margin-bottom: 6px;
-              color: black;
+              font-size: 14px;
+              font-weight: 700;
+              margin-bottom: 12px;
+              color: #111827;
               text-transform: uppercase;
+              letter-spacing: 0.025em;
             }
             
             .items-header {
               display: grid;
-              grid-template-columns: 30px 2fr 1fr 1fr 1fr;
-              gap: 8px;
-              padding: 4px 0;
-              border-bottom: 1px solid black;
-              margin-bottom: 4px;
+              grid-template-columns: 2fr 1fr 1fr 1fr;
+              gap: 12px;
+              padding: 8px 0;
+              border-bottom: 2px solid #e5e7eb;
+              margin-bottom: 8px;
+              background: #f9fafb;
             }
             
             .header-cell {
-              font-size: 11px;
-              font-weight: bold;
-              color: black;
+              font-size: 12px;
+              font-weight: 600;
+              color: #374151;
               text-transform: uppercase;
+              letter-spacing: 0.025em;
             }
             
-            .header-checkbox { text-align: center; }
             .header-item { text-align: left; }
             .header-qty { text-align: center; }
             .header-price { text-align: center; }
             .header-total { text-align: right; }
             
-            .item-checkbox {
-              text-align: center;
-              display: flex;
-              justify-content: center;
-              align-items: center;
-            }
-            
-            .checkbox {
-              width: 14px;
-              height: 14px;
-              border: 1px solid black;
-              background: white;
-              cursor: pointer;
-            }
-            
             .item-row {
               display: grid;
-              grid-template-columns: 30px 2fr 1fr 1fr 1fr;
-              gap: 8px;
+              grid-template-columns: 2fr 1fr 1fr 1fr;
+              gap: 12px;
               align-items: center;
-              padding: 4px 0;
-              border-bottom: 1px solid #ccc;
+              padding: 8px 0;
+              border-bottom: 1px solid #f3f4f6;
             }
             
             .item-row:last-child {
@@ -749,82 +848,141 @@ export default function OrderPage() {
               font-size: 12px;
             }
             
+            .category-summary {
+              padding: 12px 16px;
+              background: #f8fafc;
+              border-top: 1px solid #e2e8f0;
+              margin-bottom: 8px;
+            }
+            
+            .category-title {
+              font-size: 13px;
+              font-weight: 600;
+              color: #374151;
+              margin-bottom: 8px;
+              text-transform: uppercase;
+              letter-spacing: 0.025em;
+            }
+            
+            .category-row {
+              display: grid;
+              grid-template-columns: 2fr 1fr 1fr;
+              gap: 8px;
+              align-items: center;
+              padding: 4px 0;
+              border-bottom: 1px solid #e2e8f0;
+            }
+            
+            .category-row:last-child {
+              border-bottom: none;
+            }
+            
+            .category-label {
+              font-size: 12px;
+              color: #374151;
+              font-weight: 500;
+            }
+            
+            .category-quantity {
+              font-size: 11px;
+              color: #6b7280;
+              text-align: center;
+            }
+            
+            .category-amount {
+              font-size: 12px;
+              color: #374151;
+              font-weight: 600;
+              text-align: right;
+            }
+            
             .total-section { 
-              padding: 8px 12px;
+              padding: 12px 16px;
               background: white;
-              border-top: 1px solid black;
+              border-top: 2px solid #e2e8f0;
             }
             
             .total-row {
               display: flex;
               justify-content: space-between;
               align-items: center;
-              margin-bottom: 4px;
+              margin-bottom: 6px;
+              padding: 2px 0;
             }
             
             .total-label {
-              font-weight: normal;
-              color: black;
+              font-weight: 500;
+              color: #374151;
               font-size: 12px;
             }
             
             .total-value {
-              font-weight: normal;
-              color: black;
+              font-weight: 600;
+              color: #374151;
               font-size: 12px;
             }
             
             .grand-total {
-              border-top: 1px solid black;
-              padding-top: 4px;
-              margin-top: 4px;
+              border-top: 2px solid #374151;
+              padding-top: 8px;
+              margin-top: 8px;
+              font-weight: 700;
             }
             
             .grand-total .total-label {
-              font-size: 13px;
-              font-weight: bold;
+              font-size: 14px;
+              font-weight: 700;
+              color: #111827;
             }
             
             .grand-total .total-value {
               font-size: 14px;
-              font-weight: bold;
-              color: black;
+              font-weight: 700;
+              color: #111827;
             }
             
             .footer { 
               text-align: center; 
-              padding: 6px 12px;
-              background: black;
-              color: white;
+              padding: 16px 20px;
+              background: #f8fafc;
+              color: #6b7280;
               margin-top: auto;
+              border-top: 1px solid #e2e8f0;
             }
             
             .footer-text {
-              font-size: 11px;
-              margin-bottom: 2px;
+              font-size: 13px;
+              margin-bottom: 4px;
+              font-weight: 600;
+              color: #374151;
             }
             
             .footer-date {
-              font-size: 10px;
+              font-size: 11px;
+              color: #6b7280;
             }
             
             .notes {
-              padding: 6px 12px;
-              background: white;
-              border: 1px solid black;
-              margin: 0 12px 8px;
+              padding: 12px 16px;
+              background: #fef3c7;
+              border: 1px solid #f59e0b;
+              margin: 8px 16px;
+              border-radius: 6px;
             }
             
             .notes-title {
-              font-weight: bold;
-              color: black;
-              margin-bottom: 2px;
-              font-size: 11px;
+              font-weight: 600;
+              color: #92400e;
+              margin-bottom: 4px;
+              font-size: 12px;
+              text-transform: uppercase;
+              letter-spacing: 0.025em;
             }
             
             .notes-text {
-              color: black;
-              font-size: 11px;
+              color: #78350f;
+              font-size: 12px;
+              line-height: 1.4;
             }
             
             @media print { 
@@ -847,7 +1005,7 @@ export default function OrderPage() {
                   <span class="info-value">${order.id.slice(0, 8)}</span>
                 </div>
                 <div class="info-item">
-                  <span class="info-label">Date (PST)</span>
+                  <span class="info-label">Date</span>
                   <span class="info-value">${formatPhilippinesDateTime(order.created_at, { dateStyle: 'short' })}</span>
                 </div>
                 <div class="info-item">
@@ -855,15 +1013,18 @@ export default function OrderPage() {
                   <span class="info-value">${order.location?.name || location?.name || 'N/A'}</span>
                 </div>
                 <div class="info-item">
-                  <span class="info-label">Customer</span>
-                  <span class="info-value">${order.customer_name || 'Walk-in'}</span>
+                  <span class="info-label">Logistics</span>
+                  <span class="info-value">${order.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                </div>
+                <div class="info-item">
+                  <span class="info-label">Status</span>
+                  <span class="info-value">${order.status}</span>
                 </div>
               </div>
             </div>
             
             <div class="items">
               <div class="items-header">
-                <div class="header-cell header-checkbox">✓</div>
                 <div class="header-cell header-item">Item</div>
                 <div class="header-cell header-qty">Quantity</div>
                 <div class="header-cell header-price">Unit Price</div>
@@ -871,9 +1032,6 @@ export default function OrderPage() {
               </div>
               ${order.order_details.map((detail: any) => `
                 <div class="item-row">
-                  <div class="item-checkbox">
-                    <div class="checkbox"></div>
-                  </div>
                   <div>
                     <div class="item-name">${detail.product?.name || detail.products?.name}</div>
                     <div class="item-details">
@@ -881,8 +1039,8 @@ export default function OrderPage() {
                     </div>
                   </div>
                   <div class="item-quantity">${detail.quantity} ${detail.product?.unit || detail.products?.unit}</div>
-                  <div class="item-unit-price">₱${detail.unit_price.toFixed(2)}</div>
-                  <div class="item-price">₱${(detail.unit_price * detail.quantity).toFixed(2)}</div>
+                  <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                 </div>
               `).join('')}
             </div>
@@ -894,15 +1052,73 @@ export default function OrderPage() {
               </div>
             ` : ''}
             
+            <div class="category-summary">
+              ${(() => {
+                const categoryTotals = {}
+                order.order_details.forEach(detail => {
+                  const category = detail.product?.category || detail.products?.category || 'General'
+                  if (!categoryTotals[category]) {
+                    categoryTotals[category] = { quantity: 0, amount: 0 }
+                  }
+                  categoryTotals[category].quantity += detail.quantity
+                  categoryTotals[category].amount += detail.unit_price * detail.quantity
+                })
+                return Object.entries(categoryTotals).map(([category, totals]) => `
+                  <div class="category-row">
+                    <span class="category-label">${category}</span>
+                    <span class="category-quantity">${totals.quantity} items</span>
+                    <span class="category-amount">₱${totals.amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                `).join('')
+              })()}
+            </div>
+            
             <div class="total-section">
-              <div class="total-row">
-                <span class="total-label">Total Items</span>
-                <span class="total-value">${getTotalItems(order)}</span>
-              </div>
-              <div class="total-row grand-total">
-                <span class="total-label">Total Amount</span>
-                <span class="total-value">₱${getTotalAmount(order).toFixed(2)}</span>
-              </div>
+              ${(() => {
+                const subtotal = order.order_details.reduce((sum, detail) => sum + (detail.unit_price * detail.quantity), 0)
+                let deliveryFee = 0
+                let pickupDiscount = 0
+                let total = subtotal
+                
+                if (order.delivery_type === 'delivery') {
+                  if (subtotal < 10000) {
+                    deliveryFee = 500
+                    total = subtotal + 500
+                  }
+                } else if (order.delivery_type === 'pickup' && subtotal >= 10000) {
+                  pickupDiscount = subtotal * 0.05
+                  total = subtotal - pickupDiscount
+                }
+                
+                return `
+                  <div class="total-row">
+                    <span class="total-label">Subtotal</span>
+                    <span class="total-value">₱${subtotal.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  ${order.delivery_type === 'delivery' ? `
+                    <div class="total-row">
+                      <span class="total-label">Delivery Fee</span>
+                      <span class="total-value">${subtotal >= 10000 ? 'FREE (Order over ₱10k)' : '+₱500.00'}</span>
+                    </div>
+                  ` : ''}
+                  ${order.delivery_type === 'pickup' && subtotal >= 10000 ? `
+                    <div class="total-row">
+                      <span class="total-label">Pickup Discount (5%)</span>
+                      <span class="total-value">-₱${pickupDiscount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  ` : ''}
+                  ${order.delivery_type === 'pickup' && subtotal < 10000 ? `
+                    <div class="total-row">
+                      <span class="total-label">Pickup Discount</span>
+                      <span class="total-value">Not available (Order under ₱10k)</span>
+                    </div>
+                  ` : ''}
+                  <div class="total-row grand-total">
+                    <span class="total-label">Total Amount</span>
+                    <span class="total-value">₱${total.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                `
+              })()}
             </div>
             
             <div class="footer">
@@ -1122,35 +1338,56 @@ export default function OrderPage() {
               <div className="bg-white rounded-lg shadow-sm border p-6">
                 <div className={`flex items-center justify-between p-4 rounded-lg mb-6 ${
                   pendingOrder.status === 'approved' 
-                ? 'bg-green-50 border border-green-200' 
-                : 'bg-yellow-50 border border-yellow-200'
+                    ? 'bg-green-50 border border-green-200' 
+                    : pendingOrder.status === 'released'
+                    ? 'bg-orange-50 border border-orange-200'
+                    : pendingOrder.status === 'paid'
+                    ? 'bg-blue-50 border border-blue-200'
+                    : 'bg-yellow-50 border border-yellow-200'
             }`}>
                 <div className="flex items-center">
                   <div className="flex-shrink-0">
                       {pendingOrder.status === 'approved' ? (
                         <Check className="h-5 w-5 text-green-400" />
+                      ) : pendingOrder.status === 'released' ? (
+                        <div className="h-5 w-5 rounded-full bg-orange-400"></div>
+                      ) : pendingOrder.status === 'paid' ? (
+                        <div className="h-5 w-5 rounded-full bg-blue-400"></div>
                       ) : (
                         <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-yellow-400"></div>
                     )}
                   </div>
                   <div className="ml-3">
                       <h3 className={`text-lg font-medium ${
-                        pendingOrder.status === 'approved' ? 'text-green-800' : 'text-yellow-800'
+                        pendingOrder.status === 'approved' ? 'text-green-800' 
+                        : pendingOrder.status === 'released' ? 'text-orange-800'
+                        : pendingOrder.status === 'paid' ? 'text-blue-800'
+                        : 'text-yellow-800'
                     }`}>
-                        {pendingOrder.status === 'approved' ? 'Order Approved' : 'Pending Order'}
+                        {pendingOrder.status === 'approved' ? 'Order Approved' 
+                         : pendingOrder.status === 'released' ? 'Order Released'
+                         : pendingOrder.status === 'paid' ? 'Payment Received'
+                         : 'Pending Order'}
                     </h3>
                       <p className={`text-sm ${
-                        pendingOrder.status === 'approved' ? 'text-green-700' : 'text-yellow-700'
+                        pendingOrder.status === 'approved' ? 'text-green-700' 
+                        : pendingOrder.status === 'released' ? 'text-orange-700'
+                        : pendingOrder.status === 'paid' ? 'text-blue-700'
+                        : 'text-yellow-700'
                       }`}>
                         {pendingOrder.status === 'approved' 
                           ? 'Your order has been approved and is being processed.'
+                          : pendingOrder.status === 'released'
+                          ? 'Your order has been released. Please complete payment to proceed.'
+                          : pendingOrder.status === 'paid'
+                          ? 'Payment received. Your order is being prepared for completion.'
                           : 'Your order is pending approval. You can modify it if needed.'
                         }
                       </p>
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className="text-2xl font-bold text-gray-900">₱{pendingOrder.total_amount?.toFixed(2) || '0.00'}</p>
+                    <p className="text-2xl font-bold text-gray-900">₱{pendingOrder.total_amount?.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}</p>
                     <p className="text-sm text-gray-500">Order #{pendingOrder.id.slice(-8)}</p>
                 </div>
                 </div>
@@ -1161,11 +1398,11 @@ export default function OrderPage() {
                     <div key={detail.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
                       <div>
                         <p className="font-medium text-gray-900">{detail.products.name}</p>
-                        <p className="text-sm text-gray-600">₱{detail.unit_price.toFixed(2)} per {detail.products.unit}</p>
+                        <p className="text-sm text-gray-600">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {detail.products.unit}</p>
                       </div>
                       <div className="text-right">
                         <p className="font-medium text-gray-900">{detail.quantity} {detail.products.unit}</p>
-                        <p className="text-sm text-gray-600">₱{(detail.quantity * detail.unit_price).toFixed(2)}</p>
+                        <p className="text-sm text-gray-600">₱{(detail.quantity * detail.unit_price).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                       </div>
                     </div>
                   ))}
@@ -1186,38 +1423,225 @@ export default function OrderPage() {
                       <span>Modify Order</span>
                   </button>
                 )}
+                  {pendingOrder.status === 'released' && (
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+                      <div className="text-center sm:text-left">
+                        <p className="text-sm text-gray-600">
+                          Your order has been released. Please upload your deposit slip to complete payment.
+                        </p>
+                      </div>
+                      <div className="flex justify-center sm:justify-end gap-2">
+                        {pendingOrder.deposit_slip_url && (
+                          <button
+                            onClick={() => window.open(pendingOrder.deposit_slip_url, '_blank')}
+                            className="flex items-center space-x-2 px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors min-h-[44px] sm:min-h-0 w-full sm:w-auto justify-center"
+                          >
+                            <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                            </svg>
+                            <span className="text-sm sm:text-base">View</span>
+                          </button>
+                        )}
+                        <input
+                          type="file"
+                          id="deposit-slip-upload"
+                          accept="image/*"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0]
+                            if (file) {
+                              handlePhotoUpload(pendingOrder.id, file)
+                            }
+                          }}
+                          className="hidden"
+                          disabled={uploadingPhoto && uploadingOrderId === pendingOrder.id}
+                        />
+                        <label
+                          htmlFor="deposit-slip-upload"
+                          className={`flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors cursor-pointer min-h-[44px] sm:min-h-0 w-full sm:w-auto justify-center ${
+                            uploadingPhoto && uploadingOrderId === pendingOrder.id
+                              ? 'bg-gray-400 cursor-not-allowed'
+                              : currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                                currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                                currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                                'bg-blue-600 hover:bg-blue-700'
+                          }`}
+                        >
+                          {uploadingPhoto && uploadingOrderId === pendingOrder.id ? (
+                            <>
+                              <div className="animate-spin rounded-full h-4 w-4 sm:h-5 w-5 border-b-2 border-white"></div>
+                              <span className="text-sm sm:text-base">Uploading...</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                              </svg>
+                              <span className="text-sm sm:text-base">Upload Deposit Slip</span>
+                            </>
+                          )}
+                        </label>
+                      </div>
+                    </div>
+                  )}
                   {pendingOrder.status === 'approved' && (
-                    <div className="text-center">
+                    <div className="text-center w-full">
                       <p className="text-sm text-gray-600 mb-4">
                         You have an approved order. Please wait for it to be processed before creating a new order.
                       </p>
-              </div>
+                    </div>
+                  )}
+                  {pendingOrder.status === 'paid' && (
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
+                      <div className="text-center sm:text-left">
+                        <p className="text-sm text-gray-600">
+                          Payment received. Your order is being prepared for completion.
+                        </p>
+                      </div>
+                      <div className="flex justify-center sm:justify-end gap-2">
+                        {pendingOrder.deposit_slip_url && (
+                          <button
+                            onClick={() => window.open(pendingOrder.deposit_slip_url, '_blank')}
+                            className="flex items-center space-x-2 px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors min-h-[44px] sm:min-h-0 w-full sm:w-auto justify-center"
+                          >
+                            <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                            </svg>
+                            <span className="text-sm sm:text-base">View</span>
+                          </button>
+                        )}
+                        <input
+                          type="file"
+                          id="deposit-slip-reupload"
+                          accept="image/*"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0]
+                            if (file) {
+                              handlePhotoUpload(pendingOrder.id, file)
+                            }
+                          }}
+                          className="hidden"
+                          disabled={uploadingPhoto && uploadingOrderId === pendingOrder.id}
+                        />
+                        <label
+                          htmlFor="deposit-slip-reupload"
+                          className={`flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors cursor-pointer min-h-[44px] sm:min-h-0 w-full sm:w-auto justify-center ${
+                            uploadingPhoto && uploadingOrderId === pendingOrder.id
+                              ? 'bg-gray-400 cursor-not-allowed'
+                              : currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                                currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                                currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                                'bg-blue-600 hover:bg-blue-700'
+                          }`}
+                        >
+                          {uploadingPhoto && uploadingOrderId === pendingOrder.id ? (
+                            <>
+                              <div className="animate-spin rounded-full h-4 w-4 sm:h-5 w-5 border-b-2 border-white"></div>
+                              <span className="text-sm sm:text-base">Uploading...</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                              </svg>
+                              <span className="text-sm sm:text-base">Re-upload Deposit Slip</span>
+                            </>
+                          )}
+                        </label>
+                      </div>
+                    </div>
                   )}
                 </div>
               </div>
             ) : (
-              <div className="bg-white rounded-lg shadow-sm border p-8 text-center">
-                <ShoppingCart className={`mx-auto h-16 w-16 mb-4 ${
-                  currentTheme === 'green' ? 'text-green-400' :
-                  currentTheme === 'red' ? 'text-red-400' :
-                  currentTheme === 'yellow' ? 'text-yellow-400' :
-                  'text-blue-400'
-                }`} />
-                <h2 className="text-2xl font-bold text-gray-900 mb-2">No Pending Orders</h2>
-                <p className="text-gray-600 mb-6">You can start a new order by clicking the button below.</p>
-                <button
-                  onClick={startNewOrder}
-                  className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
-                    currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                    currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                    currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
-                    'bg-blue-600 hover:bg-blue-700'
-                  }`}
-                >
-                  <Plus className="h-4 w-4" />
-                  <span>Start New Order</span>
-                </button>
-              </div>
+              <>
+                {/* Released Orders with Balance */}
+                {pastOrders.filter(order => order.status === 'released').length > 0 && (
+                  <div className="bg-white rounded-lg shadow-sm border p-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold text-gray-900">Outstanding Balance</h3>
+                      <span className="text-sm text-gray-500">{pastOrders.filter(order => order.status === 'released').length} order(s)</span>
+                    </div>
+                    
+                    {pastOrders.filter(order => order.status === 'released').map((order) => (
+                      <div key={order.id} className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <h4 className="font-medium text-orange-900">Order #{order.id.slice(-8)}</h4>
+                            <p className="text-sm text-orange-700">
+                              Released on {new Date(order.created_at).toLocaleDateString()}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-2xl font-bold text-orange-900">₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                            <p className="text-sm text-orange-700">Balance Due</p>
+                          </div>
+                        </div>
+                        
+                        <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <div className="text-sm text-orange-700">
+                            <p>Please upload your deposit slip to complete payment</p>
+                          </div>
+                          <label className={`flex items-center justify-center space-x-2 px-3 py-2 sm:px-4 sm:py-2 text-white rounded-lg transition-colors cursor-pointer w-full sm:w-auto min-h-[44px] sm:min-h-0 ${
+                            currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700 active:bg-green-800' :
+                            currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700 active:bg-red-800' :
+                            currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700 active:bg-yellow-800' :
+                            'bg-blue-600 hover:bg-blue-700 active:bg-blue-800'
+                          }`}>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0]
+                                if (file) {
+                                  handlePhotoUpload(order.id, file)
+                                }
+                              }}
+                              className="hidden"
+                              disabled={uploadingPhoto && uploadingOrderId === order.id}
+                            />
+                            {uploadingPhoto && uploadingOrderId === order.id ? (
+                              <div className="animate-spin rounded-full h-4 w-4 sm:h-5 sm:w-5 border-b-2 border-white"></div>
+                            ) : (
+                              <>
+                                <svg className="h-4 w-4 sm:h-5 sm:w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <span className="text-sm font-medium">Upload Deposit Slip</span>
+                              </>
+                            )}
+                          </label>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* No Pending Orders */}
+                <div className="bg-white rounded-lg shadow-sm border p-8 text-center">
+                  <ShoppingCart className={`mx-auto h-16 w-16 mb-4 ${
+                    currentTheme === 'green' ? 'text-green-400' :
+                    currentTheme === 'red' ? 'text-red-400' :
+                    currentTheme === 'yellow' ? 'text-yellow-400' :
+                    'text-blue-400'
+                  }`} />
+                  <h2 className="text-2xl font-bold text-gray-900 mb-2">No Pending Orders</h2>
+                  <p className="text-gray-600 mb-6">You can start a new order by clicking the button below.</p>
+                  <button
+                    onClick={startNewOrder}
+                    className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
+                      currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                      currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                      currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                      'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    <Plus className="h-4 w-4" />
+                    <span>Start New Order</span>
+                  </button>
+                </div>
+              </>
             )}
             </div>
           )}
@@ -1231,7 +1655,12 @@ export default function OrderPage() {
                 <div className="space-y-6">
                   {Object.entries(getProductsByCategory()).map(([category, categoryProducts]) => (
                     <div key={category}>
-                      <h3 className="text-sm font-semibold text-gray-700 mb-3 px-2 border-l-4 border-gray-300">
+                      <h3 className={`text-sm font-semibold mb-3 px-4 py-3 border-l-4 rounded-r-md ${
+                        currentTheme === 'green' ? 'border-green-500 bg-green-100 text-green-800' :
+                        currentTheme === 'red' ? 'border-red-500 bg-red-100 text-red-800' :
+                        currentTheme === 'yellow' ? 'border-yellow-500 bg-yellow-100 text-yellow-800' :
+                        'border-blue-500 bg-blue-100 text-blue-800'
+                      }`}>
                         {category}
                       </h3>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
@@ -1256,7 +1685,7 @@ export default function OrderPage() {
                                   <span className="text-xs sm:text-sm text-gray-500">{product.unit}</span>
                                 </div>
                               </div>
-                              <p className="text-base sm:text-lg font-semibold text-green-600 mb-2 sm:mb-3">₱{(product.price || 0).toFixed(2)}</p>
+                              <p className="text-base sm:text-lg font-semibold text-green-600 mb-2 sm:mb-3">₱{(product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                               <div className="flex justify-between items-center min-w-0">
                                 <span className={`text-xs sm:text-sm font-medium ${availableStock > 0 ? 'text-green-600' : 'text-red-600'}`}>
                                   Stock: {availableStock}
@@ -1308,7 +1737,7 @@ export default function OrderPage() {
                           }`}>
                             <div className="flex-1">
                               <p className="text-sm font-medium">{item.product.product_name || item.product.name}</p>
-                              <p className="text-xs text-gray-500">₱{(item.product.price || 0).toFixed(2)} per {item.product.unit}</p>
+                              <p className="text-xs text-gray-500">₱{(item.product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {item.product.unit}</p>
                               <div className="flex items-center space-x-2 mt-1">
                                 <button
                                   onClick={() => updateCartQuantity(item.product_id, item.quantity - 1)}
@@ -1328,7 +1757,7 @@ export default function OrderPage() {
                                 </button>
                             </div>
                               <p className={`text-xs mt-1 ${hasIssue ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-                                Max: {availableStock} | Total: ₱{((item.product.price || 0) * item.quantity).toFixed(2)}
+                                Max: {availableStock} | Total: ₱{((item.product.price || 0) * item.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </p>
                             </div>
                             <button
@@ -1343,10 +1772,68 @@ export default function OrderPage() {
                       </div>
                     
                     <div className="border-t pt-4">
-                      <div className="flex justify-between items-center mb-4">
-                        <span className="font-medium">Total:</span>
-                        <span className="font-semibold text-green-600 text-lg">₱{calculateTotal().toFixed(2)}</span>
-                    </div>
+                      {/* Delivery Type Selection */}
+                      <div className="mb-4">
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Delivery Type</label>
+                        <div className="flex space-x-4">
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="deliveryType"
+                              value="delivery"
+                              checked={deliveryType === 'delivery'}
+                              onChange={(e) => setDeliveryType(e.target.value as 'delivery')}
+                              className="mr-2"
+                            />
+                            <span className="text-sm">Delivery (+₱500)</span>
+                          </label>
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="deliveryType"
+                              value="pickup"
+                              checked={deliveryType === 'pickup'}
+                              onChange={(e) => setDeliveryType(e.target.value as 'pickup')}
+                              className="mr-2"
+                            />
+                            <span className="text-sm">Pickup (5% off)</span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Subtotal and Total */}
+                      <div className="space-y-2 mb-4">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Subtotal:</span>
+                          <span className="text-sm text-gray-600">₱{calculateSubtotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                        {deliveryType === 'delivery' && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-600">Delivery Fee:</span>
+                            {calculateSubtotal() >= 10000 ? (
+                              <span className="text-sm text-green-600">FREE (Order over ₱10k)</span>
+                            ) : (
+                              <span className="text-sm text-gray-600">+₱500.00</span>
+                            )}
+                          </div>
+                        )}
+                        {deliveryType === 'pickup' && calculateSubtotal() >= 10000 && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
+                            <span className="text-sm text-green-600">-₱{(calculateSubtotal() * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                          </div>
+                        )}
+                        {deliveryType === 'pickup' && calculateSubtotal() < 10000 && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-500">Pickup Discount:</span>
+                            <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between items-center border-t pt-2">
+                          <span className="font-medium">Total:</span>
+                          <span className="font-semibold text-green-600 text-lg">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                      </div>
                       
                       <button
                         onClick={() => setShowCartModal(true)}
@@ -1373,8 +1860,8 @@ export default function OrderPage() {
           <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg z-40">
             <div className="px-2 py-2">
               <div className="flex justify-between items-center mb-2 min-w-0">
-                <span className="font-medium text-sm truncate">Items: {calculateItemCount()}</span>
-                <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toFixed(2)}</span>
+                <span className="font-medium text-sm truncate">Items: {calculateItemCount()} • {deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
               <button
                 onClick={() => setShowCartModal(true)}
@@ -1412,7 +1899,12 @@ export default function OrderPage() {
                 <div className="space-y-6">
                   {Object.entries(getProductsByCategory()).map(([category, categoryProducts]) => (
                     <div key={category}>
-                      <h3 className="text-sm font-semibold text-gray-700 mb-3 px-2 border-l-4 border-gray-300">
+                      <h3 className={`text-sm font-semibold mb-3 px-4 py-3 border-l-4 rounded-r-md ${
+                        currentTheme === 'green' ? 'border-green-500 bg-green-100 text-green-800' :
+                        currentTheme === 'red' ? 'border-red-500 bg-red-100 text-red-800' :
+                        currentTheme === 'yellow' ? 'border-yellow-500 bg-yellow-100 text-yellow-800' :
+                        'border-blue-500 bg-blue-100 text-blue-800'
+                      }`}>
                         {category}
                       </h3>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
@@ -1437,7 +1929,7 @@ export default function OrderPage() {
                                   <span className="text-xs sm:text-sm text-gray-500">{product.unit}</span>
                           </div>
                         </div>
-                              <p className="text-base sm:text-lg font-semibold text-green-600 mb-2 sm:mb-3">₱{(product.price || 0).toFixed(2)}</p>
+                              <p className="text-base sm:text-lg font-semibold text-green-600 mb-2 sm:mb-3">₱{(product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                               <div className="flex justify-between items-center min-w-0">
                                 <span className={`text-xs sm:text-sm font-medium ${availableStock > 0 ? 'text-green-600' : 'text-red-600'}`}>
                                   Stock: {availableStock}
@@ -1489,7 +1981,7 @@ export default function OrderPage() {
                           }`}>
                           <div className="flex-1">
                             <p className="text-sm font-medium">{item.product.product_name || item.product.name}</p>
-                            <p className="text-xs text-gray-500">₱{(item.product.price || 0).toFixed(2)} per {item.product.unit}</p>
+                            <p className="text-xs text-gray-500">₱{(item.product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {item.product.unit}</p>
                             <div className="flex items-center space-x-2 mt-1">
                               <button
                                   onClick={() => updateCartQuantity(item.product_id, item.quantity - 1)}
@@ -1509,7 +2001,7 @@ export default function OrderPage() {
                               </button>
                             </div>
                               <p className={`text-xs mt-1 ${hasIssue ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-                              Max: {availableStock} | Total: ₱{((item.product.price || 0) * item.quantity).toFixed(2)}
+                              Max: {availableStock} | Total: ₱{((item.product.price || 0) * item.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </p>
                           </div>
                           <button
@@ -1526,7 +2018,7 @@ export default function OrderPage() {
                   <div className="border-t pt-4">
                     <div className="flex justify-between items-center mb-4">
                         <span className="font-medium">Total:</span>
-                        <span className="font-semibold text-green-600 text-lg">₱{calculateTotal().toFixed(2)}</span>
+                        <span className="font-semibold text-green-600 text-lg">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                     
                     <button
@@ -1539,7 +2031,7 @@ export default function OrderPage() {
                       }`}
                     >
                         <Edit3 className="h-5 w-5" />
-                        <span>View Draft & Update</span>
+                        <span>View Changes</span>
                     </button>
                   </div>
                 </>
@@ -1554,8 +2046,8 @@ export default function OrderPage() {
           <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg z-40">
             <div className="px-2 py-2">
               <div className="flex justify-between items-center mb-2 min-w-0">
-                <span className="font-medium text-sm truncate">Draft: {calculateItemCount()} items</span>
-                <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toFixed(2)}</span>
+                <span className="font-medium text-sm truncate">Draft: {calculateItemCount()} items • {deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
               <button
                 onClick={() => setShowCartModal(true)}
@@ -1567,7 +2059,7 @@ export default function OrderPage() {
                 }`}
               >
                 <Edit3 className="h-3 w-3 sm:h-4 sm:w-4 flex-shrink-0" />
-                <span className="truncate">View Draft & Update</span>
+                <span className="truncate">View Changes</span>
               </button>
       </div>
           </div>
@@ -1612,7 +2104,7 @@ export default function OrderPage() {
                       }`}>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-gray-900 truncate">{item.product.product_name || item.product.name}</p>
-                          <p className="text-xs text-gray-500">₱{(item.product.price || 0).toFixed(2)} per {item.product.unit}</p>
+                          <p className="text-xs text-gray-500">₱{(item.product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {item.product.unit}</p>
                           <div className="flex items-center space-x-2 mt-1">
                           <button
                               onClick={() => updateCartQuantity(item.product_id, item.quantity - 1)}
@@ -1632,7 +2124,7 @@ export default function OrderPage() {
                           </button>
                         </div>
                           <p className={`text-xs mt-1 ${hasIssue ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-                            Max: {availableStock} | Total: ₱{((item.product.price || 0) * item.quantity).toFixed(2)}
+                            Max: {availableStock} | Total: ₱{((item.product.price || 0) * item.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </p>
                           </div>
                           <button
@@ -1651,9 +2143,67 @@ export default function OrderPage() {
             {/* Modal Footer */}
             {cartItems.length > 0 && (
               <div className="p-3 sm:p-4 border-t bg-gray-50">
-                <div className="flex justify-between items-center mb-3 sm:mb-4 min-w-0">
-                  <span className="font-medium text-sm sm:text-base">Total:</span>
-                  <span className="font-semibold text-green-600 text-base sm:text-lg flex-shrink-0 ml-2">₱{calculateTotal().toFixed(2)}</span>
+                {/* Delivery Type Selection */}
+                <div className="mb-3 sm:mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Delivery Type</label>
+                  <div className="flex space-x-4">
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name="deliveryTypeModal"
+                        value="delivery"
+                        checked={deliveryType === 'delivery'}
+                        onChange={(e) => setDeliveryType(e.target.value as 'delivery')}
+                        className="mr-2"
+                      />
+                      <span className="text-sm">Delivery (+₱500)</span>
+                    </label>
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name="deliveryTypeModal"
+                        value="pickup"
+                        checked={deliveryType === 'pickup'}
+                        onChange={(e) => setDeliveryType(e.target.value as 'pickup')}
+                        className="mr-2"
+                      />
+                      <span className="text-sm">Pickup (5% off)</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Subtotal and Total */}
+                <div className="space-y-2 mb-3 sm:mb-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-gray-600">Subtotal:</span>
+                    <span className="text-sm text-gray-600">₱{calculateSubtotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                  {deliveryType === 'delivery' && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Delivery Fee:</span>
+                      {calculateSubtotal() >= 10000 ? (
+                        <span className="text-sm text-green-600">FREE (Order over ₱10k)</span>
+                      ) : (
+                        <span className="text-sm text-gray-600">+₱500.00</span>
+                      )}
+                    </div>
+                  )}
+                  {deliveryType === 'pickup' && calculateSubtotal() >= 10000 && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
+                      <span className="text-sm text-green-600">-₱{(calculateSubtotal() * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                  )}
+                  {deliveryType === 'pickup' && calculateSubtotal() < 10000 && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-500">Pickup Discount:</span>
+                      <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center border-t pt-2">
+                    <span className="font-medium text-sm sm:text-base">Total:</span>
+                    <span className="font-semibold text-green-600 text-base sm:text-lg flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
                 </div>
                 
                 {error && (
@@ -1752,12 +2302,16 @@ export default function OrderPage() {
                           <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                             order.status === 'released' 
                               ? 'bg-green-100 text-green-800' 
+                              : order.status === 'paid'
+                              ? 'bg-blue-100 text-blue-800'
+                              : order.status === 'complete'
+                              ? 'bg-purple-100 text-purple-800'
                               : 'bg-red-100 text-red-800'
                           }`}>
                             {order.status.charAt(0).toUpperCase() + order.status.slice(1)}
                           </span>
                           <p className="text-lg font-semibold text-gray-900 mt-1">
-                            ₱{order.total_amount.toFixed(2)}
+                            ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </p>
                         </div>
                       </div>
@@ -1767,25 +2321,38 @@ export default function OrderPage() {
                           <div key={detail.id} className="flex justify-between items-center text-sm">
                             <span className="text-gray-900">{detail.products.name}</span>
                             <span className="text-gray-600">
-                              {detail.quantity} × ₱{detail.unit_price.toFixed(2)} = ₱{(detail.quantity * detail.unit_price).toFixed(2)}
+                              {detail.quantity} × ₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} = ₱{(detail.quantity * detail.unit_price).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </span>
                           </div>
                         ))}
                       </div>
                       
                       <div className="mt-4 pt-3 border-t border-gray-200">
-                        <button
-                          onClick={() => printReceipt(order)}
-                          className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                            currentTheme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
-                            currentTheme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
-                            currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
-                            'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                          }`}
-                        >
-                          <Printer className="h-4 w-4" />
-                          <span>Print Receipt</span>
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => printReceipt(order)}
+                            className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                              currentTheme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
+                              currentTheme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
+                              currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
+                              'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                            }`}
+                          >
+                            <Printer className="h-4 w-4" />
+                            <span>Print Receipt</span>
+                          </button>
+                          
+                          {order.status === 'paid' && order.deposit_slip_url && (
+                            <a
+                              href={order.deposit_slip_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+                            >
+                              <span>View Deposit Slip</span>
+                            </a>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}

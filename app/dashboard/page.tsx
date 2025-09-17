@@ -4,15 +4,16 @@ import { BrandSelector } from '../components/BrandSelector'
 import { ProductManager } from '../components/ProductManager'
 import { OrderManager } from '../components/OrderManager'
 import { BranchManager } from '../components/BranchManager'
-import StockReport from '../components/StockReport'
+import { BillingManager } from '../components/BillingManager'
+import { LogisticsManager } from '../components/LogisticsManager'
 import { Brand } from '../../lib/supabase'
-import { Lock, Unlock, Package, ShoppingCart, MapPin, Calendar } from 'lucide-react'
+import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck } from 'lucide-react'
 
 export default function DashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [passcode, setPasscode] = useState('')
   const [selectedBrand, setSelectedBrand] = useState<Brand | null>(null)
-  const [activeTab, setActiveTab] = useState<'products' | 'orders' | 'branches' | 'reports'>('products')
+  const [activeTab, setActiveTab] = useState<'products' | 'orders' | 'branches' | 'billing' | 'logistics'>('products')
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [initialLoading, setInitialLoading] = useState(true)
@@ -40,8 +41,8 @@ export default function DashboardPage() {
         }
       }
       
-      if (savedTab && ['products', 'orders', 'branches', 'reports'].includes(savedTab)) {
-        setActiveTab(savedTab as 'products' | 'orders' | 'branches' | 'reports')
+      if (savedTab && ['products', 'orders', 'branches', 'billing', 'logistics'].includes(savedTab)) {
+        setActiveTab(savedTab as 'products' | 'orders' | 'branches' | 'billing' | 'logistics')
       }
       
       // Add a minimum loading time to prevent flash
@@ -203,7 +204,7 @@ export default function DashboardPage() {
                   currentTheme === 'yellow' ? 'text-yellow-600' :
                   'text-blue-600'
                 }`} />
-                <h1 className="text-2xl font-bold text-gray-900">Inventory Dashboard</h1>
+                <h1 className="text-2xl font-bold text-gray-900">GFC Portal</h1>
                 {selectedBrand && (
                   <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                     currentTheme === 'green' ? 'bg-green-100 text-green-800' :
@@ -293,13 +294,13 @@ export default function DashboardPage() {
               >
                 <div className="flex items-center space-x-2">
                   <MapPin className="h-4 w-4" />
-                  <span>Branch Manager</span>
+                  <span>Branches</span>
                 </div>
               </button>
               <button
-                onClick={() => setActiveTab('reports')}
+                onClick={() => setActiveTab('billing')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'reports'
+                  activeTab === 'billing'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
                       currentTheme === 'yellow' ? 'border-yellow-500 text-yellow-600' :
@@ -308,8 +309,24 @@ export default function DashboardPage() {
                 }`}
               >
                 <div className="flex items-center space-x-2">
-                  <Calendar className="h-4 w-4" />
-                  <span>Stock Reports</span>
+                  <CreditCard className="h-4 w-4" />
+                  <span>Billing</span>
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab('logistics')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'logistics'
+                    ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
+                      currentTheme === 'red' ? 'border-red-500 text-red-600' :
+                      currentTheme === 'yellow' ? 'border-yellow-500 text-yellow-600' :
+                      'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <div className="flex items-center space-x-2">
+                  <Truck className="h-4 w-4" />
+                  <span>Logistics</span>
                 </div>
               </button>
                   </nav>
@@ -335,7 +352,7 @@ export default function DashboardPage() {
           
           {activeTab === 'branches' && selectedBrand && (
             <div className="p-6">
-              <BranchManager selectedBrand={selectedBrand} theme={currentTheme} />
+              <BranchManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} />
             </div>
           )}
           
@@ -346,11 +363,32 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {activeTab === 'reports' && (
+          {activeTab === 'billing' && selectedBrand && (
             <div className="p-6">
-              <StockReport selectedBrand={selectedBrand} theme={currentTheme} />
+              <BillingManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} />
             </div>
           )}
+          
+          {!selectedBrand && activeTab === 'billing' && (
+            <div className="p-6 text-center py-12">
+              <CreditCard className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+              <p className="text-gray-600">Please select a brand to manage billing</p>
+            </div>
+          )}
+
+          {activeTab === 'logistics' && selectedBrand && (
+            <div className="p-6">
+              <LogisticsManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} />
+            </div>
+          )}
+          
+          {!selectedBrand && activeTab === 'logistics' && (
+            <div className="p-6 text-center py-12">
+              <Truck className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+              <p className="text-gray-600">Please select a brand to manage logistics</p>
+            </div>
+          )}
+
           
           {!selectedBrand && activeTab === 'products' && (
             <div className="p-6 text-center py-12">

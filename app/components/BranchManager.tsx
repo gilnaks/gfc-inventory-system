@@ -11,6 +11,7 @@ interface Location {
   brand_id: string
   franchisee?: string
   contact_number?: string
+  company_owned?: boolean
   created_at: string
   updated_at: string
   brand?: {
@@ -27,6 +28,7 @@ interface CustomerOrder {
   customer_name: string
   status: string
   total_amount: number
+  delivery_type: 'delivery' | 'pickup'
   created_at: string
   updated_at: string
   notes?: string
@@ -45,6 +47,7 @@ interface CustomerOrder {
       name: string
       sku?: string
       unit: string
+      category?: string
     }
   }>
 }
@@ -63,11 +66,14 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
   const [selectedLocation, setSelectedLocation] = useState<Location | null>(null)
   const [locationOrders, setLocationOrders] = useState<CustomerOrder[]>([])
   const [showOrderHistory, setShowOrderHistory] = useState(false)
+  const [showOrderDetails, setShowOrderDetails] = useState(false)
+  const [selectedOrder, setSelectedOrder] = useState<CustomerOrder | null>(null)
   const [newLocation, setNewLocation] = useState({
     name: '',
     passkey: '',
     franchisee: '',
     contact_number: '',
+    company_owned: false,
     brand_id: selectedBrand?.id || ''
   })
 
@@ -77,8 +83,45 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
       fetchBrands()
       // Update newLocation brand_id when selectedBrand changes
       setNewLocation(prev => ({ ...prev, brand_id: selectedBrand.id }))
+      
+      // Reset order history view when brand changes
+      setShowOrderHistory(false)
+      setSelectedLocation(null)
+      setLocationOrders([])
+      setShowOrderDetails(false)
+      setSelectedOrder(null)
     }
   }, [selectedBrand])
+
+  // Realtime subscription for order updates
+  useEffect(() => {
+    if (!selectedBrand) return
+
+    const channel = supabase
+      .channel('branch-orders-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'customer_orders',
+          filter: `brand_id=eq.${selectedBrand.id}`
+        },
+        (payload) => {
+          console.log('Branch orders realtime update:', payload)
+          
+          // Refresh location orders if we're viewing order history
+          if (showOrderHistory && selectedLocation) {
+            fetchLocationOrders(selectedLocation.id)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [selectedBrand, showOrderHistory, selectedLocation])
 
   const fetchLocations = async () => {
     if (!selectedBrand) return
@@ -151,7 +194,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
       if (data) {
         setLocations([...locations, data[0]])
-        setNewLocation({ name: '', passkey: '', franchisee: '', contact_number: '', brand_id: selectedBrand?.id || '' })
+        setNewLocation({ name: '', passkey: '', franchisee: '', contact_number: '', company_owned: false, brand_id: selectedBrand?.id || '' })
         setShowAddForm(false)
       }
     } catch (error) {
@@ -169,6 +212,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
           passkey: location.passkey,
           franchisee: location.franchisee,
           contact_number: location.contact_number,
+          company_owned: location.company_owned,
           brand_id: location.brand_id,
           updated_at: new Date().toISOString()
         })
@@ -228,7 +272,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
           brand:brands(*),
           order_details(
             *,
-            product:products(id, name, sku, unit)
+            product:products(id, name, sku, unit, category)
           )
         `)
         .eq('location_id', locationId)
@@ -257,6 +301,18 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
   const calculateTotalRevenue = (orders: CustomerOrder[]) => {
     return orders.reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  const calculateTotalPaid = (orders: CustomerOrder[]) => {
+    return orders
+      .filter(order => order.status === 'paid' || order.status === 'complete')
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  const calculateTotalReceivable = (orders: CustomerOrder[]) => {
+    return orders
+      .filter(order => order.status === 'released')
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
   }
 
   const copyToClipboard = async (text: string) => {
@@ -297,6 +353,31 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
   const getTotalAmount = (order: CustomerOrder) => {
     return order.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0)
+  }
+
+  const getSubtotalAmount = (order: CustomerOrder) => {
+    return order.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0)
+  }
+
+  const getCategoryTotals = (order: CustomerOrder) => {
+    const categoryMap = new Map<string, { category: string; totalQuantity: number; totalAmount: number }>()
+    
+    order.order_details.forEach(detail => {
+      const category = detail.product?.category || 'Uncategorized'
+      const existing = categoryMap.get(category) || { category, totalQuantity: 0, totalAmount: 0 }
+      
+      existing.totalQuantity += detail.quantity
+      existing.totalAmount += detail.unit_price * detail.quantity
+      
+      categoryMap.set(category, existing)
+    })
+    
+    return Array.from(categoryMap.values())
+  }
+
+  const handleViewDetails = (order: CustomerOrder) => {
+    setSelectedOrder(order)
+    setShowOrderDetails(true)
   }
 
   const handlePrintReceipt = (order: CustomerOrder) => {
@@ -582,7 +663,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
           <div class="receipt-container">
           <div class="header">
               <div class="company-name">${order.brand?.name || 'Company'}</div>
-              <div class="receipt-title">Order Receipt</div>
+              <div class="receipt-title">Stock Transfer Sheet</div>
           </div>
           
           <div class="order-info">
@@ -602,6 +683,10 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 <div class="info-item">
                   <span class="info-label">Franchisee</span>
                   <span class="info-value">${order.location?.franchisee || 'N/A'}</span>
+                </div>
+                <div class="info-item">
+                  <span class="info-label">Logistics</span>
+                  <span class="info-value">${order.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}</span>
                 </div>
               </div>
           </div>
@@ -626,8 +711,8 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                     </div>
                   </div>
                   <div class="item-quantity">${detail.quantity} ${detail.product.unit}</div>
-                  <div class="item-unit-price">₱${detail.unit_price.toFixed(2)}</div>
-                  <div class="item-price">₱${(detail.unit_price * detail.quantity).toFixed(2)}</div>
+                  <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                 </div>
               `).join('')}
           </div>
@@ -640,13 +725,37 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             ` : ''}
             
             <div class="total-section">
+              ${getCategoryTotals(order).map(categoryTotal => `
+                <div class="total-row">
+                  <span class="total-label">${categoryTotal.category}: ${categoryTotal.totalQuantity} items</span>
+                  <span class="total-value">₱${categoryTotal.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                </div>
+              `).join('')}
               <div class="total-row">
-                <span class="total-label">Total Items</span>
-                <span class="total-value">${getTotalItems(order)}</span>
+                <span class="total-label">Subtotal</span>
+                <span class="total-value">₱${getSubtotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
+              ${order.delivery_type === 'delivery' ? `
+                <div class="total-row">
+                  <span class="total-label">Delivery Fee</span>
+                  <span class="total-value">${getSubtotalAmount(order) >= 10000 ? 'FREE (Order over ₱10k)' : '+₱500.00'}</span>
+                </div>
+              ` : ''}
+              ${order.delivery_type === 'pickup' && getSubtotalAmount(order) >= 10000 ? `
+                <div class="total-row">
+                  <span class="total-label">Pickup Discount (5%)</span>
+                  <span class="total-value">-₱${(getSubtotalAmount(order) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                </div>
+              ` : ''}
+              ${order.delivery_type === 'pickup' && getSubtotalAmount(order) < 10000 ? `
+                <div class="total-row">
+                  <span class="total-label">Pickup Discount</span>
+                  <span class="total-value">Not available (Order under ₱10k)</span>
+                </div>
+              ` : ''}
               <div class="total-row grand-total">
                 <span class="total-label">Total Amount</span>
-                <span class="total-value">₱${getTotalAmount(order).toFixed(2)}</span>
+                <span class="total-value">₱${order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
           </div>
           
@@ -696,15 +805,15 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             </div>
             <div className="bg-green-50 p-4 rounded-lg">
               <p className="text-sm text-green-600 font-medium">Total Revenue</p>
-              <p className="text-2xl font-bold text-green-900">₱{calculateTotalRevenue(locationOrders).toFixed(2)}</p>
+              <p className="text-2xl font-bold text-green-900">₱{calculateTotalRevenue(locationOrders).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
             </div>
             <div className="bg-purple-50 p-4 rounded-lg">
-              <p className="text-sm text-purple-600 font-medium">Franchisee</p>
-              <p className="text-lg font-semibold text-purple-900">{selectedLocation.franchisee || 'N/A'}</p>
+              <p className="text-sm text-purple-600 font-medium">Total Paid</p>
+              <p className="text-2xl font-bold text-purple-900">₱{calculateTotalPaid(locationOrders).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
             </div>
             <div className="bg-orange-50 p-4 rounded-lg">
-              <p className="text-sm text-orange-600 font-medium">Contact</p>
-              <p className="text-lg font-semibold text-orange-900">{selectedLocation.contact_number || 'N/A'}</p>
+              <p className="text-sm text-orange-600 font-medium">Total Receivable</p>
+              <p className="text-2xl font-bold text-orange-900">₱{calculateTotalReceivable(locationOrders).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
             </div>
           </div>
         </div>
@@ -753,19 +862,26 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         {new Date(order.created_at).toLocaleDateString()}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {order.customer_name}
+                        {selectedLocation.name}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         {getStatusBadge(order.status)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-green-600">
-                        ₱{order.total_amount.toFixed(2)}
+                        ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         {order.order_details?.length || 0} items
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         <div className="flex space-x-2">
+                          <button
+                            onClick={() => handleViewDetails(order)}
+                            className="p-1 rounded text-blue-600 hover:text-blue-900 hover:bg-blue-50 transition-all duration-200 ease-in-out"
+                            title="View Details"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
                           <button
                             onClick={() => handlePrintReceipt(order)}
                             className="p-1 rounded text-blue-600 hover:text-blue-900 hover:bg-blue-50 transition-all duration-200 ease-in-out"
@@ -792,6 +908,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
       <div className="flex justify-between items-center">
         <div>
           <h3 className="text-xl font-semibold text-gray-900">Branch Manager</h3>
+          <p className="text-gray-600">Manage branch locations and view order history</p>
         </div>
         <button
           onClick={() => setShowAddForm(true)}
@@ -826,19 +943,30 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Branch Name *
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={newLocation.name}
-                  onChange={(e) => setNewLocation({...newLocation, name: e.target.value})}
-                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
-                    theme === 'green' ? 'focus:ring-green-500' :
-                    theme === 'red' ? 'focus:ring-red-500' :
-                    theme === 'yellow' ? 'focus:ring-yellow-500' :
-                    'focus:ring-blue-500'
-                  }`}
-                  placeholder="Enter branch name"
-                />
+                <div className="flex items-center space-x-3">
+                  <input
+                    type="text"
+                    required
+                    value={newLocation.name}
+                    onChange={(e) => setNewLocation({...newLocation, name: e.target.value})}
+                    className={`flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
+                      theme === 'green' ? 'focus:ring-green-500' :
+                      theme === 'red' ? 'focus:ring-red-500' :
+                      theme === 'yellow' ? 'focus:ring-yellow-500' :
+                      'focus:ring-blue-500'
+                    }`}
+                    placeholder="Enter branch name"
+                  />
+                  <label className="flex items-center space-x-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={newLocation.company_owned}
+                      onChange={(e) => setNewLocation({...newLocation, company_owned: e.target.checked})}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <span>Company Owned</span>
+                  </label>
+                </div>
               </div>
               
               <div>
@@ -861,42 +989,44 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 />
               </div>
               
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Franchisee Name *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newLocation.franchisee}
-                  onChange={(e) => setNewLocation({...newLocation, franchisee: e.target.value})}
-                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
-                    theme === 'green' ? 'focus:ring-green-500' :
-                    theme === 'red' ? 'focus:ring-red-500' :
-                    theme === 'yellow' ? 'focus:ring-yellow-500' :
-                    'focus:ring-blue-500'
-                  }`}
-                  placeholder="Enter franchisee name"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Contact Number *
-                </label>
-                <input
-                  type="tel"
-                  required
-                  value={newLocation.contact_number}
-                  onChange={(e) => setNewLocation({...newLocation, contact_number: e.target.value})}
-                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
-                    theme === 'green' ? 'focus:ring-green-500' :
-                    theme === 'red' ? 'focus:ring-red-500' :
-                    theme === 'yellow' ? 'focus:ring-yellow-500' :
-                    'focus:ring-blue-500'
-                  }`}
-                  placeholder="Enter contact number"
-                />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Franchisee Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newLocation.franchisee}
+                    onChange={(e) => setNewLocation({...newLocation, franchisee: e.target.value})}
+                    className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
+                      theme === 'green' ? 'focus:ring-green-500' :
+                      theme === 'red' ? 'focus:ring-red-500' :
+                      theme === 'yellow' ? 'focus:ring-yellow-500' :
+                      'focus:ring-blue-500'
+                    }`}
+                    placeholder="Enter franchisee name"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Contact Number *
+                  </label>
+                  <input
+                    type="tel"
+                    required
+                    value={newLocation.contact_number}
+                    onChange={(e) => setNewLocation({...newLocation, contact_number: e.target.value})}
+                    className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
+                      theme === 'green' ? 'focus:ring-green-500' :
+                      theme === 'red' ? 'focus:ring-red-500' :
+                      theme === 'yellow' ? 'focus:ring-yellow-500' :
+                      'focus:ring-blue-500'
+                    }`}
+                    placeholder="Enter contact number"
+                  />
+                </div>
               </div>
               
               <div className="flex justify-end space-x-3 pt-4">
@@ -947,6 +1077,9 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Contact
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Type
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Actions
@@ -1019,6 +1152,27 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         location.contact_number || 'N/A'
                       )}
                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {editingLocation?.id === location.id ? (
+                        <label className="flex items-center space-x-2">
+                          <input
+                            type="checkbox"
+                            checked={editingLocation.company_owned || false}
+                            onChange={(e) => setEditingLocation({...editingLocation, company_owned: e.target.checked})}
+                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                          />
+                          <span className="text-xs text-gray-600">Company Owned</span>
+                        </label>
+                      ) : (
+                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                          location.company_owned 
+                            ? 'bg-blue-100 text-blue-800' 
+                            : 'bg-gray-100 text-gray-800'
+                        }`}>
+                          {location.company_owned ? 'Company Owned' : 'Franchise'}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       <div className="flex space-x-2">
                         {editingLocation?.id === location.id ? (
@@ -1059,7 +1213,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                             </button>
                             <button
                               onClick={() => handleViewOrderHistory(location)}
-                              className="p-1 rounded text-green-600 hover:text-green-900 hover:bg-green-50 transition-all duration-200 ease-in-out"
+                              className="p-1 rounded text-blue-600 hover:text-blue-900 hover:bg-blue-50 transition-all duration-200 ease-in-out"
                               title="View Order History"
                             >
                               <Eye className="h-4 w-4" />
@@ -1079,6 +1233,178 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Order Details Modal */}
+      {showOrderDetails && selectedOrder && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Order Details #{selectedOrder.id.slice(0, 8)}
+              </h3>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => handlePrintReceipt(selectedOrder)}
+                  className={`flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium ${
+                    theme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
+                    theme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
+                    theme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
+                    'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  }`}
+                >
+                  <Printer className="h-4 w-4" />
+                  <span>Print Transfer Sheet</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setShowOrderDetails(false)
+                    setSelectedOrder(null)
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-6 w-6" />
+                </button>
+              </div>
+            </div>
+
+            {/* Order Information */}
+            <div className="space-y-6">
+              {/* Order Header */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Created Date</p>
+                    <p className="text-sm font-semibold text-gray-900 mt-1">{formatPhilippinesDateTime(selectedOrder.created_at, { dateStyle: 'short', timeStyle: 'short' })}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Status</p>
+                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
+                      selectedOrder.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                      selectedOrder.status === 'approved' ? 'bg-blue-100 text-blue-800' :
+                      selectedOrder.status === 'released' ? 'bg-orange-100 text-orange-800' :
+                      selectedOrder.status === 'paid' ? 'bg-purple-100 text-purple-800' :
+                      selectedOrder.status === 'complete' ? 'bg-indigo-100 text-indigo-800' :
+                      'bg-gray-100 text-gray-800'
+                    }`}>
+                      {selectedOrder.status.charAt(0).toUpperCase() + selectedOrder.status.slice(1)}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Logistics</p>
+                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
+                      selectedOrder.delivery_type === 'delivery' 
+                        ? 'bg-blue-100 text-blue-800' 
+                        : 'bg-green-100 text-green-800'
+                    }`}>
+                      {selectedOrder.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Location</p>
+                    <p className="text-sm font-semibold text-gray-900 mt-1">{selectedOrder.location?.name || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide">Total Amount</p>
+                    <p className="text-sm font-semibold text-gray-900 mt-1">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  </div>
+                </div>
+                <div className="mt-4 pt-4 border-t border-gray-200">
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Category Totals</p>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                      {getCategoryTotals(selectedOrder).map((categoryTotal, index) => (
+                        <div key={index} className="bg-white rounded p-2 border text-center">
+                          <p className="text-xs font-medium text-gray-900">{categoryTotal.category}</p>
+                          <p className="text-xs text-gray-600">{categoryTotal.totalQuantity} items</p>
+                          <p className="text-xs font-semibold text-green-600">₱{categoryTotal.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Pricing Breakdown */}
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Pricing Breakdown</p>
+                    <div className="bg-white rounded p-3 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-600">Subtotal:</span>
+                        <span className="text-sm text-gray-900">₱{getSubtotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+                      {selectedOrder.delivery_type === 'delivery' && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Delivery Fee:</span>
+                          {getSubtotalAmount(selectedOrder) >= 10000 ? (
+                            <span className="text-sm text-green-600">FREE (Order over ₱10k)</span>
+                          ) : (
+                            <span className="text-sm text-gray-900">+₱500.00</span>
+                          )}
+                        </div>
+                      )}
+                      {selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) >= 10000 && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
+                          <span className="text-sm text-green-600">-₱{(getSubtotalAmount(selectedOrder) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                      )}
+                      {selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) < 10000 && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-500">Pickup Discount:</span>
+                          <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between items-center border-t pt-2">
+                        <span className="text-sm font-semibold text-gray-900">Total Amount:</span>
+                        <span className="text-sm font-semibold text-green-600">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Notes */}
+              {selectedOrder.notes && (
+                <div className="bg-white border rounded-lg p-4">
+                  <h4 className="text-sm font-semibold text-gray-900 mb-2">Notes</h4>
+                  <p className="text-sm text-gray-600">{selectedOrder.notes}</p>
+                </div>
+              )}
+
+              {/* Order Items */}
+              <div className="bg-white border rounded-lg overflow-hidden">
+                <div className="px-4 py-3 bg-gray-50 border-b">
+                  <h4 className="text-sm font-semibold text-gray-900">Order Items</h4>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Price</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {selectedOrder.order_details?.map((detail, index) => (
+                        <tr key={index}>
+                          <td className="px-4 py-2 text-sm text-gray-900">{detail.product?.name || 'N/A'}</td>
+                          <td className="px-4 py-2 text-sm text-gray-500">{detail.product?.sku || 'N/A'}</td>
+                          <td className="px-4 py-2 text-sm text-gray-500">{detail.product?.unit || 'N/A'}</td>
+                          <td className="px-4 py-2 text-sm text-gray-900">{detail.quantity}</td>
+                          <td className="px-4 py-2 text-sm text-gray-900">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                          <td className="px-4 py-2 text-sm font-medium text-gray-900">₱{(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
