@@ -1596,8 +1596,8 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       {/* Override Modal */}
       {showOverrideModal && editingOrder && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-4/5 lg:w-3/4 xl:w-2/3 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center mb-4">
+          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-4/5 lg:w-3/4 xl:w-2/3 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Override Order #{editingOrder.id.slice(0, 8)}
               </h3>
@@ -1613,7 +1613,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               </button>
             </div>
 
-            <div className="space-y-6">
+            <div className="space-y-6 flex-1 overflow-y-auto min-h-0">
               {/* Logistics Method */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Logistics Method</label>
@@ -1794,32 +1794,33 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 </div>
               </div>
 
-              {/* Action Buttons */}
-              <div className="flex justify-end space-x-3">
-                <button
-                  onClick={() => {
-                    setShowOverrideModal(false)
-                    setEditingOrder(null)
-                    setOriginalOrder(null)
-                  }}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => {
-                    setEditingOrder({
-                      ...editingOrder,
-                      total_amount: calculateOverrideTotal()
-                    })
-                    handleSaveOverride()
-                  }}
-                  disabled={overrideLoading}
-                  className="px-4 py-2 text-sm font-medium text-white bg-orange-600 rounded-md hover:bg-orange-700 disabled:opacity-50"
-                >
-                  {overrideLoading ? 'Saving...' : 'Save Changes'}
-                </button>
-              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex justify-end space-x-3 pt-4 border-t bg-gray-50 -mx-5 -mb-5 px-5 pb-5 flex-shrink-0">
+              <button
+                onClick={() => {
+                  setShowOverrideModal(false)
+                  setEditingOrder(null)
+                  setOriginalOrder(null)
+                }}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setEditingOrder({
+                    ...editingOrder,
+                    total_amount: calculateOverrideTotal()
+                  })
+                  handleSaveOverride()
+                }}
+                disabled={overrideLoading}
+                className="px-4 py-2 text-sm font-medium text-white bg-orange-600 rounded-md hover:bg-orange-700 disabled:opacity-50"
+              >
+                {overrideLoading ? 'Saving...' : 'Save Changes'}
+              </button>
             </div>
           </div>
         </div>

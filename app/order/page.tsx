@@ -2179,12 +2179,12 @@ export default function OrderPage() {
       {/* Cart Modal - Only show if no pending order or in modify mode */}
       {showCartModal && (!pendingOrder || currentView === 'modify') && (
         <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="bg-white rounded-t-lg sm:rounded-lg w-full max-w-md max-h-[80vh] overflow-hidden">
+          <div className="bg-white rounded-t-lg sm:rounded-lg w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
-            <div className="flex items-center justify-between p-3 sm:p-4 border-b min-w-0">
+            <div className="flex items-center justify-between p-3 sm:p-4 border-b min-w-0 flex-shrink-0">
               <h2 className="text-base sm:text-lg font-semibold truncate min-w-0 flex-1">
                 {currentView === 'modify' ? 'Order Draft' : 'Your Cart'} ({calculateItemCount()} items)
-                </h2>
+              </h2>
               <button
                 onClick={() => setShowCartModal(false)}
                 className="p-2 text-gray-400 hover:text-gray-600 flex-shrink-0"
@@ -2194,7 +2194,7 @@ export default function OrderPage() {
             </div>
 
             {/* Modal Content */}
-            <div className="p-3 sm:p-4 max-h-96 overflow-y-auto">
+            <div className="p-3 sm:p-4 flex-1 overflow-y-auto min-h-0">
               {cartItems.length === 0 ? (
                 <p className="text-gray-500 text-center py-8">No items in {currentView === 'modify' ? 'draft' : 'cart'}</p>
               ) : (
@@ -2247,7 +2247,7 @@ export default function OrderPage() {
 
             {/* Modal Footer */}
             {cartItems.length > 0 && (
-              <div className="p-3 sm:p-4 border-t bg-gray-50">
+              <div className="p-3 sm:p-4 border-t bg-gray-50 flex-shrink-0">
                 {/* Delivery Type Selection */}
                 <div className="mb-3 sm:mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-2">Delivery Type</label>
@@ -2378,8 +2378,8 @@ export default function OrderPage() {
       {/* Past Orders Modal */}
       {showPastOrders && (
         <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg w-full max-w-4xl max-h-[80vh] overflow-hidden">
-            <div className="flex items-center justify-between p-4 border-b">
+          <div className="bg-white rounded-lg w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b flex-shrink-0">
               <h2 className="text-lg font-semibold">Past Orders</h2>
               <button
                 onClick={() => setShowPastOrders(false)}
@@ -2389,7 +2389,7 @@ export default function OrderPage() {
               </button>
             </div>
 
-            <div className="p-6 max-h-96 overflow-y-auto">
+            <div className="p-6 flex-1 overflow-y-auto min-h-0">
               {pastOrders.length === 0 ? (
                 <p className="text-gray-500 text-center py-8">No past orders found</p>
               ) : (
