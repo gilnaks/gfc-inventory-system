@@ -1406,6 +1406,42 @@ export default function OrderPage() {
                       </div>
                     </div>
                   ))}
+                  
+                  {/* Order Summary with Delivery Fee/Discount */}
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-600">Subtotal:</span>
+                        <span className="text-sm text-gray-600">₱{getTotalAmount(pendingOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+                      {pendingOrder.delivery_type === 'delivery' && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Delivery Fee:</span>
+                          {getTotalAmount(pendingOrder) >= 10000 ? (
+                            <span className="text-sm text-green-600">FREE (Order over ₱10k)</span>
+                          ) : (
+                            <span className="text-sm text-gray-600">+₱500.00</span>
+                          )}
+                        </div>
+                      )}
+                      {pendingOrder.delivery_type === 'pickup' && getTotalAmount(pendingOrder) >= 10000 && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
+                          <span className="text-sm text-green-600">-₱{(getTotalAmount(pendingOrder) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                      )}
+                      {pendingOrder.delivery_type === 'pickup' && getTotalAmount(pendingOrder) < 10000 && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-500">Pickup Discount:</span>
+                          <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between items-center border-t pt-2">
+                        <span className="font-medium text-base">Total:</span>
+                        <span className="font-semibold text-green-600 text-lg">₱{pendingOrder.total_amount?.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-6 flex space-x-4">
@@ -1579,9 +1615,14 @@ export default function OrderPage() {
                           </div>
                         </div>
                         
-                        <div className="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div className="mt-4 space-y-3">
                           <div className="text-sm text-orange-700">
                             <p>Please upload your deposit slip to complete payment</p>
+                            <div className="mt-2 text-xs text-orange-600">
+                              {order.delivery_type === 'delivery' ? 'Delivery Order' : 'Pickup Order'}
+                              {getTotalAmount(order) >= 10000 && order.delivery_type === 'delivery' && ' • Free delivery (Order over ₱10k)'}
+                              {getTotalAmount(order) >= 10000 && order.delivery_type === 'pickup' && ' • 5% discount applied'}
+                            </div>
                           </div>
                           <label className={`flex items-center justify-center space-x-2 px-3 py-2 sm:px-4 sm:py-2 text-white rounded-lg transition-colors cursor-pointer w-full sm:w-auto min-h-[44px] sm:min-h-0 ${
                             currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700 active:bg-green-800' :
@@ -1723,7 +1764,21 @@ export default function OrderPage() {
                 <h3 className="text-lg font-semibold mb-4">Cart ({calculateItemCount()} items)</h3>
                 
                 {cartItems.length === 0 ? (
-                  <p className="text-gray-500 text-center py-8">No items in cart</p>
+                  <div className="text-center py-8">
+                    <p className="text-gray-500 mb-4">No items in cart</p>
+                    <button
+                      onClick={() => setShowCartModal(true)}
+                      className={`w-full flex items-center justify-center space-x-2 px-4 py-3 text-white rounded-lg transition-colors ${
+                        currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                        currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                        currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                        'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      <ShoppingCart className="h-5 w-5" />
+                      <span>View Cart</span>
+                    </button>
+                  </div>
                 ) : (
                   <>
                     <div className="space-y-3 mb-6">
@@ -1837,12 +1892,12 @@ export default function OrderPage() {
                       
                       <button
                         onClick={() => setShowCartModal(true)}
-                        className="w-full flex items-center justify-center space-x-2 px-4 py-3 text-white rounded-lg transition-colors ${
+                        className={`w-full flex items-center justify-center space-x-2 px-4 py-3 text-white rounded-lg transition-colors ${
                           currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
                           currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
                           currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
                           'bg-blue-600 hover:bg-blue-700'
-                        }"
+                        }`}
                       >
                         <ShoppingCart className="h-5 w-5" />
                         <span>View Cart</span>
@@ -2325,6 +2380,38 @@ export default function OrderPage() {
                             </span>
                           </div>
                         ))}
+                        
+                        {/* Order Summary with Delivery Fee/Discount */}
+                        <div className="mt-3 pt-3 border-t border-gray-200">
+                          <div className="space-y-1">
+                            <div className="flex justify-between items-center text-sm">
+                              <span className="text-gray-600">Subtotal:</span>
+                              <span className="text-gray-600">₱{getTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                            </div>
+                            {order.delivery_type === 'delivery' && (
+                              <div className="flex justify-between items-center text-sm">
+                                <span className="text-gray-600">Delivery Fee:</span>
+                                {getTotalAmount(order) >= 10000 ? (
+                                  <span className="text-green-600">FREE (Order over ₱10k)</span>
+                                ) : (
+                                  <span className="text-gray-600">+₱500.00</span>
+                                )}
+                              </div>
+                            )}
+                            {order.delivery_type === 'pickup' && getTotalAmount(order) >= 10000 && (
+                              <div className="flex justify-between items-center text-sm">
+                                <span className="text-gray-600">Pickup Discount (5%):</span>
+                                <span className="text-green-600">-₱{(getTotalAmount(order) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                              </div>
+                            )}
+                            {order.delivery_type === 'pickup' && getTotalAmount(order) < 10000 && (
+                              <div className="flex justify-between items-center text-sm">
+                                <span className="text-gray-500">Pickup Discount:</span>
+                                <span className="text-gray-500">Not available (Order under ₱10k)</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </div>
                       
                       <div className="mt-4 pt-3 border-t border-gray-200">
