@@ -932,10 +932,16 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       for (const [productId, quantityChange] of Array.from(quantityChanges.entries())) {
         if (quantityChange > 0) {
           // Adding quantity - check if we have enough stock
-          const product = availableProducts.find(p => p.id === productId)
+          let product = availableProducts.find(p => p.id === productId)
+          
           if (!product) {
-            alert(`Product not found: ${productId}`)
-            return
+            // Try finding by product_id as well
+            product = availableProducts.find(p => p.product_id === productId)
+            
+            if (!product) {
+              alert(`Product not found: ${productId}`)
+              return
+            }
           }
 
           const originalQuantity = originalOrder.order_details.find(d => d.product_id === productId)?.quantity || 0
@@ -1071,7 +1077,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       setEditingOrder({
         ...editingOrder,
         order_details: editingOrder.order_details.map(detail =>
-          detail.product_id === product.id
+          detail.product_id === productId
             ? { ...detail, quantity: newQuantity }
             : detail
         )
@@ -1348,7 +1354,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         
                         {(order.status === 'pending' || order.status === 'approved') && (
                           <button
-                            onClick={() => updateOrderStatus(order.id, 'cancelled')}
+                            onClick={() => {
+                              if (confirm('Are you sure you want to cancel this order? This action will return reserved stock to available inventory and cannot be undone.')) {
+                                updateOrderStatus(order.id, 'cancelled')
+                              }
+                            }}
                             disabled={updatingOrder === order.id}
                             className={`${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 'text-red-600 hover:text-red-900'}`}
                             title="Cancel Order"
