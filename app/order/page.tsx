@@ -569,7 +569,7 @@ export default function OrderPage() {
       }
 
       // Update reserved values based on net changes
-      for (const [productId, netChange] of netChanges) {
+      for (const [productId, netChange] of Array.from(netChanges.entries())) {
         if (netChange !== 0) {
           const currentReservedValue = currentReserved.get(productId) || 0
           const newReservedValue = Math.max(0, currentReservedValue + netChange)
