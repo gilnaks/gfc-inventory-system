@@ -358,7 +358,29 @@ export default function OrderPage() {
       return acc
     }, {} as Record<string, Product[]>)
     
-    return grouped
+    // Sort products within each category alphabetically by product name
+    Object.keys(grouped).forEach(category => {
+      grouped[category].sort((a, b) => {
+        const nameA = (a.product_name || a.name || '').toLowerCase()
+        const nameB = (b.product_name || b.name || '').toLowerCase()
+        return nameA.localeCompare(nameB)
+      })
+    })
+    
+    // Sort categories alphabetically
+    const sortedGrouped: Record<string, Product[]> = {}
+    const sortedCategories = Object.keys(grouped).sort((a, b) => {
+      // Put 'Other' category at the end
+      if (a === 'Other') return 1
+      if (b === 'Other') return -1
+      return a.toLowerCase().localeCompare(b.toLowerCase())
+    })
+    
+    sortedCategories.forEach(category => {
+      sortedGrouped[category] = grouped[category]
+    })
+    
+    return sortedGrouped
   }
 
   const validateStockAvailability = async () => {
@@ -508,18 +530,59 @@ export default function OrderPage() {
     setError('')
 
     try {
-      // First, release the old reservations
+      // Get current reserved values from database for all affected products
+      const allProductIds = new Set([
+        ...(pendingOrder.order_details?.map((item: any) => item.product_id) || []),
+        ...cartItems.map(item => item.product_id)
+      ])
+      
+      const { data: currentProducts, error: fetchError } = await supabase
+        .from('products')
+        .select('id, reserved')
+        .in('id', Array.from(allProductIds))
+      
+      if (fetchError) throw fetchError
+      
+      const currentReserved = new Map(
+        currentProducts?.map(p => [p.id, p.reserved || 0]) || []
+      )
+
+      // Create a map to track the net change for each product
+      const netChanges = new Map<string, number>()
+      
+      // Calculate net changes: new quantity - old quantity for each product
       if (pendingOrder.order_details) {
         for (const oldItem of pendingOrder.order_details) {
-          const { error: releaseError } = await supabase
+          const oldQuantity = oldItem.quantity
+          const newItem = cartItems.find(item => item.product_id === oldItem.product_id)
+          const newQuantity = newItem ? newItem.quantity : 0
+          const netChange = newQuantity - oldQuantity
+          netChanges.set(oldItem.product_id, netChange)
+        }
+      }
+      
+      // Add any new products that weren't in the original order
+      for (const item of cartItems) {
+        if (!netChanges.has(item.product_id)) {
+          netChanges.set(item.product_id, item.quantity)
+        }
+      }
+
+      // Update reserved values based on net changes
+      for (const [productId, netChange] of netChanges) {
+        if (netChange !== 0) {
+          const currentReservedValue = currentReserved.get(productId) || 0
+          const newReservedValue = Math.max(0, currentReservedValue + netChange)
+          
+          const { error: updateError } = await supabase
             .from('products')
             .update({ 
-              reserved: (oldItem.products.reserved || 0) - oldItem.quantity,
+              reserved: newReservedValue,
               updated_at: new Date().toISOString()
             })
-            .eq('id', oldItem.product_id)
+            .eq('id', productId)
           
-          if (releaseError) throw releaseError
+          if (updateError) throw updateError
         }
       }
 
@@ -528,19 +591,6 @@ export default function OrderPage() {
         .from('order_details')
         .delete()
         .eq('order_id', pendingOrder.id)
-
-      // Reserve inventory for new quantities
-      for (const item of cartItems) {
-        const { error: reserveError } = await supabase
-          .from('products')
-          .update({ 
-            reserved: (item.product.reserved || 0) + item.quantity,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', item.product_id)
-        
-        if (reserveError) throw reserveError
-      }
 
       // Insert new order details
       const orderDetails = cartItems.map(item => ({
