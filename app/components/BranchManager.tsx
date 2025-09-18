@@ -415,16 +415,18 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             
             .header { 
               text-align: center; 
-              padding: 16px 20px;
+              padding: 12px 20px;
               background: white;
               color: black;
               border-bottom: 2px solid black;
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
             }
             
             .company-name { 
               font-size: 23px; 
               font-weight: bold; 
-              margin-bottom: 4px;
               color: black;
             }
             
@@ -432,6 +434,13 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               font-size: 15px; 
               font-weight: normal; 
               color: black;
+            }
+            
+            .generated-date {
+              font-size: 10px;
+              color: #6b7280;
+              text-align: center;
+              flex: 1;
             }
             
             .order-info { 
@@ -522,8 +531,8 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             }
             
             .checkbox {
-              width: 14px;
-              height: 14px;
+              width: 10px;
+              height: 10px;
               border: 1px solid black;
               background: white;
               cursor: pointer;
@@ -531,11 +540,13 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             
             .item-row {
               display: grid;
-              grid-template-columns: 30px 2fr 1fr 1fr 1fr;
-              gap: 8px;
+              grid-template-columns: 20px 2fr 1fr 1fr 1fr;
+              gap: 4px;
               align-items: center;
-              padding: 4px 0;
+              padding: 1px 0;
               border-bottom: 1px solid #ccc;
+              font-size: 9px;
+              min-height: 16px;
             }
             
             .item-row:last-child {
@@ -663,6 +674,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
           <div class="receipt-container">
           <div class="header">
               <div class="company-name">${order.brand?.name || 'Company'}</div>
+              <div class="generated-date">Generated on ${new Date().toLocaleString()}</div>
               <div class="receipt-title">Stock Transfer Sheet</div>
           </div>
           
@@ -759,10 +771,6 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               </div>
           </div>
           
-          <div class="footer">
-              <div class="footer-text">Thank you for your order!</div>
-              <div class="footer-date">Generated on ${new Date().toLocaleString()}</div>
-            </div>
           </div>
         </body>
         </html>
