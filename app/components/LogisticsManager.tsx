@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Calendar, Clock, Truck, Package, Plus, X, Edit, Trash2, ChevronLeft, ChevronRight, Sun, Moon } from 'lucide-react'
-import { formatPhilippinesDateTime } from '../../lib/timezone'
+import { formatPhilippinesDateTime, toPhilippinesDateString } from '../../lib/timezone'
 
 interface LogisticsAssignment {
   id: string
@@ -74,8 +74,8 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
              location:locations(name)
            )
         `)
-        .gte('date', startOfMonth.toISOString().split('T')[0])
-        .lte('date', endOfMonth.toISOString().split('T')[0])
+        .gte('date', toPhilippinesDateString(startOfMonth))
+        .lte('date', toPhilippinesDateString(endOfMonth))
         .order('date', { ascending: true })
 
       if (error) {
@@ -109,7 +109,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
            location:locations(name)
          `)
         .eq('brand_id', selectedBrand.id)
-        .in('status', ['pending', 'approved', 'released', 'paid'])
+        .in('status', ['pending', 'approved', 'released', 'paid', 'complete'])
         .order('created_at', { ascending: false })
 
       if (error) {
@@ -338,20 +338,26 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
   }
 
   const formatDate = (date: Date) => {
-    return date.toISOString().split('T')[0]
+    return toPhilippinesDateString(date)
   }
 
   const isToday = (date: Date) => {
     const today = new Date()
-    return date.toDateString() === today.toDateString()
+    return toPhilippinesDateString(date) === toPhilippinesDateString(today)
   }
 
   const isPastDate = (date: Date) => {
     const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const compareDate = new Date(date)
-    compareDate.setHours(0, 0, 0, 0)
-    return compareDate < today
+    const todayStr = toPhilippinesDateString(today)
+    const dateStr = toPhilippinesDateString(date)
+    return dateStr < todayStr
+  }
+
+  const isYesterday = (date: Date) => {
+    const today = new Date()
+    const yesterday = new Date(today)
+    yesterday.setDate(today.getDate() - 1)
+    return toPhilippinesDateString(date) === toPhilippinesDateString(yesterday)
   }
 
   return (
@@ -404,12 +410,14 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
              const afternoonAssignments = getAssignmentsForDate(dateString, 'afternoon')
              const isCurrentDay = isToday(date)
              const isPast = isPastDate(date)
+             const isYesterdayDate = isYesterday(date)
 
             return (
               <div
                 key={index}
                 className={`p-2 border rounded-lg min-h-[120px] ${
-                  isPast ? 'bg-gray-100 border-gray-300 opacity-60' :
+                  isPast && !isYesterdayDate ? 'bg-gray-100 border-gray-300 opacity-60' :
+                  isYesterdayDate ? 'bg-gray-100 border-gray-300 opacity-75' :
                   isCurrentDay ? 'bg-blue-50 border-blue-200' : 'bg-white border-gray-200'
                 }`}
               >
@@ -425,10 +433,10 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                       <span className="text-xs text-gray-500">Morning</span>
                     </div>
                      <button
-                       onClick={(e) => !isPast && openOrderPopup(e, dateString, 'morning')}
-                       disabled={isPast}
+                       onClick={(e) => (!isPast || isYesterdayDate) && openOrderPopup(e, dateString, 'morning')}
+                       disabled={isPast && !isYesterdayDate}
                        className={`text-xs ${
-                         isPast 
+                         isPast && !isYesterdayDate
                            ? 'text-gray-400 cursor-not-allowed' 
                            : 'text-blue-600 hover:text-blue-800'
                        }`}
@@ -469,10 +477,10 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                       <span className="text-xs text-gray-500">Afternoon</span>
                     </div>
                      <button
-                       onClick={(e) => !isPast && openOrderPopup(e, dateString, 'afternoon')}
-                       disabled={isPast}
+                       onClick={(e) => (!isPast || isYesterdayDate) && openOrderPopup(e, dateString, 'afternoon')}
+                       disabled={isPast && !isYesterdayDate}
                        className={`text-xs ${
-                         isPast 
+                         isPast && !isYesterdayDate
                            ? 'text-gray-400 cursor-not-allowed' 
                            : 'text-blue-600 hover:text-blue-800'
                        }`}
