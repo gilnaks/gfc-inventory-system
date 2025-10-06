@@ -57,7 +57,7 @@ export function SalesInventorySection({
       console.log(`🔍 DEBUG: New inventory calculated: ${beg} + ${arrival} = ${updatedItems[index].new_inventory}`)
       
       // Only auto-calculate ending_inventory if it hasn't been manually set and is currently blank
-      if (field !== 'ending_inventory' && (updatedItems[index].ending_inventory === '' || updatedItems[index].ending_inventory === null || updatedItems[index].ending_inventory === undefined)) {
+      if (updatedItems[index].ending_inventory === '' || updatedItems[index].ending_inventory === null || updatedItems[index].ending_inventory === undefined) {
         updatedItems[index].ending_inventory = beg + arrival - pullOut
         console.log(`🔍 DEBUG: Auto-calculated ending inventory: ${beg} + ${arrival} - ${pullOut} = ${updatedItems[index].ending_inventory}`)
       } else {
@@ -343,10 +343,8 @@ export function IceCreamInventorySection({
       const beg = updatedItems[index].beginning || 0
       const production = updatedItems[index].production_500ml || 0
       const additions = updatedItems[index].additions || 0
-      // Only auto-calculate ending if it hasn't been manually set
-      if (field !== 'ending') {
-        updatedItems[index].ending = beg + production + additions
-      }
+      // Auto-calculate ending
+      updatedItems[index].ending = beg + production + additions
     }
 
     onItemsChange(updatedItems)

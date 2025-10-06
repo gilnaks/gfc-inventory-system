@@ -53,6 +53,7 @@ export function DSIRReportsList({ selectedBrand, selectedLocation, theme = 'blue
   const [reports, setReports] = useState<DSIRReport[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [selectedReport, setSelectedReport] = useState<DSIRReport | null>(null)
   const [dateFilter, setDateFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'submitted' | 'reviewed'>('all')
@@ -85,13 +86,13 @@ export function DSIRReportsList({ selectedBrand, selectedLocation, theme = 'blue
           if (payload.eventType === 'INSERT') {
             // Add new report to the list
             if (payload.new) {
-              setReports(prev => [payload.new, ...prev])
+              setReports(prev => [payload.new as DSIRReport, ...prev])
             }
           } else if (payload.eventType === 'UPDATE') {
             // Update existing report in the list
             if (payload.new) {
               setReports(prev => prev.map(report => 
-                report.id === payload.new.id ? payload.new : report
+                report.id === payload.new.id ? payload.new as DSIRReport : report
               ))
             }
           } else if (payload.eventType === 'DELETE') {

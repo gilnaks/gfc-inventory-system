@@ -130,13 +130,16 @@ export function StaffSchedule({ locationId, locationName, currentBranchBrandName
             id,
             location_id,
             staff_registration_id,
-            staff_registration:staff_registrations(*)
+            staff_registration:staff_registrations!staff_registration_id(*)
           `)
           .eq('location_id', branch.id)
 
         if (error) throw error
 
-        assignments[branch.id] = data || []
+        assignments[branch.id] = (data || []).map((item: any) => ({
+          ...item,
+          staff_registration: Array.isArray(item.staff_registration) ? item.staff_registration[0] : item.staff_registration
+        }))
       }
       
       setBranchStaffAssignments(assignments)

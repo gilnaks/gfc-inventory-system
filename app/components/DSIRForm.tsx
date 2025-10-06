@@ -29,6 +29,14 @@ interface DSIRReport {
   notes: string
   created_at: string
   updated_at: string
+  location?: {
+    id: string
+    name: string
+    brand_id: string
+    franchisee?: string
+    contact_number?: string
+    company_owned?: boolean
+  }
 }
 
 interface SalesInventoryItem {

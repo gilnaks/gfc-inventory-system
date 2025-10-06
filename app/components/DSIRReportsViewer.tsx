@@ -906,11 +906,11 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                             {getCategoryDisplayName(category)}
                           </h5>
                           <span className="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
-                            {items.length} item{items.length !== 1 ? 's' : ''}
+                            {(items as any[]).length} item{(items as any[]).length !== 1 ? 's' : ''}
                           </span>
                         </div>
                         <div className="space-y-2">
-                          {items.map((item) => (
+                          {(items as any[]).map((item) => (
                             <EditableItemRow
                               key={item.id}
                               item={item}

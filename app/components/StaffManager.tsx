@@ -51,6 +51,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [staff, setStaff] = useState<StaffWithAssignments[]>([])
   const [locations, setLocations] = useState<Location[]>([])
   const [brands, setBrands] = useState<any[]>([])
+  const [editingStaff, setEditingStaff] = useState<string | null>(null)
+  const [editingField, setEditingField] = useState<string | null>(null)
+  const [editingValue, setEditingValue] = useState('')
   
   // Editing state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
@@ -458,12 +461,23 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       if (location && brand) {
         const newAssignmentData = {
           id: Date.now().toString(), // Temporary ID for UI
+          staff_registration_id: selectedStaff.id,
           location_id: newAssignment.location_id,
           assigned_by_location_id: newAssignment.location_id,
           created_at: new Date().toISOString(),
           location: {
             id: location.id,
             name: location.name,
+            brand_id: brand.id,
+            brand: {
+              id: brand.id,
+              name: brand.name
+            }
+          },
+          assigned_by_location: {
+            id: location.id,
+            name: location.name,
+            brand_id: brand.id,
             brand: {
               id: brand.id,
               name: brand.name
@@ -833,7 +847,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         }
 
         // Check hours for all staff members (both current and original)
-        const allStaffIds = [...new Set([...currentArray, ...originalArray])]
+        const allStaffIds = Array.from(new Set([...currentArray, ...originalArray]))
         for (const staffId of allStaffIds) {
           const currentHours = getStaffHours(locationId, dayKey, staffId)
           const originalHours = originalStaffHours[locationId]?.[dayKey]?.[staffId] || 8
@@ -868,7 +882,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         // Check if this staff is already scheduled to any other branch on this date
         const alreadyScheduled = Object.entries(schedule).some(([branchId, daySchedules]) => {
           if (branchId === locationId) return false // Skip current branch
-          return daySchedules[dayKey] === staffId
+          return daySchedules[dayKey]?.includes(staffId) || false
         })
         
         if (alreadyScheduled) {
@@ -882,7 +896,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       ...prev,
       [locationId]: {
         ...prev[locationId],
-        [dayKey]: staffId
+        [dayKey]: [staffId]
       }
     }))
   }

@@ -22,6 +22,7 @@ interface PaidOrder {
     name: string
     franchisee?: string
     contact_number?: string
+    company_owned?: boolean
     brand?: {
       id: string
       name: string
@@ -783,8 +784,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               ` : `
                 <div class="items-header">Items</div>
                 ${order.order_details?.sort((a, b) => {
-                  const categoryA = a.product?.category && a.product.category.trim() !== '' ? a.product.category : 'Uncategorized'
-                  const categoryB = b.product?.category && b.product.category.trim() !== '' ? b.product.category : 'Uncategorized'
+                  const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+                  const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
                   return categoryA.localeCompare(categoryB)
                 }).map(detail => `
                   <div class="item-row">
