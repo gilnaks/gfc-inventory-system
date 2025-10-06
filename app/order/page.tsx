@@ -1,7 +1,11 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { supabase, Brand, Product } from '../../lib/supabase'
-import { ShoppingCart, MapPin, Plus, Minus, Check, LogOut, X, FileText, Edit3, Home, IceCream, Printer } from 'lucide-react'
+import { StaffAssignmentManager } from '../components/StaffAssignmentManager'
+import { DSIRReportsViewer } from '../components/DSIRReportsViewer'
+import { OrderSettings } from '../components/OrderSettings'
+import { BranchSwitcher } from '../components/BranchSwitcher'
+import { ShoppingCart, MapPin, Plus, Minus, Check, LogOut, X, FileText, Edit3, Home, IceCream, Printer, Users, BarChart3, Settings, RefreshCw, Upload, Image } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
 
 interface Location {
@@ -9,6 +13,7 @@ interface Location {
   name: string
   passkey: string
   brand_id: string
+  company_owned?: boolean
   brand?: Brand
 }
 
@@ -20,13 +25,14 @@ interface OrderItem {
 
 type CartItem = OrderItem
 
-type ViewMode = 'home' | 'products' | 'modify'
+type ViewMode = 'home' | 'products' | 'modify' | 'staff-assignments' | 'dsir-reports'
 
 export default function OrderPage() {
   // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [passcode, setPasscode] = useState('')
   const [location, setLocation] = useState<Location | null>(null)
+  const [redirectedFromDSIR, setRedirectedFromDSIR] = useState(false)
   
   // Data state
   const [products, setProducts] = useState<Product[]>([])
@@ -45,30 +51,97 @@ export default function OrderPage() {
   const [uploadingPhoto, setUploadingPhoto] = useState(false)
   const [uploadingOrderId, setUploadingOrderId] = useState<string | null>(null)
   const [deliveryType, setDeliveryType] = useState<'pickup' | 'delivery'>('delivery')
+  const [showBranchSwitcher, setShowBranchSwitcher] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const [showBranchSwitcherModal, setShowBranchSwitcherModal] = useState(false)
+  const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
+  const [showReturnablePansModal, setShowReturnablePansModal] = useState(false)
+  const [uploadingReturnablePans, setUploadingReturnablePans] = useState(false)
+  const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
+  const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
+  const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<any>(null)
+
+  // Redirect to home if on restricted view for company-owned location or redirected from DSIR
+  useEffect(() => {
+    if (location?.company_owned && (currentView === 'staff-assignments' || currentView === 'dsir-reports')) {
+      setCurrentView('home')
+    }
+    if (redirectedFromDSIR && (currentView === 'staff-assignments' || currentView === 'dsir-reports')) {
+      setCurrentView('home')
+    }
+  }, [location?.company_owned, redirectedFromDSIR, currentView])
 
   // Initialize on mount
   useEffect(() => {
     const initializeApp = async () => {
       setInitialLoading(true)
       
-    const savedAuth = localStorage.getItem('order_authenticated')
-    const savedLocation = localStorage.getItem('order_location')
-    
-    if (savedAuth === 'true' && savedLocation) {
-      try {
-        const locationData = JSON.parse(savedLocation)
-        setLocation(locationData)
-        setIsAuthenticated(true)
-        
-          // Load all data in parallel
-          await Promise.all([
-            checkPendingOrders(locationData.id),
-            fetchPastOrders(locationData.id),
-        fetchProducts(locationData.brand_id)
-          ])
-      } catch (error) {
-        console.error('Error parsing saved data:', error)
+      // Check for automatic login from DSIR page
+      const locationPasscode = sessionStorage.getItem('locationPasscode')
+      const selectedLocationId = sessionStorage.getItem('selectedLocationId')
+      
+      if (locationPasscode && selectedLocationId) {
+        try {
+          // Authenticate using the passcode from DSIR
+          const { data: locationData, error } = await supabase
+            .from('locations')
+            .select(`
+              *,
+              brand:brands(*)
+            `)
+            .eq('id', selectedLocationId)
+            .eq('passkey', locationPasscode)
+            .single()
+
+          if (error || !locationData) {
+            console.error('Error authenticating with passcode:', error)
+            clearSession()
+          } else {
+            setLocation(locationData)
+            setIsAuthenticated(true)
+            setPasscode(locationPasscode)
+            setRedirectedFromDSIR(true) // Mark as redirected from DSIR
+            
+            // Save to localStorage for persistence
+            localStorage.setItem('order_authenticated', 'true')
+            localStorage.setItem('order_location', JSON.stringify(locationData))
+            
+            // Load all data in parallel
+            await Promise.all([
+              checkPendingOrders(locationData.id),
+              fetchPastOrders(locationData.id),
+              fetchProducts(locationData.brand_id)
+            ])
+            
+            // Clear sessionStorage after successful login
+            sessionStorage.removeItem('locationPasscode')
+            sessionStorage.removeItem('selectedLocationId')
+          }
+        } catch (error) {
+          console.error('Error with automatic login:', error)
           clearSession()
+        }
+      } else {
+        // Check for existing localStorage authentication
+        const savedAuth = localStorage.getItem('order_authenticated')
+        const savedLocation = localStorage.getItem('order_location')
+        
+        if (savedAuth === 'true' && savedLocation) {
+          try {
+            const locationData = JSON.parse(savedLocation)
+            setLocation(locationData)
+            setIsAuthenticated(true)
+            
+            // Load all data in parallel
+            await Promise.all([
+              checkPendingOrders(locationData.id),
+              fetchPastOrders(locationData.id),
+              fetchProducts(locationData.brand_id)
+            ])
+          } catch (error) {
+            console.error('Error parsing saved data:', error)
+            clearSession()
+          }
         }
       }
       
@@ -168,9 +241,44 @@ export default function OrderPage() {
     setError('')
     setSuccess('')
     setInitialLoading(false)
+    setRedirectedFromDSIR(false)
     localStorage.removeItem('order_authenticated')
     localStorage.removeItem('order_location')
     localStorage.removeItem('order_cart_draft')
+  }
+
+  const handleBranchSwitch = async (passcode: string) => {
+    setLoading(true)
+    setError('')
+    
+    try {
+      const { data, error } = await supabase
+        .from('locations')
+        .select('*, brand:brands(*)')
+        .eq('passkey', passcode)
+        .single()
+      
+      if (error) throw error
+      
+      setLocation(data)
+      setIsAuthenticated(true)
+      localStorage.setItem('order_authenticated', 'true')
+      localStorage.setItem('order_location', JSON.stringify(data))
+      
+      await Promise.all([
+        checkPendingOrders(data.id),
+        fetchPastOrders(data.id),
+        fetchProducts(data.brand_id)
+      ])
+      
+      setCurrentView('home')
+      setSuccess(`Switched to ${data.name} successfully!`)
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      setError('Failed to switch branch. Please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const handleLocationAuth = async (e: React.FormEvent) => {
@@ -225,14 +333,14 @@ export default function OrderPage() {
       const { data, error } = await supabase
         .from('customer_orders')
         .select(`
-          id, status, created_at, total_amount, delivery_type, deposit_slip_url,
+          id, status, created_at, total_amount, delivery_type, deposit_slip_url, returnable_pans_image_url,
           order_details (
             id, product_id, quantity, unit_price,
             products (id, name, price, unit, category)
           )
         `)
         .eq('location_id', locationId)
-        .in('status', ['pending', 'approved', 'released', 'paid'])
+        .in('status', ['pending', 'approved', 'in-transit', 'verified', 'fulfilled', 'paid'])
         .order('created_at', { ascending: false })
         .limit(1)
       
@@ -253,14 +361,14 @@ export default function OrderPage() {
       const { data, error } = await supabase
         .from('customer_orders')
         .select(`
-          id, status, created_at, total_amount, delivery_type, deposit_slip_url,
+          id, status, created_at, total_amount, delivery_type, deposit_slip_url, returnable_pans_image_url,
           order_details (
             id, product_id, quantity, unit_price,
             products (id, name, price, unit, category)
           )
         `)
         .eq('location_id', locationId)
-        .in('status', ['released', 'paid', 'complete', 'cancelled'])
+        .in('status', ['complete', 'cancelled'])
         .order('created_at', { ascending: false })
       
       if (error) throw error
@@ -640,9 +748,30 @@ export default function OrderPage() {
     }
   }
 
+  const canStartNewOrder = () => {
+    // Only allow new orders if there's no active order (pending, approved, in-transit, verified, fulfilled, or paid)
+    return !pendingOrder || (pendingOrder.status !== 'pending' && pendingOrder.status !== 'approved' && pendingOrder.status !== 'in-transit' && pendingOrder.status !== 'verified' && pendingOrder.status !== 'fulfilled' && pendingOrder.status !== 'paid')
+  }
+
+  const areAllItemsVerified = () => {
+    if (!pendingOrder?.order_details) return false
+    return pendingOrder.order_details.every((detail: any) => verifiedItems.has(detail.id))
+  }
+
+  const toggleItemVerification = (itemId: string) => {
+    setVerifiedItems(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(itemId)) {
+        newSet.delete(itemId)
+      } else {
+        newSet.add(itemId)
+      }
+      return newSet
+    })
+  }
+
   const startNewOrder = () => {
-    // Only allow new orders if there's no pending or approved order
-    if (!pendingOrder) {
+    if (canStartNewOrder()) {
       setCurrentView('products')
     }
   }
@@ -653,6 +782,74 @@ export default function OrderPage() {
 
   const getTotalAmount = (order: any) => {
     return order.order_details.reduce((total: number, detail: any) => total + (detail.unit_price * detail.quantity), 0)
+  }
+
+  // Get returnable pans products based on brand
+  const getReturnablePansProducts = (order: any) => {
+    if (!order?.order_details || !location?.brand) return []
+    
+    const brandSlug = location.brand.slug.toLowerCase()
+    const returnablePansProducts = order.order_details.filter((detail: any) => {
+      const productCategory = detail.products?.category?.toLowerCase() || ''
+      
+      switch (brandSlug) {
+        case 'gelatofilipino':
+          return productCategory === 'gelato'
+        case 'mychoice':
+          return productCategory === 'ice cream'
+        case 'mang-sorbetes':
+          return productCategory === 'sorbetes'
+        default:
+          return false
+      }
+    })
+    
+    return returnablePansProducts
+  }
+
+  // Upload returnable pans image
+  const handleReturnablePansUpload = async (orderId: string, file: File) => {
+    try {
+      setUploadingReturnablePans(true)
+      
+      // Upload to Supabase storage
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${orderId}-${Date.now()}.${fileExt}`
+      
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('returnable_pans')
+        .upload(fileName, file)
+      
+      if (uploadError) {
+        throw uploadError
+      }
+      
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from('returnable_pans')
+        .getPublicUrl(fileName)
+      
+      // Update order with returnable pans image URL
+      const { error: updateError } = await supabase
+        .from('customer_orders')
+        .update({ returnable_pans_image_url: urlData.publicUrl })
+        .eq('id', orderId)
+      
+      if (updateError) {
+        throw updateError
+      }
+      
+      // Refresh pending order
+      await checkPendingOrders(location?.id || '')
+      setSuccess('Returnable pans image uploaded successfully!')
+      setShowReturnablePansModal(false)
+      
+    } catch (error) {
+      console.error('Error uploading returnable pans image:', error)
+      setError('Failed to upload returnable pans image. Please try again.')
+    } finally {
+      setUploadingReturnablePans(false)
+    }
   }
 
   const handlePhotoUpload = async (orderId: string, file: File) => {
@@ -703,6 +900,44 @@ export default function OrderPage() {
     } finally {
       setUploadingPhoto(false)
       setUploadingOrderId(null)
+    }
+  }
+
+  const handleVerifyItems = async () => {
+    if (!pendingOrder) return
+
+    setLoading(true)
+    setError('')
+
+    try {
+      // Update order status to 'verified'
+      const { error: updateError } = await supabase
+        .from('customer_orders')
+        .update({ 
+          status: 'verified',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', pendingOrder.id)
+      
+      if (updateError) throw updateError
+      
+      setSuccess('Items verified successfully! Order status updated to Verified.')
+      
+      // Clear verified items state
+      setVerifiedItems(new Set())
+      
+      // Refresh orders
+      if (location) {
+        await Promise.all([
+          checkPendingOrders(location.id),
+          fetchPastOrders(location.id)
+        ])
+      }
+    } catch (error) {
+      console.error('Error verifying items:', error)
+      setError('Failed to verify items. Please try again.')
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -811,7 +1046,7 @@ export default function OrderPage() {
             
             .status-pending { background: white; color: black; }
             .status-approved { background: white; color: black; }
-            .status-released { background: black; color: white; }
+            .status-fulfilled { background: black; color: white; }
             .status-cancelled { background: white; color: black; }
             
             .items { 
@@ -1328,51 +1563,148 @@ export default function OrderPage() {
     <div className="min-h-screen bg-gray-50 overflow-x-hidden">
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-2 sm:px-4 py-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center space-x-2 sm:space-x-4 min-w-0 flex-1">
-              <IceCream className={`h-6 w-6 sm:h-8 sm:w-8 flex-shrink-0 ${
-                  currentTheme === 'green' ? 'text-green-600' :
-                  currentTheme === 'red' ? 'text-red-600' :
-                  currentTheme === 'yellow' ? 'text-yellow-600' :
-                  'text-blue-600'
-                }`} />
-              <div className="min-w-0 flex-1">
-                <h1 className="text-lg sm:text-2xl font-bold text-gray-900 truncate">{location?.brand?.name || 'Order System'}</h1>
-                <p className="text-xs sm:text-sm text-gray-500 flex items-center">
-                  <MapPin className="h-3 w-3 sm:h-4 sm:w-4 mr-1 flex-shrink-0" />
-                  <span className="truncate">{location?.name}</span>
-                </p>
+        <div className="max-w-7xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
+          <div className="flex flex-col space-y-3 sm:space-y-0 sm:flex-row sm:justify-between sm:items-center">
+            {/* Brand and Location Info */}
+            <div className="flex items-center justify-center sm:justify-start space-x-1 sm:space-x-2 flex-1 sm:flex-none w-full sm:w-auto">
+              <div className="flex items-center space-x-1 sm:space-x-2">
+                <IceCream className={`h-4 w-4 sm:h-5 sm:w-5 flex-shrink-0 ${
+                    currentTheme === 'green' ? 'text-green-600' :
+                    currentTheme === 'red' ? 'text-red-600' :
+                    currentTheme === 'yellow' ? 'text-yellow-600' :
+                    'text-blue-600'
+                  }`} />
+                <div className="min-w-0 flex-1 sm:flex-none">
+                  <h1 className="text-sm sm:text-2xl font-bold text-gray-900 truncate">{location?.brand?.name || 'Order System'}</h1>
+                  <div className="flex items-center space-x-1 sm:space-x-2">
+                    <p className="text-xs sm:text-sm text-gray-500 flex items-center">
+                      <MapPin className="h-3 w-3 sm:h-4 sm:w-4 mr-1 flex-shrink-0" />
+                      <span className="truncate">{location?.name}</span>
+                    </p>
+                    {!location?.company_owned && (
+                      <button
+                        onClick={() => setShowBranchSwitcherModal(true)}
+                        className="text-blue-600 hover:text-blue-800 p-1"
+                      >
+                        <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
-              </div>
-            <div className="flex items-center space-x-1 sm:space-x-2 flex-shrink-0">
-              {currentView !== 'home' && (
+            </div>
+            {/* Navigation Buttons */}
+            <div className="flex items-center justify-between sm:justify-end space-x-1 sm:space-x-2 flex-shrink-0 overflow-x-auto w-full sm:w-auto">
+              <button
+                onClick={() => setCurrentView('home')}
+                className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                currentView === 'home' 
+                  ? currentTheme === 'green' ? 'bg-green-100 text-green-700 font-medium' :
+                    currentTheme === 'red' ? 'bg-red-100 text-red-700 font-medium' :
+                    currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 font-medium' :
+                    'bg-blue-100 text-blue-700 font-medium'
+                  : currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                    currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                    currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                    'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                }`}
+              >
+                <Home className="h-4 w-4 sm:h-5 sm:w-5" />
+                <span className="hidden sm:inline">Home</span>
+              </button>
+              {!location?.company_owned && !redirectedFromDSIR && (
                 <button
-                  onClick={() => setCurrentView('home')}
-                  className="flex items-center space-x-1 px-2 sm:px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors text-xs sm:text-sm"
+                  onClick={() => setCurrentView('staff-assignments')}
+                  className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                  currentView === 'staff-assignments' 
+                    ? currentTheme === 'green' ? 'bg-green-100 text-green-700 font-medium' :
+                      currentTheme === 'red' ? 'bg-red-100 text-red-700 font-medium' :
+                      currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 font-medium' :
+                      'bg-blue-100 text-blue-700 font-medium'
+                    : currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                      currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                      currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                      'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                  }`}
                 >
-                  <Home className="h-3 w-3 sm:h-4 sm:w-4" />
-                  <span className="hidden sm:inline">Home</span>
+                  <Users className="h-4 w-4 sm:h-5 sm:w-5" />
+                  <span className="hidden sm:inline">Staff</span>
+                </button>
+              )}
+              {!location?.company_owned && !redirectedFromDSIR && (
+                <button
+                  onClick={() => setCurrentView('dsir-reports')}
+                  className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                  currentView === 'dsir-reports' 
+                    ? currentTheme === 'green' ? 'bg-green-100 text-green-700 font-medium' :
+                      currentTheme === 'red' ? 'bg-red-100 text-red-700 font-medium' :
+                      currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 font-medium' :
+                      'bg-blue-100 text-blue-700 font-medium'
+                    : currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                      currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                      currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                      'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                  }`}
+                >
+                  <BarChart3 className="h-4 w-4 sm:h-5 sm:w-5" />
+                  <span className="hidden sm:inline">DSIR Reports</span>
+                </button>
+              )}
+              {!location?.company_owned && !redirectedFromDSIR && (
+                <button
+                  onClick={() => setShowSettingsModal(true)}
+                  className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                  showSettingsModal 
+                    ? currentTheme === 'green' ? 'bg-green-100 text-green-700 font-medium' :
+                      currentTheme === 'red' ? 'bg-red-100 text-red-700 font-medium' :
+                      currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 font-medium' :
+                      'bg-blue-100 text-blue-700 font-medium'
+                    : currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                      currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                      currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                      'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                  }`}
+                >
+                  <Settings className="h-4 w-4 sm:h-5 sm:w-5" />
+                  <span className="hidden sm:inline">Settings</span>
+                </button>
+              )}
+              {!redirectedFromDSIR && (
+                <button
+                  onClick={() => setShowPastOrders(true)}
+                  className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                  showPastOrders 
+                    ? currentTheme === 'green' ? 'bg-green-100 text-green-700 font-medium' :
+                      currentTheme === 'red' ? 'bg-red-100 text-red-700 font-medium' :
+                      currentTheme === 'yellow' ? 'bg-yellow-100 text-yellow-700 font-medium' :
+                      'bg-blue-100 text-blue-700 font-medium'
+                    : currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                      currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                      currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                      'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                  }`}
+                >
+                  <FileText className="h-4 w-4 sm:h-5 sm:w-5" />
+                  <span className="hidden sm:inline">Past Orders</span>
                 </button>
               )}
               <button
-                onClick={() => setShowPastOrders(true)}
-                className="flex items-center space-x-1 px-2 sm:px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors text-xs sm:text-sm"
-              >
-                <FileText className="h-3 w-3 sm:h-4 sm:w-4" />
-                <span className="hidden sm:inline">Past Orders</span>
-              </button>
-              <button
                 onClick={clearSession}
-                className="flex items-center space-x-1 px-2 sm:px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors text-xs sm:text-sm"
+                className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                  currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                  currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                  currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                  'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                }`}
               >
-                <LogOut className="h-3 w-3 sm:h-4 sm:w-4" />
+                <LogOut className="h-4 w-4 sm:h-5 sm:w-5" />
                 <span className="hidden sm:inline">Logout</span>
               </button>
             </div>
           </div>
         </div>
       </div>
+
 
       <div className="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-8">
         {/* Home View */}
@@ -1389,7 +1721,7 @@ export default function OrderPage() {
                 <div className={`flex items-center justify-between p-4 rounded-lg mb-6 ${
                   pendingOrder.status === 'approved' 
                     ? 'bg-green-50 border border-green-200' 
-                    : pendingOrder.status === 'released'
+                    : pendingOrder.status === 'fulfilled'
                     ? 'bg-orange-50 border border-orange-200'
                     : pendingOrder.status === 'paid'
                     ? 'bg-blue-50 border border-blue-200'
@@ -1399,7 +1731,11 @@ export default function OrderPage() {
                   <div className="flex-shrink-0">
                       {pendingOrder.status === 'approved' ? (
                         <Check className="h-5 w-5 text-green-400" />
-                      ) : pendingOrder.status === 'released' ? (
+                      ) : pendingOrder.status === 'in-transit' ? (
+                        <div className="h-5 w-5 rounded-full bg-orange-400"></div>
+                      ) : pendingOrder.status === 'verified' ? (
+                        <Check className="h-5 w-5 text-green-400" />
+                      ) : pendingOrder.status === 'fulfilled' ? (
                         <div className="h-5 w-5 rounded-full bg-orange-400"></div>
                       ) : pendingOrder.status === 'paid' ? (
                         <div className="h-5 w-5 rounded-full bg-blue-400"></div>
@@ -1410,25 +1746,35 @@ export default function OrderPage() {
                   <div className="ml-3">
                       <h3 className={`text-lg font-medium ${
                         pendingOrder.status === 'approved' ? 'text-green-800' 
-                        : pendingOrder.status === 'released' ? 'text-orange-800'
+                        : pendingOrder.status === 'in-transit' ? 'text-orange-800'
+                        : pendingOrder.status === 'verified' ? 'text-green-800'
+                        : pendingOrder.status === 'fulfilled' ? 'text-orange-800'
                         : pendingOrder.status === 'paid' ? 'text-blue-800'
                         : 'text-yellow-800'
                     }`}>
                         {pendingOrder.status === 'approved' ? 'Order Approved' 
-                         : pendingOrder.status === 'released' ? 'Order Released'
+                         : pendingOrder.status === 'in-transit' ? 'Order In-Transit'
+                         : pendingOrder.status === 'verified' ? 'Order Verified'
+                         : pendingOrder.status === 'fulfilled' ? 'Order Released'
                          : pendingOrder.status === 'paid' ? 'Payment Received'
                          : 'Pending Order'}
                     </h3>
                       <p className={`text-sm ${
                         pendingOrder.status === 'approved' ? 'text-green-700' 
-                        : pendingOrder.status === 'released' ? 'text-orange-700'
+                        : pendingOrder.status === 'in-transit' ? 'text-orange-700'
+                        : pendingOrder.status === 'verified' ? 'text-green-700'
+                        : pendingOrder.status === 'fulfilled' ? 'text-orange-700'
                         : pendingOrder.status === 'paid' ? 'text-blue-700'
                         : 'text-yellow-700'
                       }`}>
                         {pendingOrder.status === 'approved' 
                           ? 'Your order has been approved and is being processed.'
-                          : pendingOrder.status === 'released'
-                          ? 'Your order has been released. Please complete payment to proceed.'
+                          : pendingOrder.status === 'in-transit'
+                          ? 'Your order is in transit and on its way to you.'
+                          : pendingOrder.status === 'verified'
+                          ? 'Items have been verified. Your order is ready for fulfillment.'
+                          : pendingOrder.status === 'fulfilled'
+                          ? 'Your order has been fulfilled. Please complete payment to proceed.'
                           : pendingOrder.status === 'paid'
                           ? 'Payment received. Your order is being prepared for completion.'
                           : 'Your order is pending approval. You can modify it if needed.'
@@ -1442,13 +1788,41 @@ export default function OrderPage() {
                 </div>
                 </div>
 
+                {/* Returnable Pans Notification for Pending Orders */}
+                {pendingOrder.status === 'pending' && getReturnablePansProducts(pendingOrder).length > 0 && !pendingOrder.returnable_pans_image_url && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
+                    <div className="flex items-center space-x-3">
+                      <div className="flex-shrink-0">
+                        <Image className="h-5 w-5 text-amber-600" />
+                      </div>
+                      <div className="flex-1">
+                        <h4 className="text-sm font-medium text-amber-800">Returnable Pans Required</h4>
+                        <p className="text-sm text-amber-700 mt-1">
+                          Your order includes {getReturnablePansProducts(pendingOrder).reduce((total: number, detail: any) => total + detail.quantity, 0)} returnable pans. 
+                          Please attach a photo of the pans to proceed with approval.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-4">
                   <h4 className="font-medium text-gray-900">Order Items</h4>
                   {pendingOrder.order_details?.map((detail: any) => (
                     <div key={detail.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <p className="font-medium text-gray-900">{detail.products.name}</p>
-                        <p className="text-sm text-gray-600">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {detail.products.unit}</p>
+                      <div className="flex items-center space-x-3">
+                        {pendingOrder.status === 'in-transit' && (
+                          <input
+                            type="checkbox"
+                            checked={verifiedItems.has(detail.id)}
+                            onChange={() => toggleItemVerification(detail.id)}
+                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                          />
+                        )}
+                        <div>
+                          <p className="font-medium text-gray-900">{detail.products.name}</p>
+                          <p className="text-sm text-gray-600">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {detail.products.unit}</p>
+                        </div>
                       </div>
                       <div className="text-right">
                         <p className="font-medium text-gray-900">{detail.quantity} {detail.products.unit}</p>
@@ -1494,32 +1868,71 @@ export default function OrderPage() {
                   </div>
                 </div>
 
-                <div className="mt-6 flex space-x-4">
+                <div className="mt-6 flex flex-col sm:flex-row gap-3">
                   {pendingOrder.status === 'pending' && (
-                  <button
-                      onClick={startModifyOrder}
-                      className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors ${
-                        currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                        currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                        currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
-                        'bg-blue-600 hover:bg-blue-700'
-                      }`}
-                    >
-                      <Edit3 className="h-4 w-4" />
-                      <span>Modify Order</span>
-                  </button>
-                )}
-                  {pendingOrder.status === 'released' && (
+                    <>
+                      <button
+                        onClick={startModifyOrder}
+                        className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors ${
+                          currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                          currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                          currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                          'bg-blue-600 hover:bg-blue-700'
+                        }`}
+                      >
+                        <Edit3 className="h-4 w-4" />
+                        <span>Modify Order</span>
+                      </button>
+                      
+                      {getReturnablePansProducts(pendingOrder).length > 0 && (
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                          <button
+                            onClick={() => setShowReturnablePansModal(true)}
+                            className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors ${
+                              pendingOrder.returnable_pans_image_url
+                                ? 'bg-blue-700 hover:bg-blue-800'
+                                : 'bg-blue-600 hover:bg-blue-700'
+                            }`}
+                          >
+                            <Image className="h-4 w-4" />
+                            <span>
+                              {pendingOrder.returnable_pans_image_url ? 'Re-attach Returnable Pans' : 'Attach Returnable Pans'}
+                            </span>
+                          </button>
+                          
+                          {/* Status indicator */}
+                          <div className="flex items-center space-x-2">
+                            {pendingOrder.returnable_pans_image_url ? (
+                              <>
+                                <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                                <span className="text-sm text-green-600 font-medium">Image attached</span>
+                              </>
+                            ) : (
+                              <>
+                                <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                                <span className="text-sm text-red-600 font-medium">Image required</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {pendingOrder.status === 'fulfilled' && (
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 w-full">
                       <div className="text-center sm:text-left">
                         <p className="text-sm text-gray-600">
-                          Your order has been released. Please upload your deposit slip to complete payment.
+                          Your order has been fulfilled. Please upload your deposit slip to complete payment.
                         </p>
                       </div>
                       <div className="flex justify-center sm:justify-end gap-2">
                         {pendingOrder.deposit_slip_url && (
                           <button
-                            onClick={() => window.open(pendingOrder.deposit_slip_url, '_blank')}
+                            onClick={() => {
+                              setSelectedDepositSlipImage(pendingOrder.deposit_slip_url)
+                              setSelectedDepositSlipOrder(pendingOrder)
+                              setShowDepositSlipModal(true)
+                            }}
                             className="flex items-center space-x-2 px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors min-h-[44px] sm:min-h-0 w-full sm:w-auto justify-center"
                           >
                             <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1573,7 +1986,43 @@ export default function OrderPage() {
                   {pendingOrder.status === 'approved' && (
                     <div className="text-center w-full">
                       <p className="text-sm text-gray-600 mb-4">
-                        You have an approved order. Please wait for it to be processed before creating a new order.
+                        Your order has been approved and is being processed.
+                      </p>
+                    </div>
+                  )}
+                  {pendingOrder.status === 'in-transit' && (
+                    <div className="text-center w-full">
+                      <p className="text-sm text-gray-600 mb-2">
+                        Your order is on its way. Please verify that the delivered items match your order when they arrive.
+                      </p>
+                      <p className="text-xs text-gray-500 mb-4">
+                        {verifiedItems.size} of {pendingOrder.order_details?.length || 0} items verified
+                      </p>
+                      <button
+                        onClick={handleVerifyItems}
+                        disabled={loading || !areAllItemsVerified()}
+                        className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
+                          loading || !areAllItemsVerified()
+                            ? 'bg-gray-400 cursor-not-allowed'
+                            : currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                              currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                              currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                              'bg-blue-600 hover:bg-blue-700'
+                        }`}
+                      >
+                        {loading ? (
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        ) : (
+                          <Check className="h-4 w-4" />
+                        )}
+                        <span>{loading ? 'Verifying...' : 'Verify Items'}</span>
+                      </button>
+                    </div>
+                  )}
+                  {pendingOrder.status === 'verified' && (
+                    <div className="text-center w-full">
+                      <p className="text-sm text-gray-600 mb-4">
+                        Items have been verified. Your order is ready for release.
                       </p>
                     </div>
                   )}
@@ -1587,7 +2036,11 @@ export default function OrderPage() {
                       <div className="flex justify-center sm:justify-end gap-2">
                         {pendingOrder.deposit_slip_url && (
                           <button
-                            onClick={() => window.open(pendingOrder.deposit_slip_url, '_blank')}
+                            onClick={() => {
+                              setSelectedDepositSlipImage(pendingOrder.deposit_slip_url)
+                              setSelectedDepositSlipOrder(pendingOrder)
+                              setShowDepositSlipModal(true)
+                            }}
                             className="flex items-center space-x-2 px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors min-h-[44px] sm:min-h-0 w-full sm:w-auto justify-center"
                           >
                             <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1642,15 +2095,15 @@ export default function OrderPage() {
               </div>
             ) : (
               <>
-                {/* Released Orders with Balance */}
-                {pastOrders.filter(order => order.status === 'released').length > 0 && (
+                {/* Fulfilled Orders with Balance */}
+                {pastOrders.filter(order => order.status === 'fulfilled').length > 0 && (
                   <div className="bg-white rounded-lg shadow-sm border p-6">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-semibold text-gray-900">Outstanding Balance</h3>
-                      <span className="text-sm text-gray-500">{pastOrders.filter(order => order.status === 'released').length} order(s)</span>
+                      <span className="text-sm text-gray-500">{pastOrders.filter(order => order.status === 'fulfilled').length} order(s)</span>
                     </div>
                     
-                    {pastOrders.filter(order => order.status === 'released').map((order) => (
+                    {pastOrders.filter(order => order.status === 'fulfilled').map((order) => (
                       <div key={order.id} className="bg-orange-50 border border-orange-200 rounded-lg p-4 mb-4">
                         <div className="flex items-center justify-between">
                           <div>
@@ -1717,15 +2170,23 @@ export default function OrderPage() {
                     currentTheme === 'yellow' ? 'text-yellow-400' :
                     'text-blue-400'
                   }`} />
-                  <h2 className="text-2xl font-bold text-gray-900 mb-2">No Pending Orders</h2>
-                  <p className="text-gray-600 mb-6">You can start a new order by clicking the button below.</p>
+                  <h2 className="text-2xl font-bold text-gray-900 mb-2">No Active Orders</h2>
+                  <p className="text-gray-600 mb-6">
+                    {canStartNewOrder() 
+                      ? "You can start a new order by clicking the button below."
+                      : "Please complete your current order before starting a new one."
+                    }
+                  </p>
                   <button
                     onClick={startNewOrder}
+                    disabled={!canStartNewOrder()}
                     className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
-                      currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                      currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                      currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
-                      'bg-blue-600 hover:bg-blue-700'
+                      canStartNewOrder()
+                        ? currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                          currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                          currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                          'bg-blue-600 hover:bg-blue-700'
+                        : 'bg-gray-400 cursor-not-allowed'
                     }`}
                   >
                     <Plus className="h-4 w-4" />
@@ -1737,8 +2198,8 @@ export default function OrderPage() {
             </div>
           )}
 
-        {/* Products View - Only show if no pending order */}
-        {currentView === 'products' && !pendingOrder && (
+        {/* Products View - Only show if no active order */}
+        {currentView === 'products' && canStartNewOrder() && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-8">
             <div className="lg:col-span-2 min-w-0">
               <div className="bg-white rounded-lg shadow-sm border p-3 sm:p-6">
@@ -2405,7 +2866,7 @@ export default function OrderPage() {
                         </div>
                         <div className="text-right">
                           <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                            order.status === 'released' 
+                            order.status === 'fulfilled' 
                               ? 'bg-green-100 text-green-800' 
                               : order.status === 'paid'
                               ? 'bg-blue-100 text-blue-800'
@@ -2480,14 +2941,16 @@ export default function OrderPage() {
                           </button>
                           
                           {order.status === 'paid' && order.deposit_slip_url && (
-                            <a
-                              href={order.deposit_slip_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                            <button
+                              onClick={() => {
+                                setSelectedDepositSlipImage(order.deposit_slip_url)
+                                setSelectedDepositSlipOrder(order)
+                                setShowDepositSlipModal(true)
+                              }}
                               className="flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
                             >
                               <span>View Deposit Slip</span>
-                            </a>
+                            </button>
                           )}
                         </div>
                       </div>
@@ -2500,12 +2963,203 @@ export default function OrderPage() {
         </div>
       )}
 
+      {/* Staff Codes View */}
+      {currentView === 'staff-assignments' && (
+        <div className="space-y-6">
+          <StaffAssignmentManager
+            locationId={location?.id || ''}
+            locationName={location?.name || ''}
+            currentBranchBrandName={location?.brand?.name}
+          />
+        </div>
+      )}
+
+      {/* DSIR Reports View */}
+      {currentView === 'dsir-reports' && (
+        <div className="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-8">
+          <div className="space-y-6">
+            <DSIRReportsViewer 
+              selectedBrand={location?.brand || { id: location?.brand_id || '', name: 'Current Brand' }}
+              selectedLocation={location || undefined}
+              showEditItemsButton={false}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Footer */}
       <div className="bg-white border-t py-4 mt-8">
         <div className="max-w-7xl mx-auto px-2 sm:px-4">
           <p className="text-center text-xs text-gray-500">© Gilnaks Food Corporation</p>
         </div>
       </div>
+
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <OrderSettings
+          currentLocation={location}
+          onBranchSwitch={handleBranchSwitch}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
+
+      {/* Branch Switcher Modal */}
+      {showBranchSwitcherModal && (
+        <BranchSwitcher
+          currentLocation={location}
+          onBranchSwitch={handleBranchSwitch}
+          onClose={() => setShowBranchSwitcherModal(false)}
+          onOpenSettings={() => setShowSettingsModal(true)}
+        />
+      )}
+
+      {/* Returnable Pans Modal */}
+      {showReturnablePansModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Attach Returnable Pans
+                </h3>
+                <button
+                  onClick={() => setShowReturnablePansModal(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {/* Instructions */}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <p className="text-sm text-blue-800">
+                      <strong>Instructions:</strong> Arrange all returnable pans in a side view for easy counting. Tape all pans together and include a paper with branch name, date, and total number of pans. Image should match required quantity below.
+                    </p>
+                </div>
+
+                {/* Total Returnable Pans */}
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <div className="text-center">
+                    <h4 className="text-sm font-medium text-gray-900 mb-2">
+                      Required Returnable Pans:
+                    </h4>
+                    <p className="text-2xl font-bold text-gray-900">
+                      {getReturnablePansProducts(pendingOrder).reduce((total: number, detail: any) => total + detail.quantity, 0)} pans
+                    </p>
+                  </div>
+                </div>
+
+                {/* Current Image */}
+                {pendingOrder.returnable_pans_image_url && (
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-900 mb-2">
+                      Current Image:
+                    </h4>
+                    <div className="relative">
+                      <img
+                        src={pendingOrder.returnable_pans_image_url}
+                        alt="Current returnable pans"
+                        className="w-full h-32 object-cover rounded-lg border"
+                      />
+                      <button
+                        onClick={() => window.open(pendingOrder.returnable_pans_image_url, '_blank')}
+                        className="absolute top-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded"
+                      >
+                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Upload Button */}
+                <div>
+                  <input
+                    type="file"
+                    id="returnable-pans-upload"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0]
+                      if (file) {
+                        handleReturnablePansUpload(pendingOrder.id, file)
+                      }
+                    }}
+                    className="hidden"
+                    disabled={uploadingReturnablePans}
+                  />
+                  <label
+                    htmlFor="returnable-pans-upload"
+                    className={`flex items-center justify-center space-x-2 px-4 py-3 text-white rounded-lg transition-colors cursor-pointer w-full ${
+                      uploadingReturnablePans
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                          currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                          currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                          'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    {uploadingReturnablePans ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        <span>Uploading...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="h-4 w-4" />
+                        <span>
+                          {pendingOrder.returnable_pans_image_url ? 'Replace Image' : 'Upload Image'}
+                        </span>
+                      </>
+                    )}
+                  </label>
+                </div>
+
+                {/* Note */}
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                  <p className="text-sm text-red-800 text-center font-medium">
+                    ⚠️ Orders will not be approved without this image
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deposit Slip Image Modal */}
+      {showDepositSlipModal && selectedDepositSlipImage && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Deposit Slip
+                {selectedDepositSlipOrder && ` - ₱${selectedDepositSlipOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              </h3>
+              <button
+                onClick={() => {
+                  setShowDepositSlipModal(false)
+                  setSelectedDepositSlipImage(null)
+                  setSelectedDepositSlipOrder(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="text-center flex-1 flex items-center justify-center overflow-auto">
+              <img
+                src={selectedDepositSlipImage}
+                alt="Deposit slip"
+                className="max-h-[70vh] w-auto rounded-lg border"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

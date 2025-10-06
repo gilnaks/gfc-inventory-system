@@ -27,10 +27,28 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   })
   const [categories, setCategories] = useState<string[]>([])
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false)
+  const [fetchTimeout, setFetchTimeout] = useState<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
     if (selectedBrand) {
-      fetchProducts()
+      // Clear any existing timeout
+      if (fetchTimeout) {
+        clearTimeout(fetchTimeout)
+      }
+      
+      // Set a new timeout to debounce the request
+      const timeout = setTimeout(() => {
+        fetchProducts()
+      }, 100) // 100ms debounce
+      
+      setFetchTimeout(timeout)
+    }
+    
+    // Cleanup timeout on unmount or dependency change
+    return () => {
+      if (fetchTimeout) {
+        clearTimeout(fetchTimeout)
+      }
     }
   }, [selectedBrand])
 
@@ -150,22 +168,53 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     
     setLoading(true)
     try {
+      console.log('Fetching products for brand:', selectedBrand.name)
+      
+      // Query products directly instead of using the view for better performance
       const { data, error } = await supabase
-        .from('inventory_summary')
-        .select('*')
+        .from('products')
+        .select(`
+          id,
+          brand_id,
+          name,
+          sku,
+          category,
+          unit,
+          price,
+          initial_stock,
+          production,
+          released,
+          reserved,
+          created_at,
+          updated_at
+        `)
         .eq('brand_id', selectedBrand.id)
-        .order('product_name')
+        .order('name')
       
       if (error) {
         console.error('Error fetching products:', error)
+        alert('Failed to load products. Please try refreshing the page.')
         return
       }
       
       if (data) {
-        setProducts(data)
+        console.log('Products fetched successfully:', data.length, 'items')
+        
+        // Calculate computed fields on the client side for better performance
+        const productsWithCalculations = data.map(product => ({
+          ...product,
+          product_name: product.name,
+          brand_name: selectedBrand.name,
+          brand_slug: selectedBrand.slug,
+          final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
+          available_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0) - (product.reserved || 0)
+        }))
+        
+        setProducts(productsWithCalculations)
       }
     } catch (error) {
       console.error('Error fetching products:', error)
+      alert('Failed to load products. Please check your internet connection and try again.')
     } finally {
       setLoading(false)
     }
@@ -396,10 +445,15 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
-        <h3 className="text-xl font-semibold text-gray-900">
-          Products for {selectedBrand.name}
-        </h3>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900">
+            Products & Inventory
+          </h1>
+          <p className="text-sm text-gray-600">
+            Manage products and inventory for {selectedBrand.name}
+          </p>
+        </div>
         <div className="flex space-x-3">
           <button
             onClick={handleFinalizeStock}
@@ -719,8 +773,8 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                           type="number"
                           min="0"
                           step="0.01"
-                          value={editingProduct.price || 0}
-                          onChange={(e) => setEditingProduct({...editingProduct, price: parseFloat(e.target.value) || 0})}
+                          value={editingProduct.price === 0 ? '' : editingProduct.price || ''}
+                          onChange={(e) => setEditingProduct({...editingProduct, price: e.target.value === '' ? 0 : parseFloat(e.target.value) || 0})}
                           className="w-full max-w-20 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
@@ -732,8 +786,8 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         <input
                           type="number"
                           min="0"
-                          value={editingProduct.initial_stock || 0}
-                          onChange={(e) => setEditingProduct({...editingProduct, initial_stock: parseInt(e.target.value) || 0})}
+                          value={editingProduct.initial_stock === 0 ? '' : editingProduct.initial_stock || ''}
+                          onChange={(e) => setEditingProduct({...editingProduct, initial_stock: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
                           className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
@@ -745,8 +799,8 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         <input
                           type="number"
                           min="0"
-                          value={editingProduct.production || 0}
-                          onChange={(e) => setEditingProduct({...editingProduct, production: parseInt(e.target.value) || 0})}
+                          value={editingProduct.production === 0 ? '' : editingProduct.production || ''}
+                          onChange={(e) => setEditingProduct({...editingProduct, production: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
                           className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
@@ -758,8 +812,8 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         <input
                           type="number"
                           min="0"
-                          value={editingProduct.released || 0}
-                          onChange={(e) => setEditingProduct({...editingProduct, released: parseInt(e.target.value) || 0})}
+                          value={editingProduct.released === 0 ? '' : editingProduct.released || ''}
+                          onChange={(e) => setEditingProduct({...editingProduct, released: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
                           className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
@@ -777,8 +831,8 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         <input
                           type="number"
                           min="0"
-                          value={editingProduct.reserved || 0}
-                          onChange={(e) => setEditingProduct({...editingProduct, reserved: parseInt(e.target.value) || 0})}
+                          value={editingProduct.reserved === 0 ? '' : editingProduct.reserved || ''}
+                          onChange={(e) => setEditingProduct({...editingProduct, reserved: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
                           className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (

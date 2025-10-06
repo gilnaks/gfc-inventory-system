@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
-import { ShoppingCart, Package, CheckCircle, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2 } from 'lucide-react'
+import { ShoppingCart, Package, CheckCircle, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
 
 interface Location {
@@ -10,6 +10,7 @@ interface Location {
   passkey: string
   franchisee?: string
   company_owned?: boolean
+  brand?: Brand
 }
 
 interface CustomerOrder {
@@ -18,12 +19,13 @@ interface CustomerOrder {
   brand_id: string
   customer_name: string
   customer_contact?: string
-  status: 'pending' | 'approved' | 'released' | 'paid' | 'complete' | 'cancelled'
+  status: 'pending' | 'approved' | 'in-transit' | 'verified' | 'fulfilled' | 'paid' | 'complete' | 'cancelled'
   total_amount: number
-  delivery_type: 'delivery' | 'pickup'
+  delivery_type: 'delivery' | 'pickup' | 'none'
   notes?: string
   created_at: string
   updated_at: string
+  returnable_pans_image_url?: string
   location: Location
   brand: Brand
   order_details: OrderDetail[]
@@ -43,7 +45,7 @@ interface LogisticsAssignment {
     product_id: string
     quantity: number
     unit_price: number
-    product: {
+    products: {
       id: string
       name: string
       product_name?: string
@@ -73,6 +75,23 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const [completePage, setCompletePage] = useState(1)
   const [cancelledPage, setCancelledPage] = useState(1)
   const itemsPerPage = 10
+  const [showReturnablePansModal, setShowReturnablePansModal] = useState(false)
+  const [selectedReturnablePansImage, setSelectedReturnablePansImage] = useState<string | null>(null)
+  const [selectedReturnablePansOrder, setSelectedReturnablePansOrder] = useState<CustomerOrder | null>(null)
+
+  // Helper function to get franchise icon color based on theme
+  const getFranchiseIconColor = () => {
+    switch (theme) {
+      case 'green':
+        return 'text-green-600'
+      case 'red':
+        return 'text-red-600'
+      case 'yellow':
+        return 'text-yellow-600'
+      default:
+        return 'text-blue-600'
+    }
+  }
 
   useEffect(() => {
     fetchOrders()
@@ -118,11 +137,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         .from('customer_orders')
         .select(`
           *,
-          location:locations(*),
+          location:locations(
+            *,
+            brand:brands(*)
+          ),
           brand:brands(*),
           order_details(
             *,
-            product:products(id, name, sku, unit, category)
+            products:products(id, name, sku, unit, category)
           ),
           logistics_assignments(
             id,
@@ -181,12 +203,58 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         return
       }
 
-      // If releasing order, check if it's company-owned and set status accordingly
-      if (newStatus === 'released') {
-        // For company-owned locations, go directly to complete
-        if (orderData.location?.company_owned) {
-          newStatus = 'complete'
+      // If fulfilling order, update inventory quantities
+      if (newStatus === 'fulfilled') {
+        // First get the order details to know which products and quantities to update
+        const { data: orderDetails, error: detailsError } = await supabase
+          .from('order_details')
+          .select('product_id, quantity')
+          .eq('order_id', orderId)
+
+        if (detailsError) {
+          console.error('Error fetching order details:', detailsError)
+          alert('Failed to fetch order details')
+          return
         }
+
+        // Update product quantities: subtract from both initial_stock and released (items are now delivered/sold)
+        for (const detail of orderDetails || []) {
+          // First get current quantities
+          const { data: productData, error: fetchError } = await supabase
+            .from('products')
+            .select('initial_stock, released')
+            .eq('id', detail.product_id)
+            .single()
+
+          if (fetchError) {
+            console.error('Error fetching product data:', fetchError)
+            alert('Failed to fetch product data')
+            return
+          }
+
+          // For fulfilled orders, subtract from both initial_stock and released (items are delivered)
+          const newInitialStock = Math.max(0, (productData?.initial_stock || 0) - detail.quantity)
+          const newReleased = Math.max(0, (productData?.released || 0) - detail.quantity)
+
+          const { error: updateError } = await supabase
+            .from('products')
+            .update({
+              initial_stock: newInitialStock,
+              released: newReleased,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', detail.product_id)
+
+          if (updateError) {
+            console.error('Error updating product quantities:', updateError)
+            alert('Failed to update product quantities')
+            return
+          }
+        }
+      }
+
+      // If dispatching order (moving to in-transit), move from reserved to released
+      if (newStatus === 'in-transit') {
         // First get the order details to know which products and quantities to update
         const { data: orderDetails, error: detailsError } = await supabase
           .from('order_details')
@@ -201,6 +269,12 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
         // Update product quantities: move from reserved to released
         for (const detail of orderDetails || []) {
+          // Skip if product_id is null or undefined
+          if (!detail.product_id) {
+            console.warn('Skipping order detail with missing product_id:', detail)
+            continue
+          }
+
           // First get current quantities
           const { data: productData, error: fetchError } = await supabase
             .from('products')
@@ -209,9 +283,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             .single()
 
           if (fetchError) {
-            console.error('Error fetching product data:', fetchError)
-            alert('Failed to fetch product data')
-            return
+            console.error('Error fetching product data for product_id:', detail.product_id, fetchError)
+            // Continue with other products instead of failing completely
+            continue
+          }
+
+          if (!productData) {
+            console.warn('Product not found for product_id:', detail.product_id)
+            continue
           }
 
           const newReserved = Math.max(0, (productData?.reserved || 0) - detail.quantity)
@@ -234,6 +313,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         }
       }
 
+      // If completing order from fulfilled status, no inventory changes needed
+      if (newStatus === 'complete') {
+        // For complete orders, no inventory changes are needed
+        // The order is already fulfilled and inventory has been properly managed
+        console.log('Order marked as complete - no inventory changes needed')
+      }
+
       // If cancelling order, return reserved quantities to available
       if (newStatus === 'cancelled') {
         // First get the order details to know which products and quantities to update
@@ -248,29 +334,58 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
           return
         }
 
-        // Update product quantities: remove from reserved
+        // Update product quantities: remove from reserved and released (depending on order status)
         for (const detail of orderDetails || []) {
-          // First get current reserved quantity
+          // Skip if product_id is null or undefined
+          if (!detail.product_id) {
+            console.warn('Skipping order detail with missing product_id:', detail)
+            continue
+          }
+
+          // First get current quantities
           const { data: productData, error: fetchError } = await supabase
             .from('products')
-            .select('reserved')
+            .select('reserved, released')
             .eq('id', detail.product_id)
             .single()
 
           if (fetchError) {
-            console.error('Error fetching product data:', fetchError)
-            alert('Failed to fetch product data')
-            return
+            console.error('Error fetching product data for product_id:', detail.product_id, fetchError)
+            // Continue with other products instead of failing completely
+            continue
           }
 
-          const newReserved = Math.max(0, (productData?.reserved || 0) - detail.quantity)
+          if (!productData) {
+            console.warn('Product not found for product_id:', detail.product_id)
+            continue
+          }
+
+          // Determine what to return based on current state
+          // If there are released quantities, return those; otherwise return reserved
+          const currentReleased = productData?.released || 0
+          const currentReserved = productData?.reserved || 0
+          
+          let updateData: any = { updated_at: new Date().toISOString() }
+          
+          if (currentReleased >= detail.quantity) {
+            // If there are enough released quantities, return those
+            updateData.released = Math.max(0, currentReleased - detail.quantity)
+          } else if (currentReserved >= detail.quantity) {
+            // If there are enough reserved quantities, return those
+            updateData.reserved = Math.max(0, currentReserved - detail.quantity)
+          } else {
+            // Handle partial quantities in both reserved and released
+            const remainingToReturn = detail.quantity
+            let releasedToReturn = Math.min(remainingToReturn, currentReleased)
+            let reservedToReturn = remainingToReturn - releasedToReturn
+            
+            updateData.released = Math.max(0, currentReleased - releasedToReturn)
+            updateData.reserved = Math.max(0, currentReserved - reservedToReturn)
+          }
 
           const { error: updateError } = await supabase
             .from('products')
-            .update({
-              reserved: newReserved,
-              updated_at: new Date().toISOString()
-            })
+            .update(updateData)
             .eq('id', detail.product_id)
 
           if (updateError) {
@@ -278,6 +393,18 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             alert('Failed to update product quantities')
             return
           }
+        }
+
+        // Delete logistics assignments for cancelled orders
+        const { error: logisticsError } = await supabase
+          .from('logistics_assignments')
+          .delete()
+          .eq('order_id', orderId)
+
+        if (logisticsError) {
+          console.error('Error deleting logistics assignments:', logisticsError)
+          alert('Failed to delete logistics assignments')
+          return
         }
       }
 
@@ -307,12 +434,110 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   }
 
   const handleDeleteOrder = async (orderId: string) => {
-    if (!confirm('Are you sure you want to delete this order? This action cannot be undone.')) return
-
     try {
       setUpdatingOrder(orderId)
 
-      // First delete the order details
+      // First get the order to check its status and details
+      const { data: orderData, error: orderError } = await supabase
+        .from('customer_orders')
+        .select(`
+          *,
+          order_details(
+            product_id,
+            quantity
+          )
+        `)
+        .eq('id', orderId)
+        .single()
+
+      if (orderError) {
+        console.error('Error fetching order:', orderError)
+        alert('Failed to fetch order data')
+        return
+      }
+
+      // If the order is fulfilled, add the released quantities back to initial stock
+      if (orderData.status === 'fulfilled' && orderData.order_details) {
+        for (const detail of orderData.order_details) {
+          // Skip if product_id is null or undefined
+          if (!detail.product_id) {
+            console.warn('Skipping order detail with missing product_id:', detail)
+            continue
+          }
+
+          // Get current product quantities
+          const { data: productData, error: fetchError } = await supabase
+            .from('products')
+            .select('initial_stock, released')
+            .eq('id', detail.product_id)
+            .single()
+
+          if (fetchError) {
+            console.error('Error fetching product data for product_id:', detail.product_id, fetchError)
+            // Continue with other products instead of failing completely
+            continue
+          }
+
+          if (!productData) {
+            console.warn('Product not found for product_id:', detail.product_id)
+            continue
+          }
+
+          // Add released quantity back to initial stock and subtract from released
+          const newInitialStock = (productData?.initial_stock || 0) + detail.quantity
+          const newReleased = Math.max(0, (productData?.released || 0) - detail.quantity)
+
+          const { error: updateError } = await supabase
+            .from('products')
+            .update({
+              initial_stock: newInitialStock,
+              released: newReleased,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', detail.product_id)
+
+          if (updateError) {
+            console.error('Error updating product quantities:', updateError)
+            alert('Failed to update product quantities')
+            return
+          }
+        }
+      }
+
+      // Delete returnable pans image if it exists
+      if (orderData.returnable_pans_image_url) {
+        try {
+          // Extract filename from URL
+          const urlParts = orderData.returnable_pans_image_url.split('/')
+          const fileName = urlParts[urlParts.length - 1]
+          
+          const { error: storageError } = await supabase.storage
+            .from('returnable_pans')
+            .remove([fileName])
+
+          if (storageError) {
+            console.error('Error deleting returnable pans image:', storageError)
+            // Don't fail the entire operation for storage errors, just log it
+          }
+        } catch (error) {
+          console.error('Error processing returnable pans image deletion:', error)
+          // Continue with order deletion even if image deletion fails
+        }
+      }
+
+      // Delete logistics assignments
+      const { error: logisticsError } = await supabase
+        .from('logistics_assignments')
+        .delete()
+        .eq('order_id', orderId)
+
+      if (logisticsError) {
+        console.error('Error deleting logistics assignments:', logisticsError)
+        alert('Failed to delete logistics assignments')
+        return
+      }
+
+      // Delete the order details
       const { error: detailsError } = await supabase
         .from('order_details')
         .delete()
@@ -349,14 +574,134 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     }
   }
 
+  const handleDeleteCompleteOrder = async (orderId: string) => {
+    try {
+      setUpdatingOrder(orderId)
+
+      // First get the order to check for related data
+      const { data: orderData, error: orderError } = await supabase
+        .from('customer_orders')
+        .select(`
+          *,
+          order_details(
+            product_id,
+            quantity
+          )
+        `)
+        .eq('id', orderId)
+        .single()
+
+      if (orderError) {
+        console.error('Error fetching order:', orderError)
+        alert('Failed to fetch order data')
+        return
+      }
+
+      // Delete returnable pans image if it exists
+      if (orderData.returnable_pans_image_url) {
+        try {
+          // Extract filename from URL
+          const urlParts = orderData.returnable_pans_image_url.split('/')
+          const fileName = urlParts[urlParts.length - 1]
+          
+          const { error: storageError } = await supabase.storage
+            .from('returnable_pans')
+            .remove([fileName])
+
+          if (storageError) {
+            console.error('Error deleting returnable pans image:', storageError)
+            // Don't fail the entire operation for storage errors, just log it
+          }
+        } catch (error) {
+          console.error('Error processing returnable pans image deletion:', error)
+          // Continue with order deletion even if image deletion fails
+        }
+      }
+
+      // Delete deposit slip image if it exists
+      if (orderData.deposit_slip_url) {
+        try {
+          // Extract filename from URL
+          const urlParts = orderData.deposit_slip_url.split('/')
+          const fileName = urlParts[urlParts.length - 1]
+          
+          const { error: storageError } = await supabase.storage
+            .from('deposit_slips')
+            .remove([fileName])
+
+          if (storageError) {
+            console.error('Error deleting deposit slip image:', storageError)
+            // Don't fail the entire operation for storage errors, just log it
+          }
+        } catch (error) {
+          console.error('Error processing deposit slip image deletion:', error)
+          // Continue with order deletion even if image deletion fails
+        }
+      }
+
+      // Delete logistics assignments
+      const { error: logisticsError } = await supabase
+        .from('logistics_assignments')
+        .delete()
+        .eq('order_id', orderId)
+
+      if (logisticsError) {
+        console.error('Error deleting logistics assignments:', logisticsError)
+        alert('Failed to delete logistics assignments')
+        return
+      }
+
+      // Delete the order details
+      const { error: detailsError } = await supabase
+        .from('order_details')
+        .delete()
+        .eq('order_id', orderId)
+
+      if (detailsError) {
+        console.error('Error deleting order details:', detailsError)
+        alert('Failed to delete order details')
+        return
+      }
+
+      // Finally delete the order
+      const { error } = await supabase
+        .from('customer_orders')
+        .delete()
+        .eq('id', orderId)
+
+      if (error) {
+        console.error('Error deleting order:', error)
+        alert('Failed to delete order')
+        return
+      }
+
+      // Refresh orders and trigger product refresh
+      fetchOrders()
+      if (onOrderUpdate) {
+        onOrderUpdate()
+      }
+
+      alert('Complete order deleted successfully')
+    } catch (error) {
+      console.error('Error deleting complete order:', error)
+      alert('Failed to delete complete order')
+    } finally {
+      setUpdatingOrder(null)
+    }
+  }
+
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'pending':
         return <Clock className="h-4 w-4 text-yellow-500" />
       case 'approved':
         return <CheckCircle className="h-4 w-4 text-blue-500" />
-      case 'released':
-        return <Truck className="h-4 w-4 text-green-500" />
+      case 'in-transit':
+        return <Truck className="h-4 w-4 text-orange-500" />
+      case 'verified':
+        return <CheckCircle className="h-4 w-4 text-green-500" />
+      case 'fulfilled':
+        return <Package className="h-4 w-4 text-green-500" />
       case 'cancelled':
         return <XCircle className="h-4 w-4 text-red-500" />
       default:
@@ -370,7 +715,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         return 'bg-yellow-100 text-yellow-800'
       case 'approved':
         return 'bg-blue-100 text-blue-800'
-      case 'released':
+      case 'in-transit':
+        return 'bg-orange-100 text-orange-800'
+      case 'verified':
+        return 'bg-green-100 text-green-800'
+      case 'fulfilled':
         return 'bg-green-100 text-green-800'
       case 'paid':
         return 'bg-purple-100 text-purple-800'
@@ -387,6 +736,59 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     return order.order_details.reduce((total, detail) => total + detail.quantity, 0)
   }
 
+  const isOrderScheduled = (order: CustomerOrder) => {
+    return order.logistics_assignments && order.logistics_assignments.length > 0
+  }
+
+  const canDispatchOrder = (order: CustomerOrder) => {
+    if (!isOrderScheduled(order)) {
+      return false
+    }
+    
+    // Check if any logistics assignment date is today or has elapsed
+    const today = new Date()
+    today.setHours(0, 0, 0, 0) // Start of today
+    
+    return order.logistics_assignments?.some(assignment => {
+      const assignmentDate = new Date(assignment.date)
+      assignmentDate.setHours(0, 0, 0, 0) // Start of assignment date
+      return assignmentDate <= today
+    }) || false
+  }
+
+  // Check if order requires returnable pans image
+  const requiresReturnablePans = (order: CustomerOrder) => {
+    console.log('requiresReturnablePans - Order details:', order.order_details?.length)
+    console.log('requiresReturnablePans - Brand:', order.location?.brand)
+    
+    if (!order.order_details || !order.location?.brand) {
+      console.log('requiresReturnablePans - Missing order_details or brand')
+      return false
+    }
+    
+    const brandSlug = order.location.brand.slug.toLowerCase()
+    console.log('requiresReturnablePans - Brand slug:', brandSlug)
+    
+    const hasReturnablePansProducts = order.order_details.some((detail: any) => {
+      const productCategory = detail.products?.category?.toLowerCase() || ''
+      console.log('requiresReturnablePans - Product:', detail.products?.name, 'Category:', productCategory)
+      
+      switch (brandSlug) {
+        case 'gelatofilipino':
+          return productCategory === 'gelato'
+        case 'mychoice':
+          return productCategory === 'ice cream'
+        case 'mang-sorbetes':
+          return productCategory === 'sorbetes'
+        default:
+          return false
+      }
+    })
+    
+    console.log('requiresReturnablePans - Has returnable pans products:', hasReturnablePansProducts)
+    return hasReturnablePansProducts
+  }
+
 
   const getCategoryTotals = (order: CustomerOrder) => {
     if (!order.order_details) return []
@@ -395,8 +797,8 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     
     order.order_details.forEach(detail => {
       // Check if category exists and is not null/undefined/empty
-      const category = detail.product?.category && detail.product.category.trim() !== '' 
-        ? detail.product.category 
+      const category = detail.products?.category && detail.products.category.trim() !== '' 
+        ? detail.products.category 
         : 'Uncategorized'
         
       if (!categoryMap.has(category)) {
@@ -438,14 +840,18 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
   const getPaginatedOrders = (status: string, page: number) => {
     const statusOrders = getOrdersByStatus(status)
-    const startIndex = (page - 1) * itemsPerPage
-    const endIndex = startIndex + itemsPerPage
+    // Use 5 items per page for complete and cancelled orders, 10 for others
+    const pageSize = (status === 'complete' || status === 'cancelled') ? 5 : itemsPerPage
+    const startIndex = (page - 1) * pageSize
+    const endIndex = startIndex + pageSize
     return statusOrders.slice(startIndex, endIndex)
   }
 
   const getTotalPages = (status: string) => {
     const statusOrders = getOrdersByStatus(status)
-    return Math.ceil(statusOrders.length / itemsPerPage)
+    // Use 5 items per page for complete and cancelled orders, 10 for others
+    const pageSize = (status === 'complete' || status === 'cancelled') ? 5 : itemsPerPage
+    return Math.ceil(statusOrders.length / pageSize)
   }
 
   // Reusable table component for orders
@@ -486,6 +892,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   Logistics
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Returnable
+                </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Total Amount
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -508,9 +917,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     <div className="flex items-center space-x-1">
-                      {order.location?.company_owned && (
+                      {order.location?.company_owned ? (
                         <div title="Company Owned">
                           <Building2 className="h-4 w-4 text-blue-600" />
+                        </div>
+                      ) : (
+                        <div title="Franchise">
+                          <Store className={`h-4 w-4 ${getFranchiseIconColor()}`} />
                         </div>
                       )}
                       <span>{order.location?.name}</span>
@@ -530,9 +943,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
                         order.delivery_type === 'delivery' 
                           ? 'bg-blue-100 text-blue-800' 
-                          : 'bg-green-100 text-green-800'
+                          : order.delivery_type === 'pickup'
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-gray-200 text-gray-700'
                       }`}>
-                        {order.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}
+                        {order.delivery_type === 'delivery' ? 'Delivery' : order.delivery_type === 'pickup' ? 'Pickup' : 'None'}
                       </span>
                       {order.logistics_assignments && order.logistics_assignments.length > 0 && (
                         <div className="text-xs text-gray-500">
@@ -546,6 +961,48 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         </div>
                       )}
                     </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                    {(() => {
+                      const returnablePansProducts = order.order_details.filter((detail: any) => {
+                        if (!order.brand && !order.location?.brand) return false
+                        const brandSlug = (order.brand?.slug || order.location?.brand?.slug)?.toLowerCase()
+                        const productCategory = detail.products?.category?.toLowerCase() || ''
+                        
+                        switch (brandSlug) {
+                          case 'gelatofilipino':
+                            return productCategory === 'gelato'
+                          case 'mychoice':
+                            return productCategory === 'ice cream'
+                          case 'mang-sorbetes':
+                            return productCategory === 'sorbetes'
+                          default:
+                            return false
+                        }
+                      })
+                      
+                      const totalPans = returnablePansProducts.reduce((total: number, detail: any) => total + detail.quantity, 0)
+                      
+                      if (totalPans > 0 && order.returnable_pans_image_url) {
+                        return (
+                          <button
+                            onClick={() => {
+                              setSelectedReturnablePansImage(order.returnable_pans_image_url)
+                              setSelectedReturnablePansOrder(order)
+                              setShowReturnablePansModal(true)
+                            }}
+                            className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
+                            title="Click to view returnable pans image"
+                          >
+                            {totalPans} pans
+                          </button>
+                        )
+                      } else if (totalPans > 0) {
+                        return <span className="text-red-600 font-medium cursor-default">{totalPans} pans</span>
+                      } else {
+                        return <span className="text-gray-400">-</span>
+                      }
+                    })()}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-green-600">
                     ₱{getTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -562,10 +1019,31 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       
                       {order.status === 'pending' && (
                         <button
-                          onClick={() => updateOrderStatus(order.id, 'approved')}
-                          disabled={updatingOrder === order.id}
-                          className={`p-1 rounded ${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 'text-green-600 hover:text-green-900 hover:bg-green-100'}`}
-                          title="Approve Order"
+                          onClick={() => {
+                            const needsReturnablePans = requiresReturnablePans(order)
+                            const hasImage = !!order.returnable_pans_image_url
+                            console.log('Order:', order.id.slice(-8))
+                            console.log('Needs returnable pans:', needsReturnablePans)
+                            console.log('Has image:', hasImage)
+                            console.log('Should be disabled:', needsReturnablePans && !hasImage)
+                            
+                            if (needsReturnablePans && !hasImage) {
+                              alert('Returnable pans image is required before approving this order')
+                              return
+                            }
+                            
+                            updateOrderStatus(order.id, 'approved')
+                          }}
+                          className={`p-1 rounded ${
+                            requiresReturnablePans(order) && !order.returnable_pans_image_url
+                              ? 'text-gray-400 cursor-not-allowed'
+                              : 'text-green-600 hover:text-green-900 hover:bg-green-100'
+                          }`}
+                          title={
+                            requiresReturnablePans(order) && !order.returnable_pans_image_url
+                              ? "Returnable pans image required"
+                              : "Approve Order"
+                          }
                         >
                           {updatingOrder === order.id ? (
                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
@@ -574,23 +1052,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                           )}
                         </button>
                       )}
-                      
+
                       {order.status === 'approved' && (
                         <button
-                          onClick={() => {
-                            const actionText = order.location?.company_owned ? "complete" : "release"
-                            if (confirm(`Are you sure you want to ${actionText} this order? This action will update inventory quantities and cannot be undone.`)) {
-                              updateOrderStatus(order.id, 'released')
-                            }
-                          }}
-                          disabled={updatingOrder === order.id}
-                          className={`p-1 rounded ${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 
-                            theme === 'green' ? 'text-green-600 hover:text-green-900 hover:bg-green-100' :
-                            theme === 'red' ? 'text-red-600 hover:text-red-900 hover:bg-red-100' :
-                            theme === 'yellow' ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100' :
-                            'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
-                          }`}
-                          title={order.location?.company_owned ? "Complete Order" : "Release Order"}
+                          onClick={() => updateOrderStatus(order.id, 'in-transit')}
+                          disabled={updatingOrder === order.id || !canDispatchOrder(order)}
+                          className={`p-1 rounded ${updatingOrder === order.id || !canDispatchOrder(order) ? 'text-gray-400 cursor-not-allowed' : 'text-orange-600 hover:text-orange-900 hover:bg-orange-100'}`}
+                          title={!isOrderScheduled(order) ? "Schedule order in logistics tab first" : !canDispatchOrder(order) ? "Delivery date has not arrived yet" : "Dispatch Order"}
                         >
                           {updatingOrder === order.id ? (
                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
@@ -600,7 +1068,31 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         </button>
                       )}
                       
-                      {(order.status === 'pending' || order.status === 'approved') && (
+                      {order.status === 'verified' && (
+                        <button
+                          onClick={() => {
+                            if (confirm('Are you sure you want to mark this order as fulfilled? This action will subtract items from both initial stock and released inventory and cannot be undone.')) {
+                              updateOrderStatus(order.id, 'fulfilled')
+                            }
+                          }}
+                          disabled={updatingOrder === order.id}
+                          className={`p-1 rounded ${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 
+                            theme === 'green' ? 'text-green-600 hover:text-green-900 hover:bg-green-100' :
+                            theme === 'red' ? 'text-red-600 hover:text-red-900 hover:bg-red-100' :
+                            theme === 'yellow' ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100' :
+                            'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
+                          }`}
+                          title="Mark as Fulfilled"
+                        >
+                          {updatingOrder === order.id ? (
+                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+                          ) : (
+                            <Package className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
+                      
+                      {(order.status === 'pending' || order.status === 'approved' || order.status === 'in-transit' || order.status === 'verified') && (
                         <button
                           onClick={() => {
                             if (confirm('Are you sure you want to cancel this order? This action will return reserved stock to available inventory and cannot be undone.')) {
@@ -619,12 +1111,62 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         </button>
                       )}
 
-                      {(order.status === 'cancelled' || order.status === 'released') && (
+                      {order.status === 'fulfilled' && (
                         <button
-                          onClick={() => handleDeleteOrder(order.id)}
+                          onClick={() => {
+                            if (confirm('Are you sure you want to mark this order as complete? This will skip the paid status and cannot be undone.')) {
+                              updateOrderStatus(order.id, 'complete')
+                            }
+                          }}
+                          disabled={updatingOrder === order.id}
+                          className={`p-1 rounded ${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 
+                            theme === 'green' ? 'text-green-600 hover:text-green-900 hover:bg-green-100' :
+                            theme === 'red' ? 'text-red-600 hover:text-red-900 hover:bg-red-100' :
+                            theme === 'yellow' ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100' :
+                            'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
+                          }`}
+                          title="Mark as Complete"
+                        >
+                          {updatingOrder === order.id ? (
+                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+                          ) : (
+                            <CheckCircle className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
+
+                      {(order.status === 'cancelled' || order.status === 'fulfilled') && (
+                        <button
+                          onClick={() => {
+                            const actionText = order.status === 'fulfilled' 
+                              ? 'delete this fulfilled order? This will restore the released quantities back to initial stock and cannot be undone.'
+                              : 'delete this order? This action cannot be undone.'
+                            if (confirm(`Are you sure you want to ${actionText}`)) {
+                              handleDeleteOrder(order.id)
+                            }
+                          }}
                           disabled={updatingOrder === order.id}
                           className={`${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 'text-red-600 hover:text-red-900'}`}
-                          title="Delete Order"
+                          title={order.status === 'fulfilled' ? 'Delete Order (Restores inventory)' : 'Delete Order'}
+                        >
+                          {updatingOrder === order.id ? (
+                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
+
+                      {order.status === 'complete' && (
+                        <button
+                          onClick={() => {
+                            if (confirm('Are you sure you want to delete this complete order? This will permanently remove the order and all related data (logistics, images, etc.) but will NOT affect inventory. This action cannot be undone.')) {
+                              handleDeleteCompleteOrder(order.id)
+                            }
+                          }}
+                          disabled={updatingOrder === order.id}
+                          className={`${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 'text-red-600 hover:text-red-900'}`}
+                          title="Delete Complete Order (No inventory changes)"
                         >
                           {updatingOrder === order.id ? (
                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
@@ -802,12 +1344,23 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             
             .status-pending { background: white; color: black; }
             .status-approved { background: white; color: black; }
-            .status-released { background: black; color: white; }
+            .status-fulfilled { background: black; color: white; }
             .status-cancelled { background: white; color: black; }
             
             .items { 
               padding: 8px 12px;
               flex: 1;
+            }
+            
+            .items-multi-column {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 20px;
+            }
+            
+            .items-column {
+              display: flex;
+              flex-direction: column;
             }
             
             .items-title {
@@ -1053,7 +1606,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 </div>
                 <div class="info-item">
                   <span class="info-label">Location</span>
-                  <span class="info-value">${selectedOrder.location?.company_owned ? '🏢 ' : ''}${selectedOrder.location?.name || 'N/A'}</span>
+                  <span class="info-value">${selectedOrder.location?.name || 'N/A'}</span>
                 </div>
                 <div class="info-item">
                   <span class="info-label">Status</span>
@@ -1061,35 +1614,100 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 </div>
                 <div class="info-item">
                   <span class="info-label">Logistics</span>
-                  <span class="info-value">${selectedOrder.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                  <span class="info-value">${selectedOrder.delivery_type === 'delivery' ? 'Delivery' : selectedOrder.delivery_type === 'pickup' ? 'Pickup' : 'None'}</span>
                 </div>
               </div>
             </div>
             
-            <div class="items">
-              <div class="items-header">
-                <div class="header-cell header-checkbox">✓</div>
-                <div class="header-cell header-item">Item</div>
-                <div class="header-cell header-qty">Quantity</div>
-                <div class="header-cell header-price">Unit Price</div>
-                <div class="header-cell header-total">Total</div>
-              </div>
-              ${selectedOrder.order_details.map(detail => `
-                <div class="item-row">
-                  <div class="item-checkbox">
-                    <div class="checkbox"></div>
+            <div class="items ${selectedOrder.order_details.length > 15 ? 'items-multi-column' : ''}">
+              ${selectedOrder.order_details.length > 15 ? `
+                <div class="items-column">
+                  <div class="items-header">
+                    <div class="header-cell header-checkbox">✓</div>
+                    <div class="header-cell header-item">Item</div>
+                    <div class="header-cell header-qty">Quantity</div>
+                    <div class="header-cell header-price">Price</div>
+                    <div class="header-cell header-total">Total</div>
                   </div>
-                  <div>
-                    <div class="item-name">${detail.product.name}</div>
-                    <div class="item-details">
-                      ${detail.product.sku ? `SKU: ${detail.product.sku}` : ''}
+                  ${selectedOrder.order_details.sort((a, b) => {
+                    const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+                    const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
+                    return categoryA.localeCompare(categoryB)
+                  }).slice(0, Math.ceil(selectedOrder.order_details.length / 2)).map(detail => `
+                    <div class="item-row">
+                      <div class="item-checkbox">
+                        <div class="checkbox"></div>
+                      </div>
+                      <div>
+                        <div class="item-name">${detail.products.name}</div>
+                        <div class="item-details">
+                          ${detail.products.sku ? `SKU: ${detail.products.sku}` : ''}
+                        </div>
+                      </div>
+                      <div class="item-quantity">${detail.quantity} ${detail.products.unit}</div>
+                      <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                      <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     </div>
-                  </div>
-                  <div class="item-quantity">${detail.quantity} ${detail.product.unit}</div>
-                  <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                  <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  `).join('')}
                 </div>
-              `).join('')}
+                <div class="items-column">
+                  <div class="items-header">
+                    <div class="header-cell header-checkbox">✓</div>
+                    <div class="header-cell header-item">Item</div>
+                    <div class="header-cell header-qty">Quantity</div>
+                    <div class="header-cell header-price">Price</div>
+                    <div class="header-cell header-total">Total</div>
+                  </div>
+                  ${selectedOrder.order_details.sort((a, b) => {
+                    const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+                    const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
+                    return categoryA.localeCompare(categoryB)
+                  }).slice(Math.ceil(selectedOrder.order_details.length / 2)).map(detail => `
+                    <div class="item-row">
+                      <div class="item-checkbox">
+                        <div class="checkbox"></div>
+                      </div>
+                      <div>
+                        <div class="item-name">${detail.products.name}</div>
+                        <div class="item-details">
+                          ${detail.products.sku ? `SKU: ${detail.products.sku}` : ''}
+                        </div>
+                      </div>
+                      <div class="item-quantity">${detail.quantity} ${detail.products.unit}</div>
+                      <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                      <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    </div>
+                  `).join('')}
+                </div>
+              ` : `
+                <div class="items-header">
+                  <div class="header-cell header-checkbox">✓</div>
+                  <div class="header-cell header-item">Item</div>
+                  <div class="header-cell header-qty">Quantity</div>
+                  <div class="header-cell header-price">Price</div>
+                  <div class="header-cell header-total">Total</div>
+                </div>
+                ${selectedOrder.order_details.sort((a, b) => {
+                  const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+                  const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
+                  return categoryA.localeCompare(categoryB)
+                }).map(detail => `
+                  <div class="item-row">
+                    <div class="item-checkbox">
+                      <div class="checkbox"></div>
+                    </div>
+                    <div>
+                      <div class="item-name">${detail.products.name}</div>
+                      <div class="item-details">
+                        ${detail.products.sku ? `SKU: ${detail.products.sku}` : ''}
+                      </div>
+                    </div>
+                    <div class="item-quantity">${detail.quantity} ${detail.products.unit}</div>
+                    <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  </div>
+                `).join('')}
+              `}
             </div>
             
             ${selectedOrder.notes ? `
@@ -1126,6 +1744,12 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 <div class="total-row">
                   <span class="total-label">Pickup Discount</span>
                   <span class="total-value">Not available (Order under ₱10k)</span>
+                </div>
+              ` : ''}
+              ${selectedOrder.delivery_type === 'none' ? `
+                <div class="total-row">
+                  <span class="total-label">Logistics</span>
+                  <span class="total-value">None (No discount, no delivery fee)</span>
                 </div>
               ` : ''}
               <div class="total-row grand-total">
@@ -1234,13 +1858,27 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
           const originalQuantity = originalOrder.order_details.find(d => d.product_id === productId)?.quantity || 0
           
-          // Use available_stock from inventory_summary + original order quantity
-          // We add back the original order quantity because it's already counted in the available_stock calculation
-          const availableStock = (product.available_stock || 0) + originalQuantity
+          // For in-transit orders, the original quantity is in released, not reserved
+          // For approved orders, the original quantity is in reserved
+          const isInTransit = editingOrder.status === 'in-transit'
           
-          if (quantityChange > availableStock) {
-            alert(`Insufficient stock for ${product.name}. Available: ${availableStock}, Requested: ${quantityChange}`)
-            return
+          if (isInTransit) {
+            // For in-transit orders: available_stock + original quantity (since it's in released)
+            const availableStock = (product.available_stock || 0) + originalQuantity
+            const additionalStock = (product.released || 0) - originalQuantity // Additional released stock beyond this order
+            
+            if (quantityChange > availableStock + additionalStock) {
+              alert(`Insufficient stock for ${product.name}. Available: ${availableStock + additionalStock}, Requested: ${quantityChange}`)
+              return
+            }
+          } else {
+            // For approved orders: available_stock + original quantity (since it's in reserved)
+            const availableStock = (product.available_stock || 0) + originalQuantity
+            
+            if (quantityChange > availableStock) {
+              alert(`Insufficient stock for ${product.name}. Available: ${availableStock}, Requested: ${quantityChange}`)
+              return
+            }
           }
         }
       }
@@ -1248,10 +1886,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       // Update inventory for all products with quantity changes
       for (const [productId, quantityChange] of Array.from(quantityChanges.entries())) {
         if (quantityChange !== 0) {
-          // Get current reserved quantity first
+          // For in-transit orders, use released; for approved orders, use reserved
+          const isInTransit = editingOrder.status === 'in-transit'
+          const fieldToUpdate = isInTransit ? 'released' : 'reserved'
+          
+          // Get current quantities first
           const { data: currentProduct, error: fetchError } = await supabase
             .from('products')
-            .select('reserved')
+            .select('reserved, released')
             .eq('id', productId)
             .single()
 
@@ -1261,13 +1903,16 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             return
           }
 
-          const newReserved = (currentProduct.reserved || 0) + quantityChange
+          const currentValue = isInTransit ? (currentProduct.released || 0) : (currentProduct.reserved || 0)
+          const newValue = currentValue + quantityChange
+
+          const updateData = isInTransit 
+            ? { released: newValue, updated_at: new Date().toISOString() }
+            : { reserved: newValue, updated_at: new Date().toISOString() }
 
           const { error: inventoryError } = await supabase
             .from('products')
-            .update({
-              reserved: newReserved
-            })
+            .update(updateData)
             .eq('id', productId)
 
           if (inventoryError) {
@@ -1382,7 +2027,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             product_id: productId,
             quantity: 1,
             unit_price: product.price || 0,
-            product: product
+            products: product
           }
         ]
       })
@@ -1442,6 +2087,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     } else if (editingOrder.delivery_type === 'pickup' && subtotal >= 10000) {
       total -= subtotal * 0.05
     }
+    // For 'none' delivery_type, no discount and no delivery fee - total remains as subtotal
 
     return total
   }
@@ -1479,9 +2125,12 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center space-y-4 sm:space-y-0">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
-          <h3 className="text-xl font-semibold text-gray-900">Customer Orders</h3>
+          <h1 className="text-xl font-semibold text-gray-900">Customer Orders</h1>
+          <p className="text-sm text-gray-600">
+            Manage customer orders and track their status
+          </p>
         </div>
       </div>
 
@@ -1515,15 +2164,37 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             <OrderTable orders={getOrdersByStatus('approved')} />
           </div>
 
-          {/* Released Orders */}
+          {/* In-Transit Orders */}
           <div>
             <div className="flex items-center justify-between mb-4">
               <h4 className="text-lg font-semibold text-gray-900 flex items-center">
-                <Truck className="h-5 w-5 text-green-500 mr-2" />
-                Released Orders ({getOrdersByStatus('released').length})
+                <Truck className="h-5 w-5 text-orange-500 mr-2" />
+                In-Transit Orders ({getOrdersByStatus('in-transit').length})
               </h4>
             </div>
-            <OrderTable orders={getOrdersByStatus('released')} />
+            <OrderTable orders={getOrdersByStatus('in-transit')} />
+          </div>
+
+          {/* Verified Orders */}
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-lg font-semibold text-gray-900 flex items-center">
+                <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+                Verified Orders ({getOrdersByStatus('verified').length})
+              </h4>
+            </div>
+            <OrderTable orders={getOrdersByStatus('verified')} />
+          </div>
+
+          {/* Fulfilled Orders */}
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Package className="h-5 w-5 text-green-500 mr-2" />
+                Fulfilled Orders ({getOrdersByStatus('fulfilled').length})
+              </h4>
+            </div>
+            <OrderTable orders={getOrdersByStatus('fulfilled')} />
           </div>
 
           {/* Paid Orders */}
@@ -1574,13 +2245,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       {/* Order Details Modal */}
       {selectedOrder && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
-            <div className="flex justify-between items-center mb-4">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Order Details #{selectedOrder.id.slice(0, 8)}
               </h3>
               <div className="flex space-x-2">
-                {selectedOrder.status === 'approved' && (
+                {(selectedOrder.status === 'approved' || selectedOrder.status === 'in-transit') && (
                   <button
                     onClick={handleOverrideOrder}
                     className="flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium bg-orange-100 text-orange-700 hover:bg-orange-200"
@@ -1589,18 +2260,20 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                     <span>Override</span>
                   </button>
                 )}
-                <button
-                  onClick={printReceipt}
-                  className={`flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium ${
-                    theme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
-                    theme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
-                    theme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
-                    'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                  }`}
-                >
-                  <Printer className="h-4 w-4" />
-                  <span>Print Transfer Sheet</span>
-                </button>
+                {selectedOrder.status !== 'pending' && (selectedOrder.status !== 'approved' || isOrderScheduled(selectedOrder)) && (
+                  <button
+                    onClick={printReceipt}
+                    className={`flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium ${
+                      theme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
+                      theme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
+                      theme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
+                      'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                    }`}
+                  >
+                    <Printer className="h-4 w-4" />
+                    <span>Print Transfer Sheet</span>
+                  </button>
+                )}
                 <button
                   onClick={() => setSelectedOrder(null)}
                   className="text-gray-400 hover:text-gray-600"
@@ -1611,7 +2284,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             </div>
 
             {/* Order Information */}
-            <div className="space-y-6">
+            <div className="space-y-6 flex-1 overflow-y-auto min-h-0">
               {/* Order Header */}
               <div className="bg-gray-50 rounded-lg p-4">
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
@@ -1624,7 +2297,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                     <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
                       selectedOrder.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
                       selectedOrder.status === 'approved' ? 'bg-blue-100 text-blue-800' :
-                      selectedOrder.status === 'released' ? 'bg-orange-100 text-orange-800' :
+                      selectedOrder.status === 'in-transit' ? 'bg-orange-100 text-orange-800' :
+                      selectedOrder.status === 'verified' ? 'bg-green-100 text-green-800' :
+                      selectedOrder.status === 'fulfilled' ? 'bg-orange-100 text-orange-800' :
                       selectedOrder.status === 'paid' ? 'bg-purple-100 text-purple-800' :
                       selectedOrder.status === 'complete' ? 'bg-indigo-100 text-indigo-800' :
                       selectedOrder.status === 'cancelled' ? 'bg-red-100 text-red-800' :
@@ -1646,9 +2321,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   <div>
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Location</p>
                     <div className="flex items-center space-x-1 mt-1">
-                      {selectedOrder.location?.company_owned && (
+                      {selectedOrder.location?.company_owned ? (
                         <div title="Company Owned">
                           <Building2 className="h-4 w-4 text-blue-600" />
+                        </div>
+                      ) : (
+                        <div title="Franchise">
+                          <Store className={`h-4 w-4 ${getFranchiseIconColor()}`} />
                         </div>
                       )}
                       <p className="text-sm font-semibold text-gray-900">{selectedOrder.location?.name || 'N/A'}</p>
@@ -1720,6 +2399,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 </div>
               )}
 
+
               {/* Order Items - Full List */}
               {selectedOrder.order_details && selectedOrder.order_details.length > 0 && (
                 <div className="bg-white border rounded-lg overflow-hidden">
@@ -1737,7 +2417,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                             Quantity
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Unit Price
+                            Price
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Total
@@ -1749,14 +2429,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                           <tr key={detail.id} className="hover:bg-gray-50">
                             <td className="px-4 py-3 whitespace-nowrap">
                               <div>
-                                <div className="text-sm font-medium text-gray-900">{detail.product.name}</div>
-                                {detail.product.sku && (
-                                  <div className="text-xs text-gray-500">SKU: {detail.product.sku}</div>
+                                <div className="text-sm font-medium text-gray-900">{detail.products.name}</div>
+                                {detail.products.sku && (
+                                  <div className="text-xs text-gray-500">SKU: {detail.products.sku}</div>
                                 )}
                               </div>
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                              {detail.quantity} {detail.product.unit}
+                              {detail.quantity} {detail.products.unit}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
                               ₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -1797,131 +2477,191 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             </div>
 
             <div className="space-y-6 flex-1 overflow-y-auto min-h-0">
-              {/* Logistics Method */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Logistics Method</label>
-                <div className="flex space-x-4">
-                  <label className="flex items-center">
-                    <input
-                      type="radio"
-                      name="delivery_type"
-                      value="delivery"
-                      checked={editingOrder.delivery_type === 'delivery'}
-                      onChange={(e) => setEditingOrder({
-                        ...editingOrder,
-                        delivery_type: e.target.value as 'delivery' | 'pickup'
-                      })}
-                      className="mr-2"
-                    />
-                    <span className="text-sm">Delivery</span>
-                  </label>
-                  <label className="flex items-center">
-                    <input
-                      type="radio"
-                      name="delivery_type"
-                      value="pickup"
-                      checked={editingOrder.delivery_type === 'pickup'}
-                      onChange={(e) => setEditingOrder({
-                        ...editingOrder,
-                        delivery_type: e.target.value as 'delivery' | 'pickup'
-                      })}
-                      className="mr-2"
-                    />
-                    <span className="text-sm">Pickup</span>
-                  </label>
+              {/* Logistics Method and Category Summary */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Logistics Method */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Logistics Method</label>
+                  <div className="flex space-x-4">
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name="delivery_type"
+                        value="delivery"
+                        checked={editingOrder.delivery_type === 'delivery'}
+                        onChange={(e) => setEditingOrder({
+                          ...editingOrder,
+                          delivery_type: e.target.value as 'delivery' | 'pickup' | 'none'
+                        })}
+                        className="mr-2"
+                      />
+                      <span className="text-sm">Delivery</span>
+                    </label>
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name="delivery_type"
+                        value="pickup"
+                        checked={editingOrder.delivery_type === 'pickup'}
+                        onChange={(e) => setEditingOrder({
+                          ...editingOrder,
+                          delivery_type: e.target.value as 'delivery' | 'pickup' | 'none'
+                        })}
+                        className="mr-2"
+                      />
+                      <span className="text-sm">Pickup</span>
+                    </label>
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name="delivery_type"
+                        value="none"
+                        checked={editingOrder.delivery_type === 'none'}
+                        onChange={(e) => setEditingOrder({
+                          ...editingOrder,
+                          delivery_type: e.target.value as 'delivery' | 'pickup' | 'none'
+                        })}
+                        className="mr-2"
+                      />
+                      <span className="text-sm">None (No discount, no delivery fee)</span>
+                    </label>
+                  </div>
+                </div>
+                
+                {/* Category Item Summary */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Category Summary</label>
+                  <div className="flex flex-wrap gap-2">
+                    {(() => {
+                      const categoryTotals = editingOrder.order_details.reduce((acc, detail) => {
+                        const category = detail.products?.category || 'Uncategorized'
+                        if (!acc[category]) {
+                          acc[category] = { quantity: 0, amount: 0 }
+                        }
+                        acc[category].quantity += detail.quantity
+                        acc[category].amount += detail.unit_price * detail.quantity
+                        return acc
+                      }, {} as Record<string, { quantity: number; amount: number }>)
+
+                      return Object.entries(categoryTotals).map(([category, totals]) => (
+                        <div key={category} className="bg-gray-100 px-3 py-1 rounded-full text-xs">
+                          <span className="font-medium text-gray-900">{category}:</span>
+                          <span className="text-gray-600 ml-1">{totals.quantity} items</span>
+                          <span className="text-green-600 ml-1">₱{totals.amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                      ))
+                    })()}
+                  </div>
                 </div>
               </div>
 
-              {/* Current Order Items */}
-              <div>
-                <h4 className="text-md font-medium text-gray-900 mb-3">Current Order Items</h4>
-                <div className="space-y-2">
-                  {editingOrder.order_details.map((detail) => (
-                    <div key={detail.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                      <div className="flex-1">
-                        <div className="font-medium text-gray-900">{detail.product?.product_name || detail.product?.name || 'Unknown Product'}</div>
-                        <div className="text-sm text-gray-500">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} each</div>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <button
-                          onClick={() => updateProductQuantity(detail.product_id, detail.quantity - 1)}
-                          className="px-2 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200"
-                        >
-                          -
-                        </button>
-                        <span className="w-12 text-center">{detail.quantity}</span>
-                        <button
-                          onClick={() => updateProductQuantity(detail.product_id, detail.quantity + 1)}
-                          disabled={!canIncreaseQuantity(detail.product_id)}
-                          className={`px-2 py-1 text-sm rounded ${
-                            canIncreaseQuantity(detail.product_id)
-                              ? 'bg-green-100 text-green-700 hover:bg-green-200'
-                              : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                          }`}
-                        >
-                          +
-                        </button>
-                        <button
-                          onClick={() => removeProductFromOrder(detail.product_id)}
-                          className="px-2 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 ml-2"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Add Products */}
-              <div>
-                <h4 className="text-md font-medium text-gray-900 mb-3">Add Products</h4>
-                <div className="max-h-60 overflow-y-auto space-y-4">
-                  {(() => {
-                    // Group products by category
-                    const productsByCategory = availableProducts.reduce((acc, product) => {
-                      const category = product.category || 'Uncategorized'
-                      if (!acc[category]) {
-                        acc[category] = []
-                      }
-                      acc[category].push(product)
-                      return acc
-                    }, {} as Record<string, any[]>)
-
-                    return Object.entries(productsByCategory).map(([category, products]: [string, any[]]) => (
-                      <div key={category} className="space-y-2">
-                        <h5 className="text-sm font-semibold text-gray-700 border-b border-gray-200 pb-1">
-                          {category}
-                        </h5>
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-                          {products.map((product) => {
-                            const canAdd = canAddProduct(product)
-                            const originalQuantity = originalOrder?.order_details.find(d => d.product_id === product.id)?.quantity || 0
-                            const availableStock = (product.available_stock || 0) + originalQuantity
-                            
-                            return (
-                              <button
-                                key={product.id}
-                                onClick={() => canAdd && addProductToOrder(product)}
-                                disabled={!canAdd}
-                                className={`p-2 text-left border rounded text-sm ${
-                                  canAdd
-                                    ? 'border-gray-200 hover:bg-gray-50'
-                                    : 'border-gray-100 bg-gray-50 cursor-not-allowed'
-                                }`}
-                              >
-                                <div className={`font-medium ${canAdd ? 'text-gray-900' : 'text-gray-400'}`}>{product.product_name || product.name}</div>
-                                <div className={`${canAdd ? 'text-gray-500' : 'text-gray-400'}`}>₱{(product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                                <div className={`text-xs ${canAdd ? 'text-gray-400' : 'text-gray-300'}`}>
-                                  Available: {availableStock} / {product.initial_stock}
-                                </div>
-                              </button>
-                            )
-                          })}
+              {/* Two Column Layout */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Current Order Items - Left Column */}
+                <div>
+                  <h4 className="text-md font-medium text-gray-900 mb-3">Current Order Items</h4>
+                  <div className="max-h-96 overflow-y-auto space-y-2">
+                    {editingOrder.order_details.map((detail) => (
+                      <div key={detail.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div className="flex-1">
+                          <div className="font-medium text-gray-900">{detail.products?.product_name || detail.products?.name || 'Unknown Product'}</div>
+                          <div className="text-sm text-gray-500">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} each</div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={() => updateProductQuantity(detail.product_id, detail.quantity - 1)}
+                            className="px-2 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200"
+                          >
+                            -
+                          </button>
+                          <span className="w-12 text-center">{detail.quantity}</span>
+                          <button
+                            onClick={() => updateProductQuantity(detail.product_id, detail.quantity + 1)}
+                            disabled={!canIncreaseQuantity(detail.product_id)}
+                            className={`px-2 py-1 text-sm rounded ${
+                              canIncreaseQuantity(detail.product_id)
+                                ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                                : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            }`}
+                          >
+                            +
+                          </button>
+                          <button
+                            onClick={() => removeProductFromOrder(detail.product_id)}
+                            className="px-2 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 ml-2"
+                          >
+                            Remove
+                          </button>
                         </div>
                       </div>
-                    ))
-                  })()}
+                    ))}
+                  </div>
+                </div>
+
+                {/* Add Products - Right Column */}
+                <div>
+                  <h4 className="text-md font-medium text-gray-900 mb-3">Add Products</h4>
+                  <div className="max-h-96 overflow-y-auto space-y-4">
+                    {(() => {
+                      // Group products by category
+                      const productsByCategory = availableProducts.reduce((acc, product) => {
+                        const category = product.category || 'Uncategorized'
+                        if (!acc[category]) {
+                          acc[category] = []
+                        }
+                        acc[category].push(product)
+                        return acc
+                      }, {} as Record<string, any[]>)
+
+                      return Object.entries(productsByCategory).map(([category, products]: [string, any[]]) => (
+                        <div key={category} className="space-y-2">
+                          <h5 className="text-sm font-semibold text-gray-700 border-b border-gray-200 pb-1">
+                            {category}
+                          </h5>
+                          <div className="grid grid-cols-3 gap-2">
+                            {products.map((product, index) => {
+                              const canAdd = canAddProduct(product)
+                              const originalQuantity = originalOrder?.order_details.find(d => d.product_id === product.id)?.quantity || 0
+                              const availableStock = (product.available_stock || 0) + originalQuantity
+                              const isAlreadyInOrder = editingOrder?.order_details.some(d => d.product_id === (product.product_id || product.id))
+                              
+                              return (
+                                <button
+                                  key={product.id || `product-${category}-${index}`}
+                                  onClick={() => canAdd && addProductToOrder(product)}
+                                  disabled={!canAdd}
+                                  className={`p-3 text-left border rounded text-sm w-full ${
+                                    isAlreadyInOrder
+                                      ? 'border-orange-400 bg-orange-50 hover:bg-orange-100'
+                                      : canAdd
+                                      ? 'border-gray-200 hover:bg-gray-50'
+                                      : 'border-gray-100 bg-gray-50 cursor-not-allowed'
+                                  }`}
+                                >
+                                  <div className="flex justify-between items-start">
+                                    <div className="flex-1">
+                                      <div className={`font-medium ${canAdd ? 'text-gray-900' : 'text-gray-400'}`}>{product.product_name || product.name}</div>
+                                      <div className={`${canAdd ? 'text-gray-500' : 'text-gray-400'}`}>₱{(product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                      <div className={`text-xs ${canAdd ? 'text-gray-400' : 'text-gray-300'}`}>
+                                        Available: {availableStock} / {product.initial_stock}
+                                      </div>
+                                    </div>
+                                    {isAlreadyInOrder && (
+                                      <div className="ml-2">
+                                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                                          In Order
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ))
+                    })()}
+                  </div>
                 </div>
               </div>
 
@@ -1968,6 +2708,15 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   </div>
                 )}
 
+                {editingOrder.delivery_type === 'none' && (
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm text-gray-600">Logistics:</span>
+                    <span className="text-sm font-medium text-gray-500">
+                      None (No discount, no delivery fee)
+                    </span>
+                  </div>
+                )}
+
                 {/* Total Amount */}
                 <div className="flex justify-between items-center pt-2 border-t border-gray-300">
                   <span className="text-lg font-medium text-gray-900">Total Amount:</span>
@@ -2004,6 +2753,59 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               >
                 {overrideLoading ? 'Saving...' : 'Save Changes'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Returnable Pans Image Modal */}
+      {showReturnablePansModal && selectedReturnablePansImage && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Returnable Pans Image
+                {(() => {
+                  const returnablePansProducts = selectedReturnablePansOrder?.order_details?.filter((detail: any) => {
+                    if (!selectedReturnablePansOrder?.brand && !selectedReturnablePansOrder?.location?.brand) return false
+                    const brandSlug = (selectedReturnablePansOrder?.brand?.slug || selectedReturnablePansOrder?.location?.brand?.slug)?.toLowerCase()
+                    const productCategory = detail.products?.category?.toLowerCase() || ''
+                    
+                    switch (brandSlug) {
+                      case 'gelatofilipino':
+                        return productCategory === 'gelato'
+                      case 'mychoice':
+                        return productCategory === 'ice cream'
+                      case 'mang-sorbetes':
+                        return productCategory === 'sorbetes'
+                      default:
+                        return false
+                    }
+                  }) || []
+                  
+                  const totalPans = returnablePansProducts.reduce((total: number, detail: any) => total + detail.quantity, 0)
+                  
+                  return totalPans > 0 ? ` (${totalPans} pans)` : ''
+                })()}
+              </h3>
+              <button
+                onClick={() => {
+                  setShowReturnablePansModal(false)
+                  setSelectedReturnablePansImage(null)
+                  setSelectedReturnablePansOrder(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="text-center flex-1 flex items-center justify-center overflow-auto">
+              <img
+                src={selectedReturnablePansImage}
+                alt="Returnable pans"
+                className="max-h-[70vh] w-auto rounded-lg border"
+              />
             </div>
           </div>
         </div>

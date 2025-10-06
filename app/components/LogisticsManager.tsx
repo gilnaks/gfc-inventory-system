@@ -109,7 +109,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
            location:locations(name)
          `)
         .eq('brand_id', selectedBrand.id)
-        .in('status', ['pending', 'approved', 'released', 'paid', 'complete'])
+        .eq('status', 'approved')
         .order('created_at', { ascending: false })
 
       if (error) {
@@ -328,13 +328,13 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     })
   }
 
-  const openOrderPopup = async (event: React.MouseEvent, date: string, timeSlot: 'morning' | 'afternoon') => {
+  const openOrderPopup = (event: React.MouseEvent, date: string, timeSlot: 'morning' | 'afternoon') => {
     setSelectedDate(date)
     setSelectedTimeSlot(timeSlot)
     setPopupPosition({ x: event.clientX, y: event.clientY })
-    // Refresh assignments before showing popup to ensure we have latest data
-    await fetchAssignments()
     setShowOrderPopup(true)
+    // Refresh assignments after showing popup (non-blocking)
+    fetchAssignments()
   }
 
   const formatDate = (date: Date) => {
@@ -353,6 +353,13 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     return dateStr < todayStr
   }
 
+  const isUpcomingDate = (date: Date) => {
+    const today = new Date()
+    const todayStr = toPhilippinesDateString(today)
+    const dateStr = toPhilippinesDateString(date)
+    return dateStr > todayStr
+  }
+
   const isYesterday = (date: Date) => {
     const today = new Date()
     const yesterday = new Date(today)
@@ -363,10 +370,10 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
-          <h3 className="text-xl font-semibold text-gray-900">Logistics Manager</h3>
-          <p className="text-gray-600">Schedule and manage order deliveries</p>
+          <h1 className="text-xl font-semibold text-gray-900">Logistics</h1>
+          <p className="text-sm text-gray-600">Schedule and manage order deliveries</p>
         </div>
       </div>
 
@@ -411,6 +418,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
              const isCurrentDay = isToday(date)
              const isPast = isPastDate(date)
              const isYesterdayDate = isYesterday(date)
+             const isUpcoming = isUpcomingDate(date)
 
             return (
               <div
@@ -418,7 +426,8 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                 className={`p-2 border rounded-lg min-h-[120px] ${
                   isPast && !isYesterdayDate ? 'bg-gray-100 border-gray-300 opacity-60' :
                   isYesterdayDate ? 'bg-gray-100 border-gray-300 opacity-75' :
-                  isCurrentDay ? 'bg-blue-50 border-blue-200' : 'bg-white border-gray-200'
+                  isCurrentDay ? 'bg-blue-50 border border-blue-500 ring-2 ring-blue-300 shadow-md' :
+                  isUpcoming ? 'bg-white border-gray-300' : 'bg-white border-gray-200'
                 }`}
               >
                 <div className="text-sm font-medium text-gray-900 mb-2">

@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
-import { CreditCard, Check, Eye, Download, X, Printer } from 'lucide-react'
+import { CreditCard, Check, Eye, Download, X, Printer, Building2, Building, Store } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
 
 interface PaidOrder {
@@ -13,6 +13,7 @@ interface PaidOrder {
   total_amount: number
   delivery_type: 'delivery' | 'pickup'
   deposit_slip_url?: string
+  returnable_pans_image_url?: string
   notes?: string
   created_at: string
   updated_at: string
@@ -21,17 +22,23 @@ interface PaidOrder {
     name: string
     franchisee?: string
     contact_number?: string
+    brand?: {
+      id: string
+      name: string
+      slug?: string
+    }
   }
   brand?: {
     id: string
     name: string
+    slug?: string
   }
   order_details?: Array<{
     id: string
     product_id: string
     quantity: number
     unit_price: number
-    product: {
+    products: {
       id: string
       name: string
       sku?: string
@@ -48,12 +55,33 @@ interface BillingManagerProps {
 
 export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManagerProps) {
   const [paidOrders, setPaidOrders] = useState<PaidOrder[]>([])
-  const [releasedOrders, setReleasedOrders] = useState<PaidOrder[]>([])
+  const [completedOrders, setCompletedOrders] = useState<PaidOrder[]>([])
+  const [fulfilledOrders, setFulfilledOrders] = useState<PaidOrder[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedOrder, setSelectedOrder] = useState<PaidOrder | null>(null)
   const [showOrderDetails, setShowOrderDetails] = useState(false)
   const [totalReceivable, setTotalReceivable] = useState(0)
-  const [timeFilter, setTimeFilter] = useState<'day' | 'week' | 'month' | 'year'>('month')
+  const [timeFilter, setTimeFilter] = useState<'all' | 'week' | 'month' | 'year'>('all')
+  const [showReturnablePansModal, setShowReturnablePansModal] = useState(false)
+  const [selectedReturnablePansImage, setSelectedReturnablePansImage] = useState<string | null>(null)
+  const [selectedReturnablePansOrder, setSelectedReturnablePansOrder] = useState<PaidOrder | null>(null)
+  const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
+  const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
+  const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<PaidOrder | null>(null)
+
+  // Helper function to get franchise icon color based on theme
+  const getFranchiseIconColor = () => {
+    switch (theme) {
+      case 'green':
+        return 'text-green-600'
+      case 'red':
+        return 'text-red-600'
+      case 'yellow':
+        return 'text-yellow-600'
+      default:
+        return 'text-blue-600'
+    }
+  }
 
   useEffect(() => {
     if (selectedBrand) {
@@ -115,10 +143,10 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     let end: Date
     
     switch (timeFilter) {
-      case 'day':
-        // Today in Philippines timezone: 00:00:00 to 23:59:59
-        start = new Date(phYear, phMonth, phDay, 0, 0, 0)
-        end = new Date(phYear, phMonth, phDay, 23, 59, 59, 999)
+      case 'all':
+        // All time - no date filtering
+        start = new Date(0) // January 1, 1970
+        end = new Date() // Current time
         break
       case 'week':
         // Last 7 days in Philippines timezone
@@ -156,33 +184,61 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     try {
       const { start, end } = getDateRange()
       
-      const { data, error } = await supabase
+      // Fetch paid orders
+      const { data: paidData, error: paidError } = await supabase
         .from('customer_orders')
         .select(`
           *,
-          location:locations(*),
+          location:locations(*, brand:brands(*)),
           brand:brands(*),
           order_details(
             *,
-            product:products(id, name, sku, unit, category)
+            products:products(id, name, sku, unit, category)
           )
         `)
         .eq('brand_id', selectedBrand.id)
-        .in('status', ['paid', 'complete'])
+        .eq('status', 'paid')
         .gte('created_at', start)
         .lte('created_at', end)
         .order('created_at', { ascending: false })
       
-      if (error) {
-        console.error('Error fetching paid orders:', error)
+      if (paidError) {
+        console.error('Error fetching paid orders:', paidError)
         return
       }
       
-      if (data) {
-        setPaidOrders(data)
+      // Fetch completed orders
+      const { data: completedData, error: completedError } = await supabase
+        .from('customer_orders')
+        .select(`
+          *,
+          location:locations(*, brand:brands(*)),
+          brand:brands(*),
+          order_details(
+            *,
+            products:products(id, name, sku, unit, category)
+          )
+        `)
+        .eq('brand_id', selectedBrand.id)
+        .eq('status', 'complete')
+        .gte('created_at', start)
+        .lte('created_at', end)
+        .order('created_at', { ascending: false })
+      
+      if (completedError) {
+        console.error('Error fetching completed orders:', completedError)
+        return
+      }
+      
+      if (paidData) {
+        setPaidOrders(paidData)
+      }
+      
+      if (completedData) {
+        setCompletedOrders(completedData)
       }
     } catch (error) {
-      console.error('Error fetching paid orders:', error)
+      console.error('Error fetching orders:', error)
     } finally {
       setLoading(false)
     }
@@ -196,24 +252,24 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
         .from('customer_orders')
         .select(`
           *,
-          location:locations(*),
+          location:locations(*, brand:brands(*)),
           brand:brands(*),
           order_details(
             *,
-            product:products(id, name, sku, unit, category)
+            products:products(id, name, sku, unit, category)
           )
         `)
         .eq('brand_id', selectedBrand.id)
-        .eq('status', 'released')
+        .eq('status', 'fulfilled')
         .order('created_at', { ascending: false })
       
       if (error) throw error
       
       if (data) {
-        setReleasedOrders(data)
+        setFulfilledOrders(data)
       }
     } catch (error) {
-      console.error('Error fetching released orders:', error)
+      console.error('Error fetching fulfilled orders:', error)
     }
   }
 
@@ -223,14 +279,16 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     try {
       const { data, error } = await supabase
         .from('customer_orders')
-        .select('total_amount')
+        .select('total_amount, location:locations(company_owned)')
         .eq('brand_id', selectedBrand.id)
-        .eq('status', 'released')
+        .eq('status', 'fulfilled')
       
       if (error) throw error
       
-      const receivable = data?.reduce((total, order) => total + (order.total_amount || 0), 0) || 0
-      setTotalReceivable(receivable)
+      if (data) {
+        const receivable = data.reduce((total, order) => total + (order.total_amount || 0), 0)
+        setTotalReceivable(receivable)
+      }
     } catch (error) {
       console.error('Error fetching receivables:', error)
     }
@@ -279,6 +337,32 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     return order.order_details?.reduce((total, detail) => total + detail.quantity, 0) || 0
   }
 
+  const getReturnablePans = (order: PaidOrder) => {
+    if (!order.order_details) return { total: 0, hasImage: false }
+    
+    const returnablePansProducts = order.order_details.filter((detail) => {
+      if (!order.brand && !order.location?.brand) return false
+      const brandSlug = (order.brand?.slug || order.location?.brand?.slug)?.toLowerCase()
+      const productCategory = detail.products?.category?.toLowerCase() || ''
+      
+      switch (brandSlug) {
+        case 'gelatofilipino':
+          return productCategory === 'gelato'
+        case 'mychoice':
+          return productCategory === 'ice cream'
+        case 'mang-sorbetes':
+          return productCategory === 'sorbetes'
+        default:
+          return false
+      }
+    })
+    
+    const totalPans = returnablePansProducts.reduce((total, detail) => total + detail.quantity, 0)
+    const hasImage = !!order.returnable_pans_image_url
+    
+    return { total: totalPans, hasImage }
+  }
+
   const getCategoryTotals = (order: PaidOrder) => {
     if (!order.order_details) return []
     
@@ -286,11 +370,11 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     
     order.order_details.forEach(detail => {
       // Debug: log the product data to see what's being fetched
-      console.log('Product data:', detail.product)
+      console.log('Product data:', detail.products)
       
       // Check if category exists and is not null/undefined/empty
-      const category = detail.product?.category && detail.product.category.trim() !== '' 
-        ? detail.product.category 
+      const category = detail.products?.category && detail.products.category.trim() !== '' 
+        ? detail.products.category 
         : 'Uncategorized'
         
       if (!categoryMap.has(category)) {
@@ -313,16 +397,87 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     return order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
   }
 
+  const isCompanyOwned = (order: PaidOrder) => {
+    return order.location?.company_owned === true
+  }
+
   const getSubtotalAmount = (order: PaidOrder) => {
     return order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
   }
 
   const calculateTotalRevenue = () => {
-    return paidOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+    const paidTotal = paidOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+    const completedTotal = completedOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+    return paidTotal + completedTotal
   }
 
   const calculateTotalPaid = () => {
     return paidOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  const calculateTotalCompleted = () => {
+    return completedOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  // Helper functions for MyChoice company-owned separation
+  const isMyChoiceCompanyOwned = (order: PaidOrder) => {
+    return order.brand?.name?.toLowerCase().includes('mychoice') && order.location?.company_owned === true
+  }
+
+  const calculateMyChoiceCompanyOwnedRevenue = () => {
+    const paidMyChoice = paidOrders
+      .filter(order => isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+    const completedMyChoice = completedOrders
+      .filter(order => isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+    return paidMyChoice + completedMyChoice
+  }
+
+  const calculateFranchiseRevenue = () => {
+    const paidFranchise = paidOrders
+      .filter(order => !isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+    const completedFranchise = completedOrders
+      .filter(order => !isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+    return paidFranchise + completedFranchise
+  }
+
+  const getMyChoiceCompanyOwnedOrders = () => {
+    const paidMyChoice = paidOrders.filter(order => isMyChoiceCompanyOwned(order))
+    const completedMyChoice = completedOrders.filter(order => isMyChoiceCompanyOwned(order))
+    return [...paidMyChoice, ...completedMyChoice]
+  }
+
+  const getFranchiseOrders = () => {
+    const paidFranchise = paidOrders.filter(order => !isMyChoiceCompanyOwned(order))
+    const completedFranchise = completedOrders.filter(order => !isMyChoiceCompanyOwned(order))
+    return [...paidFranchise, ...completedFranchise]
+  }
+
+  const calculateMyChoiceCompanyOwnedPaid = () => {
+    return paidOrders
+      .filter(order => isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  const calculateFranchisePaid = () => {
+    return paidOrders
+      .filter(order => !isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  const calculateMyChoiceCompanyOwnedReceivable = () => {
+    return fulfilledOrders
+      .filter(order => isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
+  }
+
+  const calculateFranchiseReceivable = () => {
+    return fulfilledOrders
+      .filter(order => !isMyChoiceCompanyOwned(order))
+      .reduce((total, order) => total + (order.total_amount || 0), 0)
   }
 
   const printTransferSheet = (order: PaidOrder) => {
@@ -417,6 +572,17 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
             .items-section {
               background: white;
               border-bottom: 1px solid black;
+            }
+            
+            .items-multi-column {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 20px;
+            }
+            
+            .items-column {
+              display: flex;
+              flex-direction: column;
             }
             
             .items-header {
@@ -578,18 +744,59 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               </div>
             </div>
             
-            <div class="items-section">
+            <div class="items-section ${order.order_details?.length > 15 ? 'items-multi-column' : ''}">
+              ${order.order_details?.length > 15 ? `
+                <div class="items-column">
               <div class="items-header">Items</div>
-              ${order.order_details?.map(detail => `
+                  ${order.order_details?.sort((a, b) => {
+                    const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+                    const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
+                    return categoryA.localeCompare(categoryB)
+                  }).slice(0, Math.ceil(order.order_details.length / 2)).map(detail => `
                 <div class="item-row">
                   <div class="item-checkbox"></div>
                   <div class="item-details">
-                    <div class="item-name">${detail.product?.name || 'N/A'}</div>
-                    <div class="item-sku">SKU: ${detail.product?.sku || 'N/A'} | ${detail.product?.unit || 'N/A'}</div>
+                        <div class="item-name">${detail.products?.name || 'N/A'}</div>
+                        <div class="item-sku">SKU: ${detail.products?.sku || 'N/A'} | ${detail.products?.unit || 'N/A'}</div>
                   </div>
                   <div class="item-qty">${detail.quantity}</div>
                 </div>
               `).join('') || ''}
+                </div>
+                <div class="items-column">
+                  <div class="items-header">Items</div>
+                  ${order.order_details?.sort((a, b) => {
+                    const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+                    const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
+                    return categoryA.localeCompare(categoryB)
+                  }).slice(Math.ceil(order.order_details.length / 2)).map(detail => `
+                    <div class="item-row">
+                      <div class="item-checkbox"></div>
+                      <div class="item-details">
+                        <div class="item-name">${detail.products?.name || 'N/A'}</div>
+                        <div class="item-sku">SKU: ${detail.products?.sku || 'N/A'} | ${detail.products?.unit || 'N/A'}</div>
+                      </div>
+                      <div class="item-qty">${detail.quantity}</div>
+                    </div>
+                  `).join('') || ''}
+                </div>
+              ` : `
+                <div class="items-header">Items</div>
+                ${order.order_details?.sort((a, b) => {
+                  const categoryA = a.product?.category && a.product.category.trim() !== '' ? a.product.category : 'Uncategorized'
+                  const categoryB = b.product?.category && b.product.category.trim() !== '' ? b.product.category : 'Uncategorized'
+                  return categoryA.localeCompare(categoryB)
+                }).map(detail => `
+                  <div class="item-row">
+                    <div class="item-checkbox"></div>
+                    <div class="item-details">
+                      <div class="item-name">${detail.products?.name || 'N/A'}</div>
+                      <div class="item-sku">SKU: ${detail.products?.sku || 'N/A'} | ${detail.products?.unit || 'N/A'}</div>
+                    </div>
+                    <div class="item-qty">${detail.quantity}</div>
+                  </div>
+                `).join('') || ''}
+              `}
             </div>
             
             ${order.notes ? `
@@ -648,10 +855,10 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
-          <h3 className="text-xl font-semibold text-gray-900">Billing Manager</h3>
-          <p className="text-gray-600">Track unpaid orders and manage paid orders by status</p>
+          <h1 className="text-xl font-semibold text-gray-900">Billing</h1>
+          <p className="text-sm text-gray-600">Track unpaid orders and manage paid orders by status</p>
         </div>
       </div>
 
@@ -660,7 +867,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
         <div className="flex items-center space-x-4">
           <label className="text-sm font-medium text-gray-700">Time Period:</label>
           <div className="flex space-x-2">
-            {(['day', 'week', 'month', 'year'] as const).map((period) => (
+            {(['all', 'week', 'month', 'year'] as const).map((period) => (
               <button
                 key={period}
                 onClick={() => setTimeFilter(period)}
@@ -673,7 +880,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                     : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300'
                 }`}
               >
-                {period.charAt(0).toUpperCase() + period.slice(1)}
+                {period === 'all' ? 'All Time' : period.charAt(0).toUpperCase() + period.slice(1)}
               </button>
             ))}
           </div>
@@ -682,28 +889,86 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
 
       {/* Summary */}
       <div className="bg-white rounded-lg shadow-sm border p-6">
-        <h4 className="text-lg font-medium mb-4">Summary</h4>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-green-50 p-4 rounded-lg">
-            <p className="text-sm text-green-600 font-medium">Total Revenue</p>
-            <p className="text-2xl font-bold text-green-900">₱{calculateTotalRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-            <p className="text-xs text-green-700 mt-1">{paidOrders.length} paid orders</p>
-          </div>
-          <div className="bg-blue-50 p-4 rounded-lg">
-            <p className="text-sm text-blue-600 font-medium">Total Paid</p>
-            <p className="text-2xl font-bold text-blue-900">₱{calculateTotalPaid().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-            <p className="text-xs text-blue-700 mt-1">Ready for completion</p>
-          </div>
-          <div className="bg-orange-50 p-4 rounded-lg">
-            <p className="text-sm text-orange-600 font-medium">Total Receivable</p>
-            <p className="text-2xl font-bold text-orange-900">₱{totalReceivable.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-            <p className="text-xs text-orange-700 mt-1">{releasedOrders.length} unpaid orders</p>
-          </div>
+        <div className="flex justify-between items-center mb-4">
+          <h4 className="text-lg font-medium">Summary</h4>
         </div>
+        
+        {/* MyChoice Company-Owned Summary */}
+        {selectedBrand?.name?.toLowerCase().includes('mychoice') && (
+          <div className="mb-6">
+            {/* Company Owned Section */}
+            <div className="mb-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-green-50 p-4 rounded-lg">
+                  <p className="text-sm text-green-600 font-medium">Total Company Owned Revenue</p>
+                  <p className="text-2xl font-bold text-green-900">₱{calculateMyChoiceCompanyOwnedRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-green-700 mt-1">{getMyChoiceCompanyOwnedOrders().length} company orders</p>
+                </div>
+                <div className="bg-blue-50 p-4 rounded-lg">
+                  <p className="text-sm text-blue-600 font-medium">Total Paid</p>
+                  <p className="text-2xl font-bold text-blue-900">₱{calculateMyChoiceCompanyOwnedPaid().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-blue-700 mt-1">Ready for completion</p>
+                </div>
+                <div className="bg-orange-50 p-4 rounded-lg">
+                  <p className="text-sm text-orange-600 font-medium">Total Receivable</p>
+                  <p className="text-2xl font-bold text-orange-900">₱{calculateMyChoiceCompanyOwnedReceivable().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-orange-700 mt-1">{fulfilledOrders.filter(order => isMyChoiceCompanyOwned(order)).length} unpaid orders</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Franchise Section */}
+            <div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-green-50 p-4 rounded-lg">
+                  <p className="text-sm text-green-600 font-medium">Total Franchise Revenue</p>
+                  <p className="text-2xl font-bold text-green-900">₱{calculateFranchiseRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-green-700 mt-1">{getFranchiseOrders().length} franchise orders</p>
+                </div>
+                <div className="bg-blue-50 p-4 rounded-lg">
+                  <p className="text-sm text-blue-600 font-medium">Total Paid</p>
+                  <p className="text-2xl font-bold text-blue-900">₱{calculateFranchisePaid().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-blue-700 mt-1">Ready for completion</p>
+                </div>
+                <div className="bg-orange-50 p-4 rounded-lg">
+                  <p className="text-sm text-orange-600 font-medium">Total Receivable</p>
+                  <p className="text-2xl font-bold text-orange-900">₱{calculateFranchiseReceivable().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-orange-700 mt-1">{fulfilledOrders.filter(order => !isMyChoiceCompanyOwned(order)).length} unpaid orders</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* General Summary for other brands */}
+        {!selectedBrand?.name?.toLowerCase().includes('mychoice') && (
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-green-50 p-4 rounded-lg">
+              <p className="text-sm text-green-600 font-medium">Total Revenue</p>
+              <p className="text-2xl font-bold text-green-900">₱{calculateTotalRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-xs text-green-700 mt-1">{paidOrders.length + completedOrders.length} total orders</p>
+            </div>
+            <div className="bg-purple-50 p-4 rounded-lg">
+              <p className="text-sm text-purple-600 font-medium">Paid Orders</p>
+              <p className="text-2xl font-bold text-purple-900">₱{calculateTotalPaid().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-xs text-purple-700 mt-1">{paidOrders.length} paid orders</p>
+            </div>
+            <div className="bg-indigo-50 p-4 rounded-lg">
+              <p className="text-sm text-indigo-600 font-medium">Completed Orders</p>
+              <p className="text-2xl font-bold text-indigo-900">₱{calculateTotalCompleted().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-xs text-indigo-700 mt-1">{completedOrders.length} completed orders</p>
+            </div>
+            <div className="bg-orange-50 p-4 rounded-lg">
+              <p className="text-sm text-orange-600 font-medium">Total Receivable</p>
+              <p className="text-2xl font-bold text-orange-900">₱{totalReceivable.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-xs text-orange-700 mt-1">{fulfilledOrders.length} unpaid orders</p>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Released Orders (Unpaid) */}
-      {releasedOrders.length > 0 && (
+      {/* Fulfilled Orders (Unpaid) */}
+      {fulfilledOrders.length > 0 && (
         <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-200 bg-orange-50">
             <h4 className="text-lg font-medium text-orange-900">Unpaid Orders (Receivable)</h4>
@@ -725,7 +990,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                     Amount
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Items
+                    Returnable Pans
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Status
@@ -736,8 +1001,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {releasedOrders.map((order) => (
-                  <tr key={order.id} className="hover:bg-orange-50">
+                {fulfilledOrders.map((order) => (
+                  <tr key={order.id} className="hover:bg-orange-100 hover:shadow-md transition-all duration-75">
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 align-middle">
                       {order.id.slice(0, 8)}...
                     </td>
@@ -745,13 +1010,41 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       {formatPhilippinesDateTime(order.created_at, { dateStyle: 'short' })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
-                      {order.location?.name || 'N/A'}
+                      <div className="flex items-center">
+                        {isCompanyOwned(order) ? (
+                          <Building2 className="h-4 w-4 mr-2 text-blue-600" />
+                        ) : (
+                          <Store className={`h-4 w-4 mr-2 ${getFranchiseIconColor()}`} />
+                        )}
+                        <span>{order.location?.name || 'N/A'}</span>
+                      </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-orange-600 align-middle">
                       ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
-                      {getTotalItems(order)} items
+                      {(() => {
+                        const returnablePans = getReturnablePans(order)
+                        if (returnablePans.total > 0 && returnablePans.hasImage) {
+                          return (
+                            <button
+                              onClick={() => {
+                                setSelectedReturnablePansImage(order.returnable_pans_image_url)
+                                setSelectedReturnablePansOrder(order)
+                                setShowReturnablePansModal(true)
+                              }}
+                              className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
+                              title="Click to view returnable pans image"
+                            >
+                              {returnablePans.total} pans
+                            </button>
+                          )
+                        } else if (returnablePans.total > 0) {
+                          return <span className="text-red-600 font-medium cursor-default">{returnablePans.total} pans</span>
+                        } else {
+                          return <span className="text-gray-400">-</span>
+                        }
+                      })()}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap align-middle">
                       <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
@@ -779,8 +1072,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
 
       {/* Paid Orders List */}
       <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200 bg-blue-50">
-          <h4 className="text-lg font-medium text-blue-900">Paid & Completed Orders</h4>
+        <div className="px-6 py-4 border-b border-gray-200 bg-purple-50">
+          <h4 className="text-lg font-medium text-purple-900">Paid Orders ({paidOrders.length})</h4>
         </div>
         
         {loading ? (
@@ -791,7 +1084,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
           <div className="p-12 text-center">
             <CreditCard className="h-12 w-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">No Paid Orders</h3>
-            <p className="text-gray-600">There are no paid or completed orders in the selected time period.</p>
+            <p className="text-gray-600">There are no paid orders in the selected time period.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -814,7 +1107,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                     Amount
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
-                    Items
+                    Returnable Pans
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
                     Deposit Slip
@@ -826,7 +1119,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {paidOrders.map((order) => (
-                  <tr key={order.id} className="hover:bg-blue-50">
+                  <tr key={order.id} className="hover:bg-blue-100 hover:shadow-md transition-all duration-75">
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 align-middle">
                       {order.id.slice(0, 8)}...
                     </td>
@@ -834,7 +1127,14 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       {formatPhilippinesDateTime(order.created_at, { dateStyle: 'short' })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
-                      {order.location?.name || 'N/A'}
+                      <div className="flex items-center">
+                        {isCompanyOwned(order) ? (
+                          <Building2 className="h-4 w-4 mr-2 text-blue-600" />
+                        ) : (
+                          <Store className={`h-4 w-4 mr-2 ${getFranchiseIconColor()}`} />
+                        )}
+                        <span>{order.location?.name || 'N/A'}</span>
+                      </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap align-middle">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
@@ -849,18 +1149,41 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
-                      {getTotalItems(order)} items
+                      {(() => {
+                        const returnablePans = getReturnablePans(order)
+                        if (returnablePans.total > 0 && returnablePans.hasImage) {
+                          return (
+                            <button
+                              onClick={() => {
+                                setSelectedReturnablePansImage(order.returnable_pans_image_url)
+                                setSelectedReturnablePansOrder(order)
+                                setShowReturnablePansModal(true)
+                              }}
+                              className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
+                              title="Click to view returnable pans image"
+                            >
+                              {returnablePans.total} pans
+                            </button>
+                          )
+                        } else if (returnablePans.total > 0) {
+                          return <span className="text-red-600 font-medium cursor-default">{returnablePans.total} pans</span>
+                        } else {
+                          return <span className="text-gray-400">-</span>
+                        }
+                      })()}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 align-middle">
                       {order.deposit_slip_url ? (
-                        <a
-                          href={order.deposit_slip_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-blue-600 hover:text-blue-800"
+                        <button
+                        onClick={() => {
+                          setSelectedDepositSlipImage(order.deposit_slip_url)
+                          setSelectedDepositSlipOrder(order)
+                          setShowDepositSlipModal(true)
+                        }}
+                          className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
                         >
                           View
-                        </a>
+                        </button>
                       ) : (
                         <span className="text-gray-400">No slip</span>
                       )}
@@ -898,7 +1221,140 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
         )}
       </div>
 
-      {releasedOrders.length === 0 && paidOrders.length === 0 && !loading && (
+      {/* Completed Orders List */}
+      <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-200 bg-indigo-50">
+          <h4 className="text-lg font-medium text-indigo-900">Completed Orders ({completedOrders.length})</h4>
+        </div>
+        
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          </div>
+        ) : completedOrders.length === 0 ? (
+          <div className="p-12 text-center">
+            <Check className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 mb-2">No Completed Orders</h3>
+            <p className="text-gray-600">There are no completed orders in the selected time period.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 table-fixed">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
+                    Order ID
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
+                    Date
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-32">
+                    Location
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-28">
+                    Amount
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
+                    Returnable Pans
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
+                    Deposit Slip
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {completedOrders.map((order) => (
+                  <tr key={order.id} className="hover:bg-indigo-100 hover:shadow-md transition-all duration-75">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 align-middle">
+                      {order.id.slice(0, 8)}...
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
+                      {formatPhilippinesDateTime(order.created_at, { dateStyle: 'short' })}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
+                      <div className="flex items-center">
+                        {isCompanyOwned(order) ? (
+                          <Building2 className="h-4 w-4 mr-2 text-blue-600" />
+                        ) : (
+                          <Store className={`h-4 w-4 mr-2 ${getFranchiseIconColor()}`} />
+                        )}
+                        <span>{order.location?.name || 'N/A'}</span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap align-middle">
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                        Complete
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-green-600 align-middle">
+                      ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
+                      {(() => {
+                        const returnablePans = getReturnablePans(order)
+                        if (returnablePans.total > 0 && returnablePans.hasImage) {
+                          return (
+                            <button
+                              onClick={() => {
+                                setSelectedReturnablePansImage(order.returnable_pans_image_url)
+                                setSelectedReturnablePansOrder(order)
+                                setShowReturnablePansModal(true)
+                              }}
+                              className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
+                              title="Click to view returnable pans image"
+                            >
+                              {returnablePans.total} pans
+                            </button>
+                          )
+                        } else if (returnablePans.total > 0) {
+                          return <span className="text-red-600 font-medium cursor-default">{returnablePans.total} pans</span>
+                        } else {
+                          return <span className="text-gray-400">-</span>
+                        }
+                      })()}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 align-middle">
+                      {order.deposit_slip_url ? (
+                        <button
+                        onClick={() => {
+                          setSelectedDepositSlipImage(order.deposit_slip_url)
+                          setSelectedDepositSlipOrder(order)
+                          setShowDepositSlipModal(true)
+                        }}
+                          className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
+                        >
+                          View
+                        </button>
+                      ) : (
+                        <span className="text-gray-400">N/A</span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 align-middle">
+                      <div className="flex space-x-2 items-center">
+                        <button
+                          onClick={() => handleViewDetails(order)}
+                          className={`p-1 rounded text-blue-600 hover:text-blue-900 hover:bg-blue-50 transition-all duration-200 ease-in-out`}
+                          title="View Details"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {fulfilledOrders.length === 0 && paidOrders.length === 0 && completedOrders.length === 0 && !loading && (
         <div className="bg-white rounded-lg shadow-sm border p-12 text-center">
           <CreditCard className="h-12 w-12 text-gray-400 mx-auto mb-4" />
           <h3 className="text-lg font-medium text-gray-900 mb-2">No Billing Activity</h3>
@@ -909,7 +1365,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       {/* Order Details Modal */}
       {showOrderDetails && selectedOrder && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">
                 Order Details #{selectedOrder.id.slice(0, 8)}
@@ -928,7 +1384,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
             </div>
 
             {/* Order Information */}
-            <div className="space-y-6">
+            <div className="flex-1 overflow-y-auto space-y-6">
               {/* Order Header */}
               <div className="bg-gray-50 rounded-lg p-4">
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
@@ -958,7 +1414,14 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                   </div>
                   <div>
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Location</p>
-                    <p className="text-sm font-semibold text-gray-900 mt-1">{selectedOrder.location?.name || 'N/A'}</p>
+                    <div className="flex items-center mt-1">
+                      {isCompanyOwned(selectedOrder) ? (
+                        <Building2 className="h-4 w-4 mr-2 text-blue-600" />
+                      ) : (
+                        <Store className="h-4 w-4 mr-2 text-green-600" />
+                      )}
+                      <p className="text-sm font-semibold text-gray-900">{selectedOrder.location?.name || 'N/A'}</p>
+                    </div>
                   </div>
                   <div>
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Total Amount</p>
@@ -1033,15 +1496,17 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                     />
                     <div>
                       <p className="text-sm text-gray-600">Deposit slip uploaded</p>
-                      <a
-                        href={selectedOrder.deposit_slip_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                      <button
+                        onClick={() => {
+                          setSelectedDepositSlipImage(selectedOrder.deposit_slip_url)
+                          setSelectedDepositSlipOrder(selectedOrder)
+                          setShowDepositSlipModal(true)
+                        }}
                         className="inline-flex items-center text-blue-600 hover:text-blue-800 text-sm mt-1"
                       >
                         <Eye className="h-3 w-3 mr-1" />
                         View full size
-                      </a>
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1053,7 +1518,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                   <div className="px-4 py-3 bg-gray-50 border-b">
                     <h4 className="text-sm font-semibold text-gray-900">Order Items ({selectedOrder.order_details.length})</h4>
                   </div>
-                  <div className="overflow-x-auto">
+                  <div className="overflow-x-auto max-h-96 overflow-y-auto">
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
@@ -1064,7 +1529,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                             Quantity
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Unit Price
+                            Price
                           </th>
                           <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Total
@@ -1076,14 +1541,14 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                           <tr key={detail.id} className="hover:bg-gray-50">
                             <td className="px-4 py-3 whitespace-nowrap">
                               <div>
-                                <div className="text-sm font-medium text-gray-900">{detail.product.name}</div>
-                                {detail.product.sku && (
-                                  <div className="text-xs text-gray-500">SKU: {detail.product.sku}</div>
+                                <div className="text-sm font-medium text-gray-900">{detail.products.name}</div>
+                                {detail.products.sku && (
+                                  <div className="text-xs text-gray-500">SKU: {detail.products.sku}</div>
                                 )}
                               </div>
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                              {detail.quantity} {detail.product.unit}
+                              {detail.quantity} {detail.products.unit}
                             </td>
                             <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
                               ₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -1100,6 +1565,73 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               )}
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* Returnable Pans Image Modal */}
+      {showReturnablePansModal && selectedReturnablePansImage && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Returnable Pans Image
+                {(() => {
+                  const returnablePans = getReturnablePans(selectedReturnablePansOrder)
+                  return returnablePans.total > 0 ? ` (${returnablePans.total} pans)` : ''
+                })()}
+              </h3>
+              <button
+                onClick={() => {
+                  setShowReturnablePansModal(false)
+                  setSelectedReturnablePansImage(null)
+                  setSelectedReturnablePansOrder(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="text-center flex-1 flex items-center justify-center overflow-auto">
+              <img
+                src={selectedReturnablePansImage}
+                alt="Returnable pans"
+                className="max-h-[70vh] w-auto rounded-lg border"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deposit Slip Image Modal */}
+      {showDepositSlipModal && selectedDepositSlipImage && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Deposit Slip
+                {selectedDepositSlipOrder && ` - ₱${selectedDepositSlipOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              </h3>
+              <button
+                onClick={() => {
+                  setShowDepositSlipModal(false)
+                  setSelectedDepositSlipImage(null)
+                  setSelectedDepositSlipOrder(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="text-center flex-1 flex items-center justify-center overflow-auto">
+              <img
+                src={selectedDepositSlipImage}
+                alt="Deposit slip"
+                className="max-h-[70vh] w-auto rounded-lg border"
+              />
+            </div>
           </div>
         </div>
       )}

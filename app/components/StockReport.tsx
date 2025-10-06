@@ -9,7 +9,7 @@ interface DailyStockSummary {
   brand_id: string
   date: string
   total_production: number
-  total_released: number
+  total_fulfilled: number
   total_final_stock: number
   created_at: string
   brand?: Brand
@@ -53,7 +53,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
   const [loading, setLoading] = useState(false)
   const [expandedSummaries, setExpandedSummaries] = useState<Set<string>>(new Set())
   const [ordersByDate, setOrdersByDate] = useState<Record<string, CustomerOrder[]>>({})
-  const [allReleasedOrders, setAllReleasedOrders] = useState<CustomerOrder[]>([])
+  const [allFulfilledOrders, setAllFulfilledOrders] = useState<CustomerOrder[]>([])
   const [selectedOrder, setSelectedOrder] = useState<CustomerOrder | null>(null)
   const [loadingOrders, setLoadingOrders] = useState(false)
 
@@ -86,7 +86,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
     }
   }
 
-  const fetchAllReleasedOrders = async () => {
+  const fetchAllFulfilledOrders = async () => {
     if (!selectedBrand) return
 
     try {
@@ -101,15 +101,15 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
           )
         `)
         .eq('brand_id', selectedBrand.id)
-        .eq('status', 'released')
+        .eq('status', 'fulfilled')
         .order('updated_at', { ascending: false })
 
       if (error) {
-        console.error('Error fetching all released orders:', error)
+        console.error('Error fetching all delivered orders:', error)
         return
       }
 
-      setAllReleasedOrders(data || [])
+      setAllFulfilledOrders(data || [])
     } catch (error) {
       console.error('Error fetching all released orders:', error)
     }
@@ -134,7 +134,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
           )
         `)
         .eq('brand_id', selectedBrand.id)
-        .eq('status', 'released')
+        .eq('status', 'fulfilled')
         .order('updated_at', { ascending: false })
 
       if (error) {
@@ -195,7 +195,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
   useEffect(() => {
     if (selectedBrand) {
       fetchSummaries()
-      fetchAllReleasedOrders()
+      fetchAllFulfilledOrders()
     }
   }, [selectedBrand])
 
@@ -209,11 +209,11 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
   }
 
   const getStatusIcon = (summary: DailyStockSummary) => {
-    if (summary.total_production > 0 && summary.total_released > 0) {
+    if (summary.total_production > 0 && summary.total_fulfilled > 0) {
       return <TrendingUp className="h-4 w-4 text-blue-500" />
     } else if (summary.total_production > 0) {
       return <Package className="h-4 w-4 text-green-500" />
-    } else if (summary.total_released > 0) {
+    } else if (summary.total_fulfilled > 0) {
       return <Truck className="h-4 w-4 text-orange-500" />
     } else {
       return <CheckCircle className="h-4 w-4 text-gray-500" />
@@ -221,11 +221,11 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
   }
 
   const getStatusColor = (summary: DailyStockSummary) => {
-    if (summary.total_production > 0 && summary.total_released > 0) {
+    if (summary.total_production > 0 && summary.total_fulfilled > 0) {
       return 'bg-blue-100 text-blue-800'
     } else if (summary.total_production > 0) {
       return 'bg-green-100 text-green-800'
-    } else if (summary.total_released > 0) {
+    } else if (summary.total_fulfilled > 0) {
       return 'bg-orange-100 text-orange-800'
     } else {
       return 'bg-gray-100 text-gray-800'
@@ -233,11 +233,11 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
   }
 
   const getStatusText = (summary: DailyStockSummary) => {
-    if (summary.total_production > 0 && summary.total_released > 0) {
+    if (summary.total_production > 0 && summary.total_fulfilled > 0) {
       return 'Active Day'
     } else if (summary.total_production > 0) {
       return 'Production Only'
-    } else if (summary.total_released > 0) {
+    } else if (summary.total_fulfilled > 0) {
       return 'Release Only'
     } else {
       return 'No Activity'
@@ -253,11 +253,11 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
   }
 
   const getTotalOrdersReleased = () => {
-    return allReleasedOrders.length
+    return allFulfilledOrders.length
   }
 
   const getTotalAmountReleased = () => {
-    return allReleasedOrders.reduce((total, order) => total + getTotalAmount(order), 0)
+    return allFulfilledOrders.reduce((total, order) => total + getTotalAmount(order), 0)
   }
 
   if (!selectedBrand) {
@@ -284,7 +284,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
         <button
           onClick={() => {
             fetchSummaries()
-            fetchAllReleasedOrders()
+            fetchAllFulfilledOrders()
           }}
           className={`flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors ${
             theme === 'green' ? 'bg-green-600 hover:bg-green-700' :
@@ -421,7 +421,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
                           {summary.total_production}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {summary.total_released}
+                          {summary.total_fulfilled}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-green-600">
                           {summary.total_final_stock}
@@ -446,7 +446,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
                                 </div>
                               ) : orders.length === 0 ? (
                                 <div className="text-sm text-gray-500 py-4">
-                                  No orders were released on this date
+                                  No orders were fulfilled on this date
                                 </div>
                               ) : (
                                 <div className="space-y-2">

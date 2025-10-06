@@ -311,7 +311,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
   const calculateTotalReceivable = (orders: CustomerOrder[]) => {
     return orders
-      .filter(order => order.status === 'released')
+      .filter(order => order.status === 'fulfilled')
       .reduce((total, order) => total + (order.total_amount || 0), 0)
   }
 
@@ -336,7 +336,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     const statusColors = {
       pending: 'bg-yellow-100 text-yellow-800',
       approved: 'bg-blue-100 text-blue-800',
-      released: 'bg-green-100 text-green-800',
+      fulfilled: 'bg-green-100 text-green-800',
       cancelled: 'bg-red-100 text-red-800'
     }
     
@@ -485,12 +485,23 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             
             .status-pending { background: white; color: black; }
             .status-approved { background: white; color: black; }
-            .status-released { background: black; color: white; }
+            .status-fulfilled { background: black; color: white; }
             .status-cancelled { background: white; color: black; }
             
             .items { 
               padding: 8px 12px;
               flex: 1;
+            }
+            
+            .items-multi-column {
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 20px;
+            }
+            
+            .items-column {
+              display: flex;
+              flex-direction: column;
             }
             
             .items-title {
@@ -703,30 +714,95 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               </div>
           </div>
           
-          <div class="items">
-              <div class="items-header">
-                <div class="header-cell header-checkbox">✓</div>
-                <div class="header-cell header-item">Item</div>
-                <div class="header-cell header-qty">Quantity</div>
-                <div class="header-cell header-price">Unit Price</div>
-                <div class="header-cell header-total">Total</div>
-              </div>
-              ${order.order_details.map(detail => `
-                <div class="item-row">
-                  <div class="item-checkbox">
-                    <div class="checkbox"></div>
+          <div class="items ${order.order_details.length > 15 ? 'items-multi-column' : ''}">
+              ${order.order_details.length > 15 ? `
+                <div class="items-column">
+                  <div class="items-header">
+                    <div class="header-cell header-checkbox">✓</div>
+                    <div class="header-cell header-item">Item</div>
+                    <div class="header-cell header-qty">Quantity</div>
+                    <div class="header-cell header-price">Price</div>
+                    <div class="header-cell header-total">Total</div>
                   </div>
-                  <div>
-                    <div class="item-name">${detail.product.name}</div>
-                    <div class="item-details">
-                      ${detail.product.sku ? `SKU: ${detail.product.sku}` : ''}
+                  ${order.order_details.sort((a, b) => {
+                    const categoryA = a.product?.category && a.product.category.trim() !== '' ? a.product.category : 'Uncategorized'
+                    const categoryB = b.product?.category && b.product.category.trim() !== '' ? b.product.category : 'Uncategorized'
+                    return categoryA.localeCompare(categoryB)
+                  }).slice(0, Math.ceil(order.order_details.length / 2)).map(detail => `
+                    <div class="item-row">
+                      <div class="item-checkbox">
+                        <div class="checkbox"></div>
+                      </div>
+                      <div>
+                        <div class="item-name">${detail.product.name}</div>
+                        <div class="item-details">
+                          ${detail.product.sku ? `SKU: ${detail.product.sku}` : ''}
+                        </div>
+                      </div>
+                      <div class="item-quantity">${detail.quantity} ${detail.product.unit}</div>
+                      <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                      <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     </div>
-                  </div>
-                  <div class="item-quantity">${detail.quantity} ${detail.product.unit}</div>
-                  <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                  <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  `).join('')}
                 </div>
-              `).join('')}
+                <div class="items-column">
+                  <div class="items-header">
+                    <div class="header-cell header-checkbox">✓</div>
+                    <div class="header-cell header-item">Item</div>
+                    <div class="header-cell header-qty">Quantity</div>
+                    <div class="header-cell header-price">Price</div>
+                    <div class="header-cell header-total">Total</div>
+                  </div>
+                  ${order.order_details.sort((a, b) => {
+                    const categoryA = a.product?.category && a.product.category.trim() !== '' ? a.product.category : 'Uncategorized'
+                    const categoryB = b.product?.category && b.product.category.trim() !== '' ? b.product.category : 'Uncategorized'
+                    return categoryA.localeCompare(categoryB)
+                  }).slice(Math.ceil(order.order_details.length / 2)).map(detail => `
+                    <div class="item-row">
+                      <div class="item-checkbox">
+                        <div class="checkbox"></div>
+                      </div>
+                      <div>
+                        <div class="item-name">${detail.product.name}</div>
+                        <div class="item-details">
+                          ${detail.product.sku ? `SKU: ${detail.product.sku}` : ''}
+                        </div>
+                      </div>
+                      <div class="item-quantity">${detail.quantity} ${detail.product.unit}</div>
+                      <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                      <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    </div>
+                  `).join('')}
+                </div>
+              ` : `
+                <div class="items-header">
+                  <div class="header-cell header-checkbox">✓</div>
+                  <div class="header-cell header-item">Item</div>
+                  <div class="header-cell header-qty">Quantity</div>
+                  <div class="header-cell header-price">Price</div>
+                  <div class="header-cell header-total">Total</div>
+                </div>
+                ${order.order_details.sort((a, b) => {
+                  const categoryA = a.product?.category && a.product.category.trim() !== '' ? a.product.category : 'Uncategorized'
+                  const categoryB = b.product?.category && b.product.category.trim() !== '' ? b.product.category : 'Uncategorized'
+                  return categoryA.localeCompare(categoryB)
+                }).map(detail => `
+                  <div class="item-row">
+                    <div class="item-checkbox">
+                      <div class="checkbox"></div>
+                    </div>
+                    <div>
+                      <div class="item-name">${detail.product.name}</div>
+                      <div class="item-details">
+                        ${detail.product.sku ? `SKU: ${detail.product.sku}` : ''}
+                      </div>
+                    </div>
+                    <div class="item-quantity">${detail.quantity} ${detail.product.unit}</div>
+                    <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  </div>
+                `).join('')}
+              `}
           </div>
           
             ${order.notes ? `
@@ -913,10 +989,10 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
-          <h3 className="text-xl font-semibold text-gray-900">Branch Manager</h3>
-          <p className="text-gray-600">Manage branch locations and view order history</p>
+          <h1 className="text-xl font-semibold text-gray-900">Branches</h1>
+          <p className="text-sm text-gray-600">Manage branch locations and view order history</p>
         </div>
         <button
           onClick={() => setShowAddForm(true)}
@@ -1292,7 +1368,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                     <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
                       selectedOrder.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
                       selectedOrder.status === 'approved' ? 'bg-blue-100 text-blue-800' :
-                      selectedOrder.status === 'released' ? 'bg-orange-100 text-orange-800' :
+                      selectedOrder.status === 'fulfilled' ? 'bg-orange-100 text-orange-800' :
                       selectedOrder.status === 'paid' ? 'bg-purple-100 text-purple-800' :
                       selectedOrder.status === 'complete' ? 'bg-indigo-100 text-indigo-800' :
                       'bg-gray-100 text-gray-800'
@@ -1393,7 +1469,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit</th>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Price</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
                       </tr>
                     </thead>
