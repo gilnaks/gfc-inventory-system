@@ -265,8 +265,12 @@ export default function DSIRPage() {
   }
 
   const generateStaffCode = () => {
-    // Generate a random 8-digit code
-    const code = Math.floor(10000000 + Math.random() * 90000000).toString()
+    // Generate a random 8-character alphanumeric code
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    let code = ''
+    for (let i = 0; i < 8; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
     setRegistrationForm({ ...registrationForm, staff_code: code })
   }
 
@@ -277,7 +281,7 @@ export default function DSIRPage() {
     }
 
     if (registrationForm.staff_code.length !== 8) {
-      setError('Staff code must be 8 digits')
+      setError('Staff code must be 8 characters')
       return
     }
 
@@ -297,7 +301,7 @@ export default function DSIRPage() {
 
       if (error) throw error
 
-      setSuccess('Registration successful! Your 8-digit code is: ' + registrationForm.staff_code)
+      setSuccess('Registration successful! Your 8-character code is: ' + registrationForm.staff_code)
       setRegistrationForm({ full_name: '', mobile_number: '', staff_code: '' })
       
       // Switch to login view
@@ -315,12 +319,12 @@ export default function DSIRPage() {
 
   const loginStaff = async () => {
     if (!loginForm.staff_code.trim()) {
-      setError('Please enter your 8-digit staff code')
+      setError('Please enter your 8-character staff code')
       return
     }
 
     if (loginForm.staff_code.length !== 8) {
-      setError('Staff code must be 8 digits')
+      setError('Staff code must be 8 characters')
       return
     }
 
@@ -1143,7 +1147,7 @@ export default function DSIRPage() {
             </div>
             <h2 className="text-3xl font-bold text-gray-900">Staff Registration</h2>
             <p className="mt-2 text-sm text-gray-600">
-              Register to get your 8-digit staff code
+              Register to get your 8-character staff code
             </p>
           </div>
 
@@ -1170,24 +1174,25 @@ export default function DSIRPage() {
                 <input
                   type="tel"
                   value={registrationForm.mobile_number}
-                  onChange={(e) => setRegistrationForm({ ...registrationForm, mobile_number: e.target.value })}
+                  onChange={(e) => setRegistrationForm({ ...registrationForm, mobile_number: e.target.value.replace(/\D/g, '').slice(0, 11) })}
+                  maxLength={11}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter your mobile number"
+                  placeholder="Enter 11-digit mobile number"
                   required
                 />
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  8-Digit Staff Code
+                  8-Character Staff Code
                 </label>
                 <div className="flex space-x-2">
                   <input
                     type="text"
                     value={registrationForm.staff_code}
-                    onChange={(e) => setRegistrationForm({ ...registrationForm, staff_code: e.target.value.replace(/\D/g, '').slice(0, 8) })}
+                    onChange={(e) => setRegistrationForm({ ...registrationForm, staff_code: e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) })}
                     className="flex-1 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="8-digit code"
+                    placeholder="8-character code"
                     maxLength={8}
                     required
                   />
@@ -1248,7 +1253,7 @@ export default function DSIRPage() {
           </div>
           <h2 className="text-3xl font-bold text-gray-900">DSIR Login</h2>
           <p className="mt-2 text-sm text-gray-600">
-            Enter your 8-digit staff code to access the Daily Sales & Inventory Report
+            Enter your 8-character staff code to access the Daily Sales & Inventory Report
           </p>
         </div>
 
@@ -1256,7 +1261,7 @@ export default function DSIRPage() {
           <form className="space-y-6" onSubmit={(e) => { e.preventDefault(); loginStaff(); }}>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                8-Digit Staff Code
+                8-Character Staff Code
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -1265,8 +1270,8 @@ export default function DSIRPage() {
                 <input
                   type="text"
                   value={loginForm.staff_code}
-                  onChange={(e) => setLoginForm({ ...loginForm, staff_code: e.target.value.replace(/\D/g, '').slice(0, 8) })}
-                  placeholder="Enter 8-digit staff code"
+                  onChange={(e) => setLoginForm({ ...loginForm, staff_code: e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) })}
+                  placeholder="Enter 8-character staff code"
                   maxLength={8}
                   className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                   required

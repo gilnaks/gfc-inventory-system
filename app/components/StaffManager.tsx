@@ -245,11 +245,6 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   }
 
   const addStaff = async () => {
-    if (!newStaff.full_name.trim() || !newStaff.mobile_number.trim()) {
-      setError('Please fill in all required fields')
-      return
-    }
-
     setSaving(true)
     try {
       const staffCode = newStaff.staff_code.trim() || generateStaffCode()
@@ -1372,7 +1367,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   value={newStaff.full_name}
                   onChange={(e) => setNewStaff({ ...newStaff, full_name: e.target.value })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter full name"
+                  required
                 />
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1381,10 +1376,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   <input
                     type="tel"
                     value={newStaff.mobile_number}
-                    onChange={(e) => setNewStaff({ ...newStaff, mobile_number: e.target.value })}
+                    onChange={(e) => setNewStaff({ ...newStaff, mobile_number: e.target.value.replace(/\D/g, '').slice(0, 11) })}
                     maxLength={11}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Enter mobile number"
+                    required
                   />
                 </div>
                 <div className="space-y-2">
@@ -1394,6 +1389,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                     value={newStaff.employment_date}
                     onChange={(e) => setNewStaff({ ...newStaff, employment_date: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    required
                   />
                 </div>
               </div>
@@ -1407,10 +1403,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       onChange={(e) => setNewStaff({ ...newStaff, staff_code: e.target.value })}
                       maxLength={8}
                       className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      required
                     />
                     <button
                       onClick={() => setNewStaff({ ...newStaff, staff_code: generateStaffCode() })}
-                      className="px-2 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                      className="px-2 py-2 bg-white text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50"
                       title="Generate staff code"
                     >
                       <RefreshCw className="h-4 w-4" />
@@ -1423,10 +1420,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                     type="number"
                     min="0"
                     step="0.01"
-                    value={newStaff.hourly_rate}
+                    value={newStaff.hourly_rate || ''}
                     onChange={(e) => setNewStaff({ ...newStaff, hourly_rate: parseFloat(e.target.value) || 0 })}
                     className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="0.00"
+                    required
                   />
                 </div>
               </div>
@@ -1440,7 +1437,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
               <button
                 onClick={addStaff}
-                disabled={saving || !newStaff.full_name.trim() || !newStaff.mobile_number.trim()}
+                disabled={saving || !newStaff.full_name.trim() || !newStaff.mobile_number.trim() || !newStaff.employment_date || !newStaff.staff_code.trim() || !newStaff.hourly_rate}
                 className={`px-4 py-2 ${colors.primary} text-white rounded-md disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 {saving ? 'Adding...' : 'Add Staff'}
@@ -1483,10 +1480,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       <input
                         type="tel"
                         value={editForm.mobile_number}
-                        onChange={(e) => setEditForm({ ...editForm, mobile_number: e.target.value })}
+                        onChange={(e) => setEditForm({ ...editForm, mobile_number: e.target.value.replace(/\D/g, '').slice(0, 11) })}
                         maxLength={11}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        placeholder="Enter mobile number"
+                        placeholder="Enter 11-digit mobile number"
                       />
                     </div>
                     <div className="space-y-2">
