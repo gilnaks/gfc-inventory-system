@@ -13,6 +13,7 @@ interface Location {
   id: string
   name: string
   brand_id: string
+  company_owned?: boolean
 }
 
 interface StaffRegistration {
@@ -60,6 +61,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [success, setSuccess] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'submitted' | 'reviewed'>('all')
+  const [locationTypeFilter, setLocationTypeFilter] = useState<'all' | 'company' | 'franchise'>('all')
+  const [dateFilter, setDateFilter] = useState('')
   
   // Edit Items Modal State
   const [isEditItemsModalOpen, setIsEditItemsModalOpen] = useState(false)
@@ -95,7 +98,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         .from('dsir_reports')
         .select(`
           *,
-          location:locations!inner(*)
+          location:locations!inner(*),
+          staff_registration:staff_registrations!inner(*)
         `)
         .eq('location.brand_id', selectedBrand.id)
 
@@ -488,11 +492,17 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     const matchesSearch = 
       report.staff_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       report.location?.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      report.id.toLowerCase().includes(searchTerm.toLowerCase())
+      report.staff_registration?.full_name?.toLowerCase().includes(searchTerm.toLowerCase())
     
     const matchesStatus = statusFilter === 'all' || report.status === statusFilter
     
-    return matchesSearch && matchesStatus
+    const matchesLocationType = locationTypeFilter === 'all' || 
+      (locationTypeFilter === 'company' && report.location?.company_owned) ||
+      (locationTypeFilter === 'franchise' && !report.location?.company_owned)
+    
+    const matchesDate = !dateFilter || report.report_date === dateFilter
+    
+    return matchesSearch && matchesStatus && matchesLocationType && matchesDate
   }).sort((a, b) => {
     // Sort by report_date first, then by created_at as fallback
     const dateA = new Date(a.report_date || a.created_at)
@@ -574,27 +584,84 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       </div>
 
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4">
-        <div className="flex-1">
-          <input
-            type="text"
-            placeholder="Search by staff name, location, or report ID..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          />
+      <div className="flex flex-col lg:flex-row space-y-4 lg:space-y-0 lg:space-x-4 lg:items-center">
+        {/* Left side filters */}
+        <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4 flex-1">
+          {/* Search Input */}
+          <div className="w-80 flex-shrink-0">
+            <input
+              type="text"
+              placeholder="Search by staff name or location..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full h-10 px-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+          
+          {/* Date Filter */}
+          <div className="flex-shrink-0">
+            <input
+              type="date"
+              placeholder="Filter by date..."
+              value={dateFilter}
+              onChange={(e) => setDateFilter(e.target.value)}
+              className="h-10 px-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+          
+          {/* Status Filter */}
+          <div className="flex-shrink-0">
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as 'all' | 'draft' | 'submitted' | 'reviewed')}
+              className="h-10 px-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="all">All Status</option>
+              <option value="draft">Draft</option>
+              <option value="submitted">Submitted</option>
+              <option value="reviewed">Reviewed</option>
+            </select>
+          </div>
         </div>
-        <div>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as 'all' | 'draft' | 'submitted' | 'reviewed')}
-            className="px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          >
-            <option value="all">All Status</option>
-            <option value="draft">Draft</option>
-            <option value="submitted">Submitted</option>
-            <option value="reviewed">Reviewed</option>
-          </select>
+        
+        {/* Location Type Radio Buttons - Pinned to right */}
+        <div className="flex items-center space-x-3 flex-shrink-0">
+            <div className="flex items-center space-x-1">
+              <input
+                type="radio"
+                id="all-locations"
+                name="locationType"
+                value="all"
+                checked={locationTypeFilter === 'all'}
+                onChange={(e) => setLocationTypeFilter(e.target.value as 'all' | 'company' | 'franchise')}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+              />
+              <label htmlFor="all-locations" className="text-sm text-gray-700">All</label>
+            </div>
+            <div className="flex items-center space-x-1">
+              <input
+                type="radio"
+                id="company-owned"
+                name="locationType"
+                value="company"
+                checked={locationTypeFilter === 'company'}
+                onChange={(e) => setLocationTypeFilter(e.target.value as 'all' | 'company' | 'franchise')}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+              />
+              <label htmlFor="company-owned" className="text-sm text-gray-700">Company</label>
+            </div>
+            <div className="flex items-center space-x-1">
+              <input
+                type="radio"
+                id="franchise"
+                name="locationType"
+                value="franchise"
+                checked={locationTypeFilter === 'franchise'}
+                onChange={(e) => setLocationTypeFilter(e.target.value as 'all' | 'company' | 'franchise')}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+              />
+              <label htmlFor="franchise" className="text-sm text-gray-700">Franchise</label>
+            </div>
         </div>
       </div>
 

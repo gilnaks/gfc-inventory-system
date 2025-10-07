@@ -12,6 +12,7 @@ interface Location {
   franchisee?: string
   contact_number?: string
   company_owned?: boolean
+  can_access_order_features?: boolean
   created_at: string
   updated_at: string
   brand?: {
@@ -32,6 +33,8 @@ interface CustomerOrder {
   created_at: string
   updated_at: string
   notes?: string
+  returnable_pans?: number
+  deposit_slip_url?: string
   location?: Location
   brand?: {
     id: string
@@ -74,6 +77,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     franchisee: '',
     contact_number: '',
     company_owned: false,
+    can_access_order_features: false,
     brand_id: selectedBrand?.id || ''
   })
 
@@ -194,7 +198,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
       if (data) {
         setLocations([...locations, data[0]])
-        setNewLocation({ name: '', passkey: '', franchisee: '', contact_number: '', company_owned: false, brand_id: selectedBrand?.id || '' })
+        setNewLocation({ name: '', passkey: '', franchisee: '', contact_number: '', company_owned: false, can_access_order_features: false, brand_id: selectedBrand?.id || '' })
         setShowAddForm(false)
       }
     } catch (error) {
@@ -213,6 +217,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
           franchisee: location.franchisee,
           contact_number: location.contact_number,
           company_owned: location.company_owned,
+          can_access_order_features: location.can_access_order_features,
           brand_id: location.brand_id,
           updated_at: new Date().toISOString()
         })
@@ -929,7 +934,10 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                       Amount
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Items
+                      Returnable Pans
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Deposit Slip
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Actions
@@ -955,7 +963,18 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {order.order_details?.length || 0} items
+                        {order.returnable_pans || 0}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {order.deposit_slip_url ? (
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                            Uploaded
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                            Not Uploaded
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         <div className="flex space-x-2">
@@ -979,6 +998,185 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {/* Order Details Modal - Only show in order history view */}
+        {showOrderDetails && selectedOrder && (
+          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+            <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
+              <div className="flex justify-between items-center mb-4 flex-shrink-0">
+                <h3 className="text-lg font-semibold text-gray-900">
+                  Order Details #{selectedOrder.id.slice(0, 8)}
+                </h3>
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => handlePrintReceipt(selectedOrder)}
+                    className={`flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium ${
+                      theme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
+                      theme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
+                      theme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
+                      'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                    }`}
+                  >
+                    <Printer className="h-4 w-4" />
+                    <span>Print Transfer Sheet</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowOrderDetails(false)
+                      setSelectedOrder(null)
+                    }}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="h-6 w-6" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Order Information */}
+              <div className="space-y-6 flex-1 overflow-y-auto min-h-0">
+                {/* Order Header */}
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wide">Created Date</p>
+                      <p className="text-sm font-semibold text-gray-900 mt-1">{formatPhilippinesDateTime(selectedOrder.created_at, { dateStyle: 'short', timeStyle: 'short' })}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wide">Status</p>
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
+                        selectedOrder.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                        selectedOrder.status === 'approved' ? 'bg-blue-100 text-blue-800' :
+                        selectedOrder.status === 'fulfilled' ? 'bg-orange-100 text-orange-800' :
+                        selectedOrder.status === 'paid' ? 'bg-purple-100 text-purple-800' :
+                        selectedOrder.status === 'complete' ? 'bg-indigo-100 text-indigo-800' :
+                        'bg-gray-100 text-gray-800'
+                      }`}>
+                        {selectedOrder.status.charAt(0).toUpperCase() + selectedOrder.status.slice(1)}
+                      </span>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wide">Logistics</p>
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
+                        selectedOrder.delivery_type === 'delivery' 
+                          ? 'bg-blue-100 text-blue-800' 
+                          : 'bg-green-100 text-green-800'
+                      }`}>
+                        {selectedOrder.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}
+                      </span>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wide">Location</p>
+                      <p className="text-sm font-semibold text-gray-900 mt-1">{selectedOrder.location?.name || 'N/A'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wide">Total Amount</p>
+                      <p className="text-sm font-semibold text-gray-900 mt-1">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <div>
+                      <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Category Totals</p>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                        {getCategoryTotals(selectedOrder).map((categoryTotal, index) => (
+                          <div key={index} className="bg-white rounded p-2 border text-center">
+                            <p className="text-xs font-medium text-gray-900">{categoryTotal.category}</p>
+                            <p className="text-xs text-gray-600">{categoryTotal.totalQuantity} items</p>
+                            <p className="text-xs font-semibold text-green-600">₱{categoryTotal.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    
+                    {/* Pricing Breakdown */}
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                      <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Pricing Breakdown</p>
+                      <div className="bg-white rounded p-3 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Subtotal:</span>
+                          <span className="text-sm text-gray-900">₱{getSubtotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                        {selectedOrder.delivery_type === 'delivery' && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-600">Delivery Fee:</span>
+                            {getSubtotalAmount(selectedOrder) >= 10000 ? (
+                              <span className="text-sm text-green-600">FREE (Order over ₱10k)</span>
+                            ) : (
+                              <span className="text-sm text-gray-900">+₱500.00</span>
+                            )}
+                          </div>
+                        )}
+                        {selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) >= 10000 && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
+                            <span className="text-sm text-green-600">-₱{(getSubtotalAmount(selectedOrder) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                          </div>
+                        )}
+                        {selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) < 10000 && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-500">Pickup Discount:</span>
+                            <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between items-center border-t pt-2">
+                          <span className="text-sm font-semibold text-gray-900">Total Amount:</span>
+                          <span className="text-sm font-semibold text-green-600">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Notes */}
+                {selectedOrder.notes && (
+                  <div className="bg-white border rounded-lg p-4">
+                    <h4 className="text-sm font-semibold text-gray-900 mb-2">Notes</h4>
+                    <p className="text-sm text-gray-600">{selectedOrder.notes}</p>
+                  </div>
+                )}
+
+                {/* Order Items */}
+                <div className="bg-white border rounded-lg overflow-hidden">
+                  <div className="px-4 py-3 bg-gray-50 border-b">
+                    <h4 className="text-sm font-semibold text-gray-900">Order Items</h4>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {selectedOrder.order_details
+                          ?.sort((a, b) => {
+                            // First sort by category, then by product name within category
+                            const categoryCompare = (a.product?.category || '').localeCompare(b.product?.category || '')
+                            if (categoryCompare !== 0) return categoryCompare
+                            return (a.product?.name || '').localeCompare(b.product?.name || '')
+                          })
+                          ?.map((detail, index) => (
+                          <tr key={index}>
+                            <td className="px-4 py-2 text-sm text-gray-900">{detail.product?.name || 'N/A'}</td>
+                            <td className="px-4 py-2 text-sm text-gray-500">{detail.product?.sku || 'N/A'}</td>
+                            <td className="px-4 py-2 text-sm text-gray-500">{detail.product?.unit || 'N/A'}</td>
+                            <td className="px-4 py-2 text-sm text-gray-900">{detail.quantity}</td>
+                            <td className="px-4 py-2 text-sm text-gray-900">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className="px-4 py-2 text-sm font-medium text-gray-900">₱{(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -1049,6 +1247,15 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                       className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                     />
                     <span>Company Owned</span>
+                  </label>
+                  <label className="flex items-center space-x-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={newLocation.can_access_order_features}
+                      onChange={(e) => setNewLocation({...newLocation, can_access_order_features: e.target.checked})}
+                      className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                    />
+                    <span>Allow Features</span>
                   </label>
                 </div>
               </div>
@@ -1166,6 +1373,9 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                     Type
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Access Features
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Actions
                   </th>
                 </tr>
@@ -1257,6 +1467,27 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         </span>
                       )}
                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {editingLocation?.id === location.id ? (
+                        <label className="flex items-center space-x-2">
+                          <input
+                            type="checkbox"
+                            checked={editingLocation.can_access_order_features || false}
+                            onChange={(e) => setEditingLocation({...editingLocation, can_access_order_features: e.target.checked})}
+                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                          />
+                          <span className="text-xs text-gray-600">Allow Features</span>
+                        </label>
+                      ) : (
+                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                          location.can_access_order_features 
+                            ? 'bg-green-100 text-green-800' 
+                            : 'bg-red-100 text-red-800'
+                        }`}>
+                          {location.can_access_order_features ? 'Allowed' : 'Restricted'}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       <div className="flex space-x-2">
                         {editingLocation?.id === location.id ? (
@@ -1321,177 +1552,6 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
         </div>
       )}
 
-      {/* Order Details Modal */}
-      {showOrderDetails && selectedOrder && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">
-                Order Details #{selectedOrder.id.slice(0, 8)}
-              </h3>
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => handlePrintReceipt(selectedOrder)}
-                  className={`flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium ${
-                    theme === 'green' ? 'bg-green-100 text-green-700 hover:bg-green-200' :
-                    theme === 'red' ? 'bg-red-100 text-red-700 hover:bg-red-200' :
-                    theme === 'yellow' ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200' :
-                    'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                  }`}
-                >
-                  <Printer className="h-4 w-4" />
-                  <span>Print Transfer Sheet</span>
-                </button>
-                <button
-                  onClick={() => {
-                    setShowOrderDetails(false)
-                    setSelectedOrder(null)
-                  }}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  <X className="h-6 w-6" />
-                </button>
-              </div>
-            </div>
-
-            {/* Order Information */}
-            <div className="space-y-6">
-              {/* Order Header */}
-              <div className="bg-gray-50 rounded-lg p-4">
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
-                  <div>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Created Date</p>
-                    <p className="text-sm font-semibold text-gray-900 mt-1">{formatPhilippinesDateTime(selectedOrder.created_at, { dateStyle: 'short', timeStyle: 'short' })}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Status</p>
-                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
-                      selectedOrder.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
-                      selectedOrder.status === 'approved' ? 'bg-blue-100 text-blue-800' :
-                      selectedOrder.status === 'fulfilled' ? 'bg-orange-100 text-orange-800' :
-                      selectedOrder.status === 'paid' ? 'bg-purple-100 text-purple-800' :
-                      selectedOrder.status === 'complete' ? 'bg-indigo-100 text-indigo-800' :
-                      'bg-gray-100 text-gray-800'
-                    }`}>
-                      {selectedOrder.status.charAt(0).toUpperCase() + selectedOrder.status.slice(1)}
-                    </span>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Logistics</p>
-                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
-                      selectedOrder.delivery_type === 'delivery' 
-                        ? 'bg-blue-100 text-blue-800' 
-                        : 'bg-green-100 text-green-800'
-                    }`}>
-                      {selectedOrder.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}
-                    </span>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Location</p>
-                    <p className="text-sm font-semibold text-gray-900 mt-1">{selectedOrder.location?.name || 'N/A'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide">Total Amount</p>
-                    <p className="text-sm font-semibold text-gray-900 mt-1">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                  </div>
-                </div>
-                <div className="mt-4 pt-4 border-t border-gray-200">
-                  <div>
-                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Category Totals</p>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                      {getCategoryTotals(selectedOrder).map((categoryTotal, index) => (
-                        <div key={index} className="bg-white rounded p-2 border text-center">
-                          <p className="text-xs font-medium text-gray-900">{categoryTotal.category}</p>
-                          <p className="text-xs text-gray-600">{categoryTotal.totalQuantity} items</p>
-                          <p className="text-xs font-semibold text-green-600">₱{categoryTotal.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  
-                  {/* Pricing Breakdown */}
-                  <div className="mt-4 pt-4 border-t border-gray-200">
-                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-2">Pricing Breakdown</p>
-                    <div className="bg-white rounded p-3 space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">Subtotal:</span>
-                        <span className="text-sm text-gray-900">₱{getSubtotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                      </div>
-                      {selectedOrder.delivery_type === 'delivery' && (
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm text-gray-600">Delivery Fee:</span>
-                          {getSubtotalAmount(selectedOrder) >= 10000 ? (
-                            <span className="text-sm text-green-600">FREE (Order over ₱10k)</span>
-                          ) : (
-                            <span className="text-sm text-gray-900">+₱500.00</span>
-                          )}
-                        </div>
-                      )}
-                      {selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) >= 10000 && (
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
-                          <span className="text-sm text-green-600">-₱{(getSubtotalAmount(selectedOrder) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                        </div>
-                      )}
-                      {selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) < 10000 && (
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm text-gray-500">Pickup Discount:</span>
-                          <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between items-center border-t pt-2">
-                        <span className="text-sm font-semibold text-gray-900">Total Amount:</span>
-                        <span className="text-sm font-semibold text-green-600">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Notes */}
-              {selectedOrder.notes && (
-                <div className="bg-white border rounded-lg p-4">
-                  <h4 className="text-sm font-semibold text-gray-900 mb-2">Notes</h4>
-                  <p className="text-sm text-gray-600">{selectedOrder.notes}</p>
-                </div>
-              )}
-
-              {/* Order Items */}
-              <div className="bg-white border rounded-lg overflow-hidden">
-                <div className="px-4 py-3 bg-gray-50 border-b">
-                  <h4 className="text-sm font-semibold text-gray-900">Order Items</h4>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SKU</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qty</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                      {selectedOrder.order_details?.map((detail, index) => (
-                        <tr key={index}>
-                          <td className="px-4 py-2 text-sm text-gray-900">{detail.product?.name || 'N/A'}</td>
-                          <td className="px-4 py-2 text-sm text-gray-500">{detail.product?.sku || 'N/A'}</td>
-                          <td className="px-4 py-2 text-sm text-gray-500">{detail.product?.unit || 'N/A'}</td>
-                          <td className="px-4 py-2 text-sm text-gray-900">{detail.quantity}</td>
-                          <td className="px-4 py-2 text-sm text-gray-900">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                          <td className="px-4 py-2 text-sm font-medium text-gray-900">₱{(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

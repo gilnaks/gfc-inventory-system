@@ -544,7 +544,14 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
             <div className="border-t pt-4">
               <h4 className="text-md font-medium text-gray-900 mb-3">Order Items</h4>
               <div className="space-y-2">
-                {selectedOrder.order_details?.map((detail) => (
+                {selectedOrder.order_details
+                  ?.sort((a, b) => {
+                    // First sort by category, then by product name within category
+                    const categoryCompare = (a.product?.category || '').localeCompare(b.product?.category || '')
+                    if (categoryCompare !== 0) return categoryCompare
+                    return (a.product?.name || '').localeCompare(b.product?.name || '')
+                  })
+                  ?.map((detail) => (
                   <div key={detail.id} className="flex items-center justify-between bg-gray-50 rounded p-3">
                     <div className="flex-1">
                       <div className="text-sm font-medium text-gray-900">

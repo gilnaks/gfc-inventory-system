@@ -1,7 +1,7 @@
 'use client'
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
 
 
 interface StaffRegistration {
@@ -13,6 +13,7 @@ interface StaffRegistration {
   created_at: string
   updated_at: string
   hourly_rate?: number
+  employment_date?: string
 }
 
 interface Location {
@@ -63,7 +64,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     full_name: '',
     mobile_number: '',
     staff_code: '',
-    hourly_rate: 0
+    hourly_rate: 0,
+    employment_date: ''
   })
   
   // Assignment management
@@ -92,7 +94,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     full_name: '',
     mobile_number: '',
     staff_code: '',
-    hourly_rate: 0
+    hourly_rate: 0,
+    employment_date: ''
   })
 
   const getThemeColors = () => {
@@ -258,6 +261,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           mobile_number: newStaff.mobile_number.trim(),
           staff_code: staffCode,
           hourly_rate: newStaff.hourly_rate,
+          employment_date: newStaff.employment_date,
           is_active: true
         })
         .select()
@@ -269,7 +273,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const newStaffWithAssignments = { ...newStaffData, staff_assignments: [] }
       setStaff(prevStaff => [...prevStaff, newStaffWithAssignments])
       
-      setNewStaff({ full_name: '', mobile_number: '', staff_code: '', hourly_rate: 0 })
+      setNewStaff({ full_name: '', mobile_number: '', staff_code: '', hourly_rate: 0, employment_date: '' })
       setIsAddModalOpen(false)
       setSuccess('Staff member added successfully!')
       setTimeout(() => setSuccess(''), 3000)
@@ -393,7 +397,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       full_name: staff.full_name,
       mobile_number: staff.mobile_number,
       staff_code: staff.staff_code,
-      hourly_rate: staff.hourly_rate || 0
+      hourly_rate: staff.hourly_rate || 0,
+      employment_date: staff.employment_date || ''
     })
     setIsEditModalOpen(true)
   }
@@ -409,7 +414,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           full_name: editForm.full_name.trim(),
           mobile_number: editForm.mobile_number.trim(),
           staff_code: editForm.staff_code.trim(),
-          hourly_rate: editForm.hourly_rate
+          hourly_rate: editForm.hourly_rate,
+          employment_date: editForm.employment_date
         })
         .eq('id', selectedStaff.id)
 
@@ -1369,47 +1375,60 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   placeholder="Enter full name"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Mobile Number *</label>
-                <input
-                  type="tel"
-                  value={newStaff.mobile_number}
-                  onChange={(e) => setNewStaff({ ...newStaff, mobile_number: e.target.value })}
-                  maxLength={11}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter mobile number"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Staff Code</label>
-                <div className="flex space-x-2">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Mobile Number *</label>
                   <input
-                    type="text"
-                    value={newStaff.staff_code}
-                    onChange={(e) => setNewStaff({ ...newStaff, staff_code: e.target.value })}
-                    maxLength={8}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="Leave empty to auto-generate"
+                    type="tel"
+                    value={newStaff.mobile_number}
+                    onChange={(e) => setNewStaff({ ...newStaff, mobile_number: e.target.value })}
+                    maxLength={11}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="Enter mobile number"
                   />
-                  <button
-                    onClick={() => setNewStaff({ ...newStaff, staff_code: generateStaffCode() })}
-                    className="px-3 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
-                  >
-                    Generate
-                  </button>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Employment Date</label>
+                  <input
+                    type="date"
+                    value={newStaff.employment_date}
+                    onChange={(e) => setNewStaff({ ...newStaff, employment_date: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
                 </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Hourly Rate (₱)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={newStaff.hourly_rate}
-                  onChange={(e) => setNewStaff({ ...newStaff, hourly_rate: parseFloat(e.target.value) || 0 })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter hourly rate"
-                />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Staff Code</label>
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={newStaff.staff_code}
+                      onChange={(e) => setNewStaff({ ...newStaff, staff_code: e.target.value })}
+                      maxLength={8}
+                      className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    <button
+                      onClick={() => setNewStaff({ ...newStaff, staff_code: generateStaffCode() })}
+                      className="px-2 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                      title="Generate staff code"
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">Hourly Rate (₱)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newStaff.hourly_rate}
+                    onChange={(e) => setNewStaff({ ...newStaff, hourly_rate: parseFloat(e.target.value) || 0 })}
+                    className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="0.00"
+                  />
+                </div>
               </div>
             </div>
             <div className="flex justify-end space-x-3 p-6 border-t border-gray-200">
@@ -1458,39 +1477,51 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       placeholder="Enter full name"
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Mobile Number *</label>
-                    <input
-                      type="tel"
-                      value={editForm.mobile_number}
-                      onChange={(e) => setEditForm({ ...editForm, mobile_number: e.target.value })}
-                      maxLength={11}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="Enter mobile number"
-                    />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-gray-700">Mobile Number *</label>
+                      <input
+                        type="tel"
+                        value={editForm.mobile_number}
+                        onChange={(e) => setEditForm({ ...editForm, mobile_number: e.target.value })}
+                        maxLength={11}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="Enter mobile number"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-gray-700">Employment Date</label>
+                      <input
+                        type="date"
+                        value={editForm.employment_date}
+                        onChange={(e) => setEditForm({ ...editForm, employment_date: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Staff Code *</label>
-                    <input
-                      type="text"
-                      value={editForm.staff_code}
-                      onChange={(e) => setEditForm({ ...editForm, staff_code: e.target.value })}
-                      maxLength={8}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="Enter staff code"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Hourly Rate (₱)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={editForm.hourly_rate}
-                      onChange={(e) => setEditForm({ ...editForm, hourly_rate: parseFloat(e.target.value) || 0 })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="Enter hourly rate"
-                    />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-gray-700">Staff Code *</label>
+                      <input
+                        type="text"
+                        value={editForm.staff_code}
+                        onChange={(e) => setEditForm({ ...editForm, staff_code: e.target.value })}
+                        maxLength={8}
+                        className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-gray-700">Hourly Rate (₱)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={editForm.hourly_rate}
+                        onChange={(e) => setEditForm({ ...editForm, hourly_rate: parseFloat(e.target.value) || 0 })}
+                        className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="0.00"
+                      />
+                    </div>
                   </div>
                 </div>
 

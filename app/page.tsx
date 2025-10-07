@@ -19,7 +19,7 @@ export default function HomePage() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="max-w-4xl mx-auto px-4 py-8 text-center">
         {/* Header */}
-        <div className="mb-12">
+        <div className="mb-12 relative">
           <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-blue-100 mb-6">
             <Package className="h-8 w-8 text-blue-600" />
           </div>
@@ -29,28 +29,18 @@ export default function HomePage() {
           <p className="text-xl text-gray-600 mb-8">
             GFC inventory and order management system
           </p>
+          
+          {/* Admin Login Button - Top Right */}
+          <button
+            onClick={() => router.push('/dashboard')}
+            className="absolute top-0 right-0 text-sm text-gray-600 hover:text-gray-900 transition-colors"
+          >
+            Admin Login
+          </button>
         </div>
 
         {/* Navigation Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-12">
-          {/* Admin Dashboard */}
-          <div className="bg-white rounded-lg shadow-md border p-8 hover:shadow-lg transition-shadow">
-            <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-blue-100 mb-4">
-              <Package className="h-6 w-6 text-blue-600" />
-            </div>
-            <h2 className="text-xl font-semibold text-gray-900 mb-2">Admin Dashboard</h2>
-            <p className="text-gray-600 mb-6">
-              Manage inventory, products, and customer orders
-            </p>
-            <button
-              onClick={() => router.push('/dashboard')}
-              className="w-full flex items-center justify-center space-x-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              <span>Access Dashboard</span>
-              <ArrowRight className="h-4 w-4" />
-            </button>
-          </div>
-
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
           {/* Customer Orders */}
           <div className="bg-white rounded-lg shadow-md border p-8 hover:shadow-lg transition-shadow">
             <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 mb-4">

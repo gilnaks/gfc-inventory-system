@@ -14,6 +14,7 @@ interface Location {
   passkey: string
   brand_id: string
   company_owned?: boolean
+  can_access_order_features?: boolean
   brand?: Brand
 }
 
@@ -61,15 +62,22 @@ export default function OrderPage() {
   const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
   const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<any>(null)
 
-  // Redirect to home if on restricted view for company-owned location or redirected from DSIR
+  // Redirect to home if redirected from DSIR or if location doesn't have feature access
   useEffect(() => {
-    if (location?.company_owned && (currentView === 'staff-assignments' || currentView === 'dsir-reports')) {
-      setCurrentView('home')
-    }
     if (redirectedFromDSIR && (currentView === 'staff-assignments' || currentView === 'dsir-reports')) {
       setCurrentView('home')
     }
-  }, [location?.company_owned, redirectedFromDSIR, currentView])
+    if (location && !location.can_access_order_features && (currentView === 'staff-assignments' || currentView === 'dsir-reports')) {
+      setCurrentView('home')
+    }
+  }, [redirectedFromDSIR, location, currentView])
+
+  // Refresh location data on mount to ensure we have the latest data
+  useEffect(() => {
+    if (location && isAuthenticated) {
+      refreshLocationData()
+    }
+  }, [isAuthenticated])
 
   // Initialize on mount
   useEffect(() => {
@@ -245,6 +253,25 @@ export default function OrderPage() {
     localStorage.removeItem('order_authenticated')
     localStorage.removeItem('order_location')
     localStorage.removeItem('order_cart_draft')
+  }
+
+  const refreshLocationData = async () => {
+    if (!location) return
+    
+    try {
+      const { data, error } = await supabase
+        .from('locations')
+        .select('*, brand:brands(*)')
+        .eq('id', location.id)
+        .single()
+      
+      if (error) throw error
+      
+      setLocation(data)
+      localStorage.setItem('order_location', JSON.stringify(data))
+    } catch (error) {
+      console.error('Error refreshing location data:', error)
+    }
   }
 
   const handleBranchSwitch = async (passcode: string) => {
@@ -1581,14 +1608,13 @@ export default function OrderPage() {
                       <MapPin className="h-3 w-3 sm:h-4 sm:w-4 mr-1 flex-shrink-0" />
                       <span className="truncate">{location?.name}</span>
                     </p>
-                    {!location?.company_owned && (
-                      <button
-                        onClick={() => setShowBranchSwitcherModal(true)}
-                        className="text-blue-600 hover:text-blue-800 p-1"
-                      >
-                        <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4" />
-                      </button>
-                    )}
+                    <button
+                      onClick={() => setShowBranchSwitcherModal(true)}
+                      className="text-blue-600 hover:text-blue-800 p-1"
+                      title="Switch branch"
+                    >
+                      <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1612,7 +1638,7 @@ export default function OrderPage() {
                 <Home className="h-4 w-4 sm:h-5 sm:w-5" />
                 <span className="hidden sm:inline">Home</span>
               </button>
-              {!location?.company_owned && !redirectedFromDSIR && (
+              {!redirectedFromDSIR && location?.can_access_order_features && (
                 <button
                   onClick={() => setCurrentView('staff-assignments')}
                   className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
@@ -1631,7 +1657,7 @@ export default function OrderPage() {
                   <span className="hidden sm:inline">Staff</span>
                 </button>
               )}
-              {!location?.company_owned && !redirectedFromDSIR && (
+              {!redirectedFromDSIR && location?.can_access_order_features && (
                 <button
                   onClick={() => setCurrentView('dsir-reports')}
                   className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
@@ -1650,7 +1676,7 @@ export default function OrderPage() {
                   <span className="hidden sm:inline">DSIR Reports</span>
                 </button>
               )}
-              {!location?.company_owned && !redirectedFromDSIR && (
+              {!redirectedFromDSIR && location?.can_access_order_features && (
                 <button
                   onClick={() => setShowSettingsModal(true)}
                   className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${

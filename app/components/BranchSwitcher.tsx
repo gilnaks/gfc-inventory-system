@@ -103,17 +103,7 @@ export function BranchSwitcher({ currentLocation, onBranchSwitch, onClose, onOpe
             <div className="text-center py-8">
               <Building2 className="h-12 w-12 text-gray-400 mx-auto mb-4" />
               <p className="text-gray-500 mb-2">No saved branches</p>
-              <p className="text-sm text-gray-400 mb-4">Add branches in settings to switch between them quickly</p>
-              <button
-                onClick={() => {
-                  onOpenSettings()
-                  onClose()
-                }}
-                className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors mx-auto"
-              >
-                <Settings className="h-4 w-4" />
-                <span>Open Settings</span>
-              </button>
+              <p className="text-sm text-gray-400">Add branches in settings to switch between them quickly</p>
             </div>
           ) : (
             <div className="space-y-3">

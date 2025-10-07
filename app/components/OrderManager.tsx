@@ -2425,7 +2425,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {selectedOrder.order_details.map((detail) => (
+                        {selectedOrder.order_details
+                          .sort((a, b) => {
+                            // First sort by category, then by product name within category
+                            const categoryCompare = (a.products.category || '').localeCompare(b.products.category || '')
+                            if (categoryCompare !== 0) return categoryCompare
+                            return a.products.name.localeCompare(b.products.name)
+                          })
+                          .map((detail) => (
                           <tr key={detail.id} className="hover:bg-gray-50">
                             <td className="px-4 py-3 whitespace-nowrap">
                               <div>
