@@ -40,6 +40,7 @@ interface OrderDetail {
     id: string
     name: string
     sku: string
+    category?: string
   }
 }
 

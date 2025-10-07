@@ -10,7 +10,7 @@ import { DSIRReportsViewer } from '../components/DSIRReportsViewer'
 import { StaffManager } from '../components/StaffManager'
 import { PayrollManager } from '../components/PayrollManager'
 import { BrandsProvider } from '../contexts/BrandsContext'
-import { Brand } from '../../lib/supabase'
+import { Brand, supabase } from '../../lib/supabase'
 import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck, FileText, Users, Calculator } from 'lucide-react'
 
 export default function DashboardPage() {
@@ -21,8 +21,6 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [initialLoading, setInitialLoading] = useState(true)
-
-  const ADMIN_PASSCODE = 'john101797'
 
   // Check for existing session on component mount
   useEffect(() => {
@@ -58,15 +56,31 @@ export default function DashboardPage() {
     initializeDashboard()
   }, [])
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (passcode === ADMIN_PASSCODE) {
-      setIsAuthenticated(true)
-      localStorage.setItem('dashboard_authenticated', 'true')
-      setError('')
-    } else {
-      setError('Invalid passcode. Please try again.')
-      setPasscode('')
+    setError('')
+    
+    try {
+      const { data, error } = await supabase
+        .rpc('validate_admin_credentials', { input_passcode: passcode })
+      
+      if (error) {
+        console.error('Error validating credentials:', error)
+        setError('Authentication error. Please try again.')
+        return
+      }
+      
+      if (data) {
+        setIsAuthenticated(true)
+        localStorage.setItem('dashboard_authenticated', 'true')
+        setError('')
+      } else {
+        setError('Invalid passcode. Please try again.')
+        setPasscode('')
+      }
+    } catch (error) {
+      console.error('Login error:', error)
+      setError('Authentication error. Please try again.')
     }
   }
 
