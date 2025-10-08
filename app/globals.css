@@ -25,3 +25,142 @@ body {
     )
     rgb(var(--background-start-rgb));
 }
+
+/* Force light mode styles for all inputs, selects, and interactive elements */
+/* This ensures visibility in both light and dark mode browsers */
+/* Remove macOS/Safari 3D styling and enforce flat UI */
+input,
+textarea,
+select,
+option {
+  background-color: white !important;
+  color: black !important;
+  border: 1px solid rgb(209, 213, 219) !important; /* gray-300 */
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  appearance: none !important;
+  border-radius: 0.375rem !important; /* rounded-md */
+}
+
+/* Ensure input placeholders are visible */
+input::placeholder,
+textarea::placeholder {
+  color: rgb(156, 163, 175) !important; /* gray-400 */
+}
+
+/* Fix disabled inputs */
+input:disabled,
+textarea:disabled,
+select:disabled {
+  background-color: rgb(243, 244, 246) !important; /* gray-100 */
+  color: rgb(107, 114, 128) !important; /* gray-500 */
+  opacity: 1 !important;
+}
+
+/* Fix radio buttons and checkboxes - flat style */
+input[type="radio"],
+input[type="checkbox"] {
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  appearance: none !important;
+  background-color: white !important;
+  border: 2px solid rgb(209, 213, 219) !important;
+  width: 1rem !important;
+  height: 1rem !important;
+  display: inline-block !important;
+  position: relative !important;
+  vertical-align: middle !important;
+  cursor: pointer !important;
+}
+
+/* Radio button - circular */
+input[type="radio"] {
+  border-radius: 50% !important;
+}
+
+/* Checkbox - rounded square */
+input[type="checkbox"] {
+  border-radius: 0.25rem !important;
+}
+
+/* Radio button checked state */
+input[type="radio"]:checked {
+  border-color: rgb(59, 130, 246) !important; /* blue-500 */
+  background-color: white !important;
+}
+
+input[type="radio"]:checked::before {
+  content: '' !important;
+  display: block !important;
+  width: 0.5rem !important;
+  height: 0.5rem !important;
+  border-radius: 50% !important;
+  background-color: rgb(59, 130, 246) !important; /* blue-500 */
+  position: absolute !important;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+/* Checkbox checked state */
+input[type="checkbox"]:checked {
+  background-color: rgb(59, 130, 246) !important; /* blue-500 */
+  border-color: rgb(59, 130, 246) !important;
+}
+
+input[type="checkbox"]:checked::after {
+  content: '' !important;
+  display: block !important;
+  width: 0.25rem !important;
+  height: 0.5rem !important;
+  border: solid white !important;
+  border-width: 0 2px 2px 0 !important;
+  position: absolute !important;
+  top: 40% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) rotate(45deg) !important;
+}
+
+/* Fix labels to ensure they're visible */
+label {
+  color: rgb(55, 65, 81) !important; /* gray-700 */
+}
+
+/* Fix number input spinner buttons */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  opacity: 1 !important;
+}
+
+/* Custom dropdown arrow for select elements */
+select {
+  padding-right: 2rem !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E") !important;
+  background-position: right 0.5rem center !important;
+  background-repeat: no-repeat !important;
+  background-size: 1.5em 1.5em !important;
+}
+
+/* Ensure dropdowns have visible options */
+select option {
+  background-color: white !important;
+  color: black !important;
+}
+
+/* Fix focused inputs */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: 2px solid rgb(59, 130, 246) !important; /* blue-500 */
+  outline-offset: 2px !important;
+}
+
+/* Fix buttons to ensure visibility */
+button {
+  color-scheme: light !important;
+}
+
+/* Ensure form elements use light color scheme */
+form {
+  color-scheme: light !important;
+}

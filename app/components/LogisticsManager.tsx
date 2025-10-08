@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Calendar, Clock, Truck, Package, Plus, X, Edit, Trash2, ChevronLeft, ChevronRight, Sun, Moon } from 'lucide-react'
+import { Calendar, Clock, Truck, Package, Plus, X, Edit, Trash2, ChevronLeft, ChevronRight, Sun, Moon, ArrowUpDown, ArrowDown, ArrowUp } from 'lucide-react'
 import { formatPhilippinesDateTime, toPhilippinesDateString } from '../../lib/timezone'
 
 interface LogisticsAssignment {
@@ -43,6 +43,8 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
   const [selectedDate, setSelectedDate] = useState<string>('')
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<'morning' | 'afternoon'>('morning')
   const [loading, setLoading] = useState(false)
+  const [sortByDeliveryType, setSortByDeliveryType] = useState<'all' | 'delivery' | 'pickup'>('all')
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
 
   useEffect(() => {
     if (selectedBrand) {
@@ -188,9 +190,30 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
   }
 
   const getAssignmentsForDate = (date: string, timeSlot: 'morning' | 'afternoon') => {
-    return assignments.filter(
+    let filteredAssignments = assignments.filter(
       assignment => assignment.date === date && assignment.time_slot === timeSlot
     )
+
+    // Filter by delivery type
+    if (sortByDeliveryType !== 'all') {
+      filteredAssignments = filteredAssignments.filter(assignment => 
+        assignment.order?.delivery_type === sortByDeliveryType
+      )
+    }
+
+    // Sort by delivery type
+    filteredAssignments.sort((a, b) => {
+      const aType = a.order?.delivery_type || 'delivery'
+      const bType = b.order?.delivery_type || 'delivery'
+      
+      if (sortOrder === 'asc') {
+        return aType.localeCompare(bType)
+      } else {
+        return bType.localeCompare(aType)
+      }
+    })
+
+    return filteredAssignments
   }
 
   const getStatusColor = (status: string) => {
@@ -213,15 +236,15 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     // Custom brand color mapping - same base color for both time slots
     const brandColorMap: { [key: string]: { morning: string; afternoon: string } } = {
       'mychoice': {
-        morning: 'bg-green-100 border-green-400',
+        morning: 'bg-green-100 border-green-400 border-l-4',
         afternoon: 'bg-green-100 border-green-400 border-l-4'
       },
       'mang sorbetes': {
-        morning: 'bg-yellow-100 border-yellow-400',
+        morning: 'bg-yellow-100 border-yellow-400 border-l-4',
         afternoon: 'bg-yellow-100 border-yellow-400 border-l-4'
       },
       'gelatofilipino': {
-        morning: 'bg-red-100 border-red-400',
+        morning: 'bg-red-100 border-red-400 border-l-4',
         afternoon: 'bg-red-100 border-red-400 border-l-4'
       }
     }
@@ -246,19 +269,19 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     
     switch (colorIndex) {
       case 0: return {
-        morning: 'bg-blue-100 border-blue-400',
+        morning: 'bg-blue-100 border-blue-400 border-l-4',
         afternoon: 'bg-blue-100 border-blue-400 border-l-4'
       }
       case 1: return {
-        morning: 'bg-purple-100 border-purple-400',
+        morning: 'bg-purple-100 border-purple-400 border-l-4',
         afternoon: 'bg-purple-100 border-purple-400 border-l-4'
       }
       case 2: return {
-        morning: 'bg-gray-100 border-gray-400',
+        morning: 'bg-gray-100 border-gray-400 border-l-4',
         afternoon: 'bg-gray-100 border-gray-400 border-l-4'
       }
       default: return {
-        morning: 'bg-gray-100 border-gray-400',
+        morning: 'bg-gray-100 border-gray-400 border-l-4',
         afternoon: 'bg-gray-100 border-gray-400 border-l-4'
       }
     }
@@ -375,6 +398,24 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
           <h1 className="text-xl font-semibold text-gray-900">Logistics</h1>
           <p className="text-sm text-gray-600">Schedule and manage order deliveries</p>
         </div>
+        
+        {/* Delivery Type Indicator and Sorting */}
+        <div className="flex items-center space-x-4">
+          {/* Delivery Type Filter */}
+          <div className="flex items-center space-x-2">
+            <label className="text-sm font-medium text-gray-700">Filter:</label>
+            <select
+              value={sortByDeliveryType}
+              onChange={(e) => setSortByDeliveryType(e.target.value as 'all' | 'delivery' | 'pickup')}
+              className="px-3 py-1 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            >
+              <option value="all">All</option>
+              <option value="delivery">Delivery</option>
+              <option value="pickup">Pickup</option>
+            </select>
+          </div>
+          
+        </div>
       </div>
 
       {/* Calendar Navigation */}
@@ -459,19 +500,24 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                        return (
                          <div
                            key={assignment.id}
-                           className={`text-xs p-1 ${brandColors.morning} rounded border-l-2 flex items-center justify-between group`}
+                           className={`text-xs p-1 ${brandColors.morning} rounded border-l-2 flex flex-col group relative`}
                          >
-                         <div className="flex-1 min-w-0">
-                           <div className="font-medium truncate">{assignment.order?.location?.name}</div>
-                           <div className="text-gray-600">{assignment.order?.created_at ? new Date(assignment.order.created_at).toLocaleDateString() : 'No Date'}</div>
+                         <div className="font-medium text-gray-900 truncate">{assignment.order?.location?.name}</div>
+                         <div className="flex items-center justify-between mt-1">
+                           <div className="text-gray-600 text-xs">{assignment.order?.created_at ? new Date(assignment.order.created_at).toLocaleDateString() : 'No Date'}</div>
+                           <div className="flex items-center gap-0.5">
+                             {assignment.order?.delivery_type === 'pickup' && (
+                               <Package className="h-3 w-3 text-orange-600" />
+                             )}
+                             <button
+                               onClick={() => handleDeleteAssignment(assignment.id)}
+                               className="p-0.5 text-red-600 hover:text-red-800 hover:bg-red-200 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                               title="Remove assignment"
+                             >
+                               <X className="h-3 w-3" />
+                             </button>
+                           </div>
                          </div>
-                         <button
-                           onClick={() => handleDeleteAssignment(assignment.id)}
-                           className="ml-1 p-0.5 text-red-600 hover:text-red-800 hover:bg-red-200 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                           title="Remove assignment"
-                         >
-                           <X className="h-3 w-3" />
-                         </button>
                        </div>
                        )
                      })}
@@ -503,19 +549,24 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                        return (
                          <div
                            key={assignment.id}
-                           className={`text-xs p-1 ${brandColors.afternoon} rounded border-l-2 flex items-center justify-between group`}
+                           className={`text-xs p-1 ${brandColors.afternoon} rounded border-l-2 flex flex-col group relative`}
                          >
-                           <div className="flex-1 min-w-0">
-                             <div className="font-medium truncate">{assignment.order?.location?.name}</div>
-                             <div className="text-gray-600">{assignment.order?.created_at ? new Date(assignment.order.created_at).toLocaleDateString() : 'No Date'}</div>
+                           <div className="font-medium text-gray-900 truncate">{assignment.order?.location?.name}</div>
+                           <div className="flex items-center justify-between mt-1">
+                             <div className="text-gray-600 text-xs">{assignment.order?.created_at ? new Date(assignment.order.created_at).toLocaleDateString() : 'No Date'}</div>
+                             <div className="flex items-center gap-0.5">
+                                {assignment.order?.delivery_type === 'pickup' && (
+                                  <Package className="h-3 w-3 text-orange-600" />
+                                )}
+                               <button
+                                 onClick={() => handleDeleteAssignment(assignment.id)}
+                                 className="p-0.5 text-red-600 hover:text-red-800 hover:bg-red-200 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                                 title="Remove assignment"
+                               >
+                                 <X className="h-3 w-3" />
+                               </button>
+                             </div>
                            </div>
-                           <button
-                             onClick={() => handleDeleteAssignment(assignment.id)}
-                             className="ml-1 p-0.5 text-red-600 hover:text-red-800 hover:bg-red-200 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                             title="Remove assignment"
-                           >
-                             <X className="h-3 w-3" />
-                           </button>
                          </div>
                        )
                      })}
@@ -576,8 +627,13 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                       className="w-full text-left p-2 hover:bg-gray-100 rounded border border-gray-200"
                     >
                       <div className="flex items-center justify-between mb-1">
-                        <div className="text-sm font-medium text-gray-900">
-                          {order.location?.name}
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-gray-900">
+                            {order.location?.name}
+                          </span>
+                          {order.delivery_type === 'pickup' && (
+                            <Package className="h-4 w-4 text-orange-600" />
+                          )}
                         </div>
                         <span className={`px-2 py-1 text-xs rounded-full ${
                           (() => {

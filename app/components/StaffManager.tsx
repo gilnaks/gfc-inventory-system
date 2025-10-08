@@ -1,7 +1,7 @@
 'use client'
 import React, { useState, useEffect, useRef } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react'
+import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw, CalendarX, MessageSquare, Megaphone, Mail } from 'lucide-react'
 
 
 interface StaffRegistration {
@@ -14,6 +14,8 @@ interface StaffRegistration {
   updated_at: string
   hourly_rate?: number
   employment_date?: string
+  leave_balance?: number
+  total_warnings?: number
 }
 
 interface Location {
@@ -40,6 +42,22 @@ interface StaffWithAssignments extends StaffRegistration {
   staff_assignments: StaffAssignment[]
 }
 
+interface LeaveRequest {
+  id: string
+  staff_registration_id: string
+  location_id: string
+  request_type: 'absence_sickness' | 'absence_family' | 'absence_authorized' | 'absence_personal' | 'absence_bereavement' | 'absence_vacation' | 'absence_admin'
+  start_date: string
+  end_date: string
+  reason: string
+  status: 'pending' | 'approved' | 'rejected'
+  admin_notes?: string
+  created_at: string
+  updated_at: string
+  staff_registrations: StaffRegistration
+  locations: Location
+}
+
 interface StaffManagerProps {
   theme?: string
 }
@@ -60,12 +78,35 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
   const [selectedStaff, setSelectedStaff] = useState<StaffWithAssignments | null>(null)
+  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([])
+  const [isLeaveRequestModalOpen, setIsLeaveRequestModalOpen] = useState(false)
+  const [selectedLeaveRequest, setSelectedLeaveRequest] = useState<LeaveRequest | null>(null)
+  const [adminNotes, setAdminNotes] = useState('')
+  const [showLeaveRequests, setShowLeaveRequests] = useState(false)
+  const [isLeaveHistoryModalOpen, setIsLeaveHistoryModalOpen] = useState(false)
+  const [staffLeaveHistory, setStaffLeaveHistory] = useState<LeaveRequest[]>([])
+  const [selectedStaffForHistory, setSelectedStaffForHistory] = useState<StaffWithAssignments | null>(null)
+  
+  // Announcement state
+  const [isAnnouncementModalOpen, setIsAnnouncementModalOpen] = useState(false)
+  const [isMessageModalOpen, setIsMessageModalOpen] = useState(false)
+  const [selectedStaffForMessage, setSelectedStaffForMessage] = useState<StaffWithAssignments | null>(null)
+  const [announcementForm, setAnnouncementForm] = useState({
+    title: '',
+    message: '',
+    type: 'general' as 'general' | 'notice' | 'warning'
+  })
+  const [announcementHistory, setAnnouncementHistory] = useState<any[]>([])
+  const [messageHistory, setMessageHistory] = useState<any[]>([])
+  
   const [editForm, setEditForm] = useState({
     full_name: '',
     mobile_number: '',
     staff_code: '',
     hourly_rate: 0,
-    employment_date: ''
+    employment_date: '',
+    leave_balance: 10,
+    total_warnings: 0
   })
   
   // Assignment management
@@ -88,6 +129,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [showOnlyTodayStaff, setShowOnlyTodayStaff] = useState(false)
   const [dayStatus, setDayStatus] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
   const [originalDayStatus, setOriginalDayStatus] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
+  const [absentStaff, setAbsentStaff] = useState<{[key: string]: {[key: string]: {[key: string]: boolean}}}>({}) // {locationId: {dayKey: {staffId: isAbsent}}}
   
   // New staff form
   const [newStaff, setNewStaff] = useState({
@@ -95,7 +137,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     mobile_number: '',
     staff_code: '',
     hourly_rate: 0,
-    employment_date: ''
+    employment_date: '',
+    leave_balance: 10
   })
 
   const getThemeColors = () => {
@@ -140,6 +183,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   useEffect(() => {
     loadData()
     loadTodaySchedules()
+    loadLeaveRequests()
   }, [])
 
   // Load schedule when week changes (like in StaffSchedule component)
@@ -244,6 +288,305 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     return result
   }
 
+  const loadLeaveRequests = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('leave_requests')
+        .select(`
+          *,
+          staff_registrations!staff_registration_id(*),
+          locations!location_id(*)
+        `)
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      setLeaveRequests(data || [])
+    } catch (error) {
+      console.error('Error loading leave requests:', error)
+    }
+  }
+
+  // Calculate number of days between two dates
+  const calculateDays = (startDate: string, endDate: string) => {
+    const start = new Date(startDate)
+    const end = new Date(endDate)
+    const diffTime = Math.abs(end.getTime() - start.getTime())
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1 // +1 to include both start and end dates
+    return diffDays
+  }
+
+  const openLeaveRequestModal = (request: LeaveRequest) => {
+    setSelectedLeaveRequest(request)
+    setAdminNotes(request.admin_notes || '')
+    setIsLeaveRequestModalOpen(true)
+  }
+
+  const handleLeaveRequestDecision = async (status: 'approved' | 'rejected') => {
+    if (!selectedLeaveRequest) return
+
+    setSaving(true)
+    try {
+      // Update leave request status
+      const { error } = await supabase
+        .from('leave_requests')
+        .update({
+          status,
+          admin_notes: adminNotes.trim() || null,
+          approved_at: new Date().toISOString()
+        })
+        .eq('id', selectedLeaveRequest.id)
+
+      if (error) throw error
+
+      // If approved, deduct days from staff leave balance (except for authorized absence)
+      if (status === 'approved' && selectedLeaveRequest.request_type !== 'absence_authorized') {
+        const daysRequested = calculateDays(selectedLeaveRequest.start_date, selectedLeaveRequest.end_date)
+        const currentBalance = selectedLeaveRequest.staff_registrations.leave_balance ?? 10
+        const newBalance = Math.max(0, currentBalance - daysRequested) // Ensure balance doesn't go below 0
+
+        const { error: balanceError } = await supabase
+          .from('staff_registrations')
+          .update({ leave_balance: newBalance })
+          .eq('id', selectedLeaveRequest.staff_registration_id)
+
+        if (balanceError) {
+          console.error('Error updating leave balance:', balanceError)
+          setError('Leave request approved but failed to update balance')
+          return
+        }
+
+        // Update local staff state to reflect new balance
+        setStaff(prevStaff => 
+          prevStaff.map(s => 
+            s.id === selectedLeaveRequest.staff_registration_id 
+              ? { ...s, leave_balance: newBalance }
+              : s
+          )
+        )
+      }
+
+      // Refresh leave requests
+      await loadLeaveRequests()
+      setIsLeaveRequestModalOpen(false)
+      setSelectedLeaveRequest(null)
+      setAdminNotes('')
+      setSuccess(`Leave request ${status} successfully!`)
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      console.error('Error updating leave request:', error)
+      setError('Failed to update leave request')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openLeaveHistoryModal = async (staff: StaffWithAssignments) => {
+    setSelectedStaffForHistory(staff)
+    setIsLeaveHistoryModalOpen(true)
+    
+    try {
+      const { data, error } = await supabase
+        .from('leave_requests')
+        .select(`
+          *,
+          locations!location_id(*)
+        `)
+        .eq('staff_registration_id', staff.id)
+        .order('created_at', { ascending: false })
+
+      if (error) throw error
+      setStaffLeaveHistory(data || [])
+    } catch (error) {
+      console.error('Error loading staff leave history:', error)
+      setError('Failed to load leave history')
+    }
+  }
+
+  const deleteLeaveRequest = async (requestId: string, staffId: string) => {
+    if (!confirm('Are you sure you want to delete this leave request? This action cannot be undone.')) return
+
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('leave_requests')
+        .delete()
+        .eq('id', requestId)
+
+      if (error) throw error
+
+      // Refresh the leave history for this staff member
+      setStaffLeaveHistory(prev => prev.filter(req => req.id !== requestId))
+      
+      setSuccess('Leave request deleted successfully!')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      console.error('Error deleting leave request:', error)
+      setError('Failed to delete leave request')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const loadAnnouncementHistory = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('announcements')
+        .select('*')
+        .is('staff_registration_id', null)
+        .eq('type', 'general')
+        .order('created_at', { ascending: false })
+        .limit(10)
+
+      if (error) throw error
+      setAnnouncementHistory(data || [])
+    } catch (error) {
+      console.error('Error loading announcement history:', error)
+    }
+  }
+
+  const loadMessageHistory = async (staffId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('announcements')
+        .select('*')
+        .eq('staff_registration_id', staffId)
+        .order('created_at', { ascending: false })
+        .limit(10)
+
+      if (error) throw error
+      setMessageHistory(data || [])
+    } catch (error) {
+      console.error('Error loading message history:', error)
+    }
+  }
+
+  const createAnnouncement = async () => {
+    if (!announcementForm.title.trim() || !announcementForm.message.trim()) {
+      setError('Please fill in all fields')
+      return
+    }
+
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .insert({
+          title: announcementForm.title.trim(),
+          message: announcementForm.message.trim(),
+          type: announcementForm.type,
+          staff_registration_id: null,
+          created_by: 'Admin',
+          is_active: true
+        })
+
+      if (error) throw error
+
+      setAnnouncementForm({ title: '', message: '', type: 'general' })
+      await loadAnnouncementHistory() // Reload history
+      setSuccess('General announcement created successfully!')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      console.error('Error creating announcement:', error)
+      setError('Failed to create announcement')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openAnnouncementModal = async () => {
+    setIsAnnouncementModalOpen(true)
+    await loadAnnouncementHistory()
+  }
+
+  const openMessageModal = async (staff: StaffWithAssignments) => {
+    setSelectedStaffForMessage(staff)
+    setAnnouncementForm({ title: '', message: '', type: 'notice' })
+    setIsMessageModalOpen(true)
+    await loadMessageHistory(staff.id)
+  }
+
+  const sendStaffMessage = async () => {
+    if (!announcementForm.title.trim() || !announcementForm.message.trim() || !selectedStaffForMessage) {
+      setError('Please fill in all fields')
+      return
+    }
+
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .insert({
+          title: announcementForm.title.trim(),
+          message: announcementForm.message.trim(),
+          type: announcementForm.type,
+          staff_registration_id: selectedStaffForMessage.id,
+          created_by: 'Admin',
+          is_active: true
+        })
+
+      if (error) throw error
+
+      setAnnouncementForm({ title: '', message: '', type: 'notice' })
+      await loadMessageHistory(selectedStaffForMessage.id) // Reload history
+      setSuccess(`${announcementForm.type === 'warning' ? 'Warning' : 'Notice'} sent to ${selectedStaffForMessage.full_name}!`)
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      console.error('Error sending message:', error)
+      setError('Failed to send message')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const deleteAnnouncement = async (announcementId: string) => {
+    if (!confirm('Are you sure you want to delete this announcement? This action cannot be undone.')) return
+
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .delete()
+        .eq('id', announcementId)
+
+      if (error) throw error
+
+      // Reload the appropriate history
+      await loadAnnouncementHistory()
+      setSuccess('Announcement deleted successfully!')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      console.error('Error deleting announcement:', error)
+      setError('Failed to delete announcement')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const deleteMessage = async (messageId: string, staffId: string) => {
+    if (!confirm('Are you sure you want to delete this message? This action cannot be undone.')) return
+
+    setSaving(true)
+    try {
+      const { error } = await supabase
+        .from('announcements')
+        .delete()
+        .eq('id', messageId)
+
+      if (error) throw error
+
+      // Reload the message history
+      await loadMessageHistory(staffId)
+      setSuccess('Message deleted successfully!')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error) {
+      console.error('Error deleting message:', error)
+      setError('Failed to delete message')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const addStaff = async () => {
     setSaving(true)
     try {
@@ -257,6 +600,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           staff_code: staffCode,
           hourly_rate: newStaff.hourly_rate,
           employment_date: newStaff.employment_date,
+          leave_balance: newStaff.leave_balance,
           is_active: true
         })
         .select()
@@ -268,7 +612,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const newStaffWithAssignments = { ...newStaffData, staff_assignments: [] }
       setStaff(prevStaff => [...prevStaff, newStaffWithAssignments])
       
-      setNewStaff({ full_name: '', mobile_number: '', staff_code: '', hourly_rate: 0, employment_date: '' })
+      setNewStaff({ full_name: '', mobile_number: '', staff_code: '', hourly_rate: 0, employment_date: '', leave_balance: 10 })
       setIsAddModalOpen(false)
       setSuccess('Staff member added successfully!')
       setTimeout(() => setSuccess(''), 3000)
@@ -393,7 +737,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       mobile_number: staff.mobile_number,
       staff_code: staff.staff_code,
       hourly_rate: staff.hourly_rate || 0,
-      employment_date: staff.employment_date || ''
+      employment_date: staff.employment_date || '',
+      leave_balance: staff.leave_balance || 10,
+      total_warnings: staff.total_warnings || 0
     })
     setIsEditModalOpen(true)
   }
@@ -410,7 +756,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           mobile_number: editForm.mobile_number.trim(),
           staff_code: editForm.staff_code.trim(),
           hourly_rate: editForm.hourly_rate,
-          employment_date: editForm.employment_date
+          employment_date: editForm.employment_date,
+          leave_balance: editForm.leave_balance,
+          total_warnings: editForm.total_warnings
         })
         .eq('id', selectedStaff.id)
 
@@ -637,10 +985,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       if (locationsResult.error) throw locationsResult.error
       if (staffResult.error) throw staffResult.error
 
+      console.log('🏢 Locations from DB:', locationsResult.data?.length || 0)
+      console.log('👥 Staff from DB:', staffResult.data?.length || 0)
+
       // Filter for company-owned locations only, excluding factory branches
       const companyLocs = locationsResult.data?.filter(loc => 
         !loc.name.toLowerCase().includes('factory')
       ) || []
+
+      console.log('🏪 Company-owned locations (no factory):', companyLocs.length, companyLocs.map(l => l.name))
 
       const companyLocationIds = new Set(companyLocs.map(loc => loc.id))
 
@@ -651,6 +1004,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           companyLocationIds.has(assignment.location_id)
         )
       ) || []
+
+      console.log('👔 Company staff (assigned to company locations):', companyStaffList.length, companyStaffList.map(s => s.full_name))
 
       setCompanyLocations(companyLocs)
       setCompanyStaff(companyStaffList)
@@ -729,6 +1084,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const startDate = weekDates[0].toISOString().split('T')[0]
       const endDate = weekDates[6].toISOString().split('T')[0]
       
+      console.log('🗓️ Loading schedule for week:', { startDate, endDate })
+      
       const { data, error } = await supabase
         .from('staff_schedules')
         .select(`
@@ -746,14 +1103,28 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         .lte('schedule_date', endDate)
         .order('schedule_date')
       
+      console.log('📊 Raw schedule data from Supabase:', data)
+      console.log('❌ Schedule query error:', error)
+      
       if (error) throw error
       
       // Convert database data to schedule format
       const newSchedule: {[key: string]: {[key: string]: string[]}} = {}
       const newStaffHours: {[key: string]: {[key: string]: {[key: string]: number}}} = {}
       const newDayStatus: {[key: string]: 'default' | 'regular-holiday' | 'special-holiday'} = {}
+      const newAbsentStaff: {[key: string]: {[key: string]: {[key: string]: boolean}}} = {}
       
-      data?.forEach(item => {
+      console.log('🔄 Processing', data?.length || 0, 'schedule records...')
+      
+      data?.forEach((item, index) => {
+        console.log(`📝 Processing record ${index + 1}:`, {
+          staff: item.staff?.full_name,
+          location: item.location?.name,
+          date: item.schedule_date,
+          hours: item.hours,
+          isAbsent: item.is_absent,
+          dayType: item.day_type
+        })
         const dayKey = getScheduleKey(new Date(item.schedule_date))
         
         if (item.location_id) {
@@ -776,6 +1147,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           }
           newStaffHours[item.location_id][dayKey][item.staff_registration_id] = item.hours || 11
           
+          // Load absence data
+          if (!newAbsentStaff[item.location_id]) {
+            newAbsentStaff[item.location_id] = {}
+          }
+          if (!newAbsentStaff[item.location_id][dayKey]) {
+            newAbsentStaff[item.location_id][dayKey] = {}
+          }
+          newAbsentStaff[item.location_id][dayKey][item.staff_registration_id] = item.is_absent || false
+          
           // Load day status (use the first occurrence for each day)
           if (!newDayStatus[dayKey] && item.day_type) {
             newDayStatus[dayKey] = item.day_type as 'default' | 'regular-holiday' | 'special-holiday'
@@ -783,29 +1163,41 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         }
       })
       
+      console.log('✅ Final processed data:')
+      console.log('  - Schedule:', newSchedule)
+      console.log('  - Staff Hours:', newStaffHours)
+      console.log('  - Day Status:', newDayStatus)
+      console.log('  - Absent Staff:', newAbsentStaff)
+      
       setSchedule(newSchedule)
       setOriginalSchedule(JSON.parse(JSON.stringify(newSchedule))) // Deep copy for comparison
       setStaffHours(newStaffHours)
       setOriginalStaffHours(JSON.parse(JSON.stringify(newStaffHours))) // Deep copy for comparison
       setDayStatus(newDayStatus)
       setOriginalDayStatus(JSON.parse(JSON.stringify(newDayStatus))) // Deep copy for comparison
+      setAbsentStaff(newAbsentStaff)
+      
+      console.log('💾 State updated successfully!')
     } catch (error) {
-      console.error('Error loading existing schedule:', error)
+      console.error('❌ Error loading existing schedule:', error)
       setError('Failed to load existing schedule')
     }
   }
 
   const openScheduleModal = async () => {
+    console.log('🚀 Opening schedule modal...')
     setSuccess('') // Clear any previous success message
     
     // Open modal immediately for better UX
     setIsScheduleModalOpen(true)
     
+    console.log('📥 Loading company data and existing schedule...')
     // Load data in parallel for faster loading
     await Promise.all([
       loadCompanyData(),
       loadExistingSchedule()
     ])
+    console.log('✅ Schedule modal data loaded!')
   }
 
   const hasScheduleChanges = () => {
@@ -868,6 +1260,19 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const currentStatus = dayStatus[dayKey] || 'default'
       const originalStatus = originalDayStatus[dayKey] || 'default'
       if (currentStatus !== originalStatus) return true
+    }
+    
+    // Check for absence changes
+    const currentAbsenceLocations = Object.keys(absentStaff)
+    for (const locationId of currentAbsenceLocations) {
+      const locationAbsences = absentStaff[locationId] || {}
+      for (const dayKey of Object.keys(locationAbsences)) {
+        const dayAbsences = locationAbsences[dayKey] || {}
+        for (const staffId of Object.keys(dayAbsences)) {
+          // If there's any absence marked, consider it a change
+          if (dayAbsences[staffId] === true) return true
+        }
+      }
     }
     
     return false
@@ -1016,6 +1421,203 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     }))
   }
 
+  const isStaffAbsent = (locationId: string, dayKey: string, staffId: string) => {
+    return absentStaff[locationId]?.[dayKey]?.[staffId] || false
+  }
+
+  const toggleStaffAbsence = async (locationId: string, dayKey: string, staffId: string) => {
+    const currentAbsentStatus = isStaffAbsent(locationId, dayKey, staffId)
+    
+    // Get the staff member details
+    const staffMember = companyStaff.find(s => s.id === staffId)
+    if (!staffMember) return
+    
+    // Convert dayKey to actual date
+    const dateMatch = dayKey.match(/(\d{4})-(\d{2})-(\d{2})/)
+    if (!dateMatch) return
+    const absenceDate = dayKey
+    const formattedDate = new Date(absenceDate).toLocaleDateString()
+    
+    // Confirmation for marking as absent
+    if (!currentAbsentStatus) {
+      const currentWarnings = staffMember.total_warnings ?? 0
+      const currentBalance = staffMember.leave_balance ?? 10
+      if (!confirm(`Mark ${staffMember.full_name} as absent on ${formattedDate}?\n\nThis will:\n• Set hours to 0\n• Create a warning (absence_admin)\n• Add 1 warning (${currentWarnings} → ${currentWarnings + 1})\n• Deduct 1 day from leave balance (${currentBalance} → ${currentBalance - 1} days)`)) {
+        return
+      }
+    } else {
+      // Confirmation for unmarking
+      const currentWarnings = staffMember.total_warnings ?? 0
+      const currentBalance = staffMember.leave_balance ?? 10
+      if (!confirm(`Remove absence for ${staffMember.full_name} on ${formattedDate}?\n\nThis will:\n• Restore hours to 11\n• Delete the warning\n• Remove 1 warning (${currentWarnings} → ${Math.max(0, currentWarnings - 1)})\n• Refund 1 day to leave balance (${currentBalance} → ${Math.min(10, currentBalance + 1)} days)`)) {
+        return
+      }
+    }
+    
+    setAbsentStaff(prev => ({
+      ...prev,
+      [locationId]: {
+        ...prev[locationId],
+        [dayKey]: {
+          ...prev[locationId]?.[dayKey],
+          [staffId]: !currentAbsentStatus
+        }
+      }
+    }))
+
+    // If marking as absent
+    if (!currentAbsentStatus) {
+      updateStaffHours(locationId, dayKey, staffId, 0)
+      
+      // Create leave request and deduct from balance
+      try {
+        // Create leave request
+        const { data: leaveData, error: leaveError } = await supabase
+          .from('leave_requests')
+          .insert({
+            staff_registration_id: staffId,
+            location_id: locationId,
+            request_type: 'absence_admin', // Admin-marked absence
+            start_date: absenceDate,
+            end_date: absenceDate,
+            reason: 'Marked absent by admin in schedule',
+            status: 'approved' // Auto-approved since admin marked it
+          })
+          .select()
+          .single()
+
+        if (leaveError) {
+          console.error('Error creating leave request:', leaveError)
+          setError('Failed to create leave request for absence')
+          return
+        }
+
+        // Increment total warnings AND deduct 1 day from leave balance
+        const currentWarnings = staffMember.total_warnings ?? 0
+        const newWarnings = currentWarnings + 1
+        const currentBalance = staffMember.leave_balance ?? 10
+        const newBalance = Math.max(0, currentBalance - 1)
+
+        const { error: updateError } = await supabase
+          .from('staff_registrations')
+          .update({ 
+            total_warnings: newWarnings,
+            leave_balance: newBalance
+          })
+          .eq('id', staffId)
+
+        if (updateError) {
+          console.error('Error updating warnings and balance:', updateError)
+          setError('Absence marked but failed to update warnings and leave balance')
+          return
+        }
+
+        // Update local staff state (both regular staff and company staff)
+        setStaff(prevStaff => 
+          prevStaff.map(s => 
+            s.id === staffId 
+              ? { ...s, total_warnings: newWarnings, leave_balance: newBalance }
+              : s
+          )
+        )
+        
+        setCompanyStaff(prevStaff => 
+          prevStaff.map(s => 
+            s.id === staffId 
+              ? { ...s, total_warnings: newWarnings, leave_balance: newBalance }
+              : s
+          )
+        )
+        
+        setSuccess(`Warning assigned to ${staffMember.full_name}. Warnings: ${currentWarnings} → ${newWarnings} | Leave: ${currentBalance} → ${newBalance} days`)
+        setTimeout(() => setSuccess(''), 3000)
+        
+        console.log('✅ Leave request created, warnings incremented, and balance deducted:', { staffId, date: absenceDate, newWarnings, newBalance })
+      } catch (error) {
+        console.error('Error handling absence:', error)
+      }
+    } else {
+      // If unmarking absence, restore to default 11 hours
+      updateStaffHours(locationId, dayKey, staffId, 11)
+      
+      // Delete the auto-created leave request and refund balance
+      try {
+        // Find and delete the leave request for this date
+        const { data: existingLeave, error: findError } = await supabase
+          .from('leave_requests')
+          .select('*')
+          .eq('staff_registration_id', staffId)
+          .eq('start_date', absenceDate)
+          .eq('end_date', absenceDate)
+          .eq('reason', 'Marked absent by admin in schedule')
+          .single()
+
+        if (findError && findError.code !== 'PGRST116') {
+          console.error('Error finding leave request:', findError)
+          return
+        }
+
+        if (existingLeave) {
+          // Delete the leave request
+          const { error: deleteError } = await supabase
+            .from('leave_requests')
+            .delete()
+            .eq('id', existingLeave.id)
+
+          if (deleteError) {
+            console.error('Error deleting leave request:', deleteError)
+            setError('Absence unmarked but failed to delete leave request')
+            return
+          }
+
+          // Decrement total warnings AND refund 1 day to leave balance
+          const currentWarnings = staffMember.total_warnings ?? 0
+          const newWarnings = Math.max(0, currentWarnings - 1) // Min 0 warnings
+          const currentBalance = staffMember.leave_balance ?? 10
+          const newBalance = Math.min(10, currentBalance + 1) // Max 10 days
+
+          const { error: updateError } = await supabase
+            .from('staff_registrations')
+            .update({ 
+              total_warnings: newWarnings,
+              leave_balance: newBalance
+            })
+            .eq('id', staffId)
+
+          if (updateError) {
+            console.error('Error updating warnings and balance:', updateError)
+            setError('Absence unmarked but failed to update warnings and leave balance')
+            return
+          }
+
+          // Update local staff state (both regular staff and company staff)
+          setStaff(prevStaff => 
+            prevStaff.map(s => 
+              s.id === staffId 
+                ? { ...s, total_warnings: newWarnings, leave_balance: newBalance }
+                : s
+            )
+          )
+          
+          setCompanyStaff(prevStaff => 
+            prevStaff.map(s => 
+              s.id === staffId 
+                ? { ...s, total_warnings: newWarnings, leave_balance: newBalance }
+                : s
+            )
+          )
+          
+          setSuccess(`Warning removed for ${staffMember.full_name}. Warnings: ${currentWarnings} → ${newWarnings} | Leave: ${currentBalance} → ${newBalance} days`)
+          setTimeout(() => setSuccess(''), 3000)
+          
+          console.log('✅ Leave request deleted, warnings decremented, and balance refunded:', { staffId, date: absenceDate, newWarnings, newBalance })
+        }
+      } catch (error) {
+        console.error('Error handling absence removal:', error)
+      }
+    }
+  }
+
   const getDayStatus = (dayKey: string) => {
     return dayStatus[dayKey] || 'default'
   }
@@ -1079,6 +1681,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     try {
       const weekDates = getWeekDates(currentWeek)
       
+      console.log('💾 Preparing to save schedule...')
+      
       // Prepare schedule data for database
       const scheduleData = []
       
@@ -1096,22 +1700,32 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               if (scheduleDate) {
                 const hours = getStaffHours(locationId, dayKey, staffId)
                 const dayStatus = getDayStatus(dayKey)
-                scheduleData.push({
+                const isAbsent = isStaffAbsent(locationId, dayKey, staffId)
+                
+                const recordToSave = {
                   location_id: locationId,
                   staff_registration_id: staffId,
                   schedule_date: scheduleDate.toISOString().split('T')[0],
-                  hours: hours,
-                  day_type: dayStatus
-                })
+                  hours: isAbsent ? 0 : hours, // Ensure hours is 0 if absent
+                  day_type: dayStatus,
+                  is_absent: isAbsent
+                }
+                
+                console.log('📝 Schedule record to save:', recordToSave)
+                scheduleData.push(recordToSave)
               }
             }
           })
         })
       })
       
+      console.log('📦 Total records to save:', scheduleData.length)
+      
       // Clear existing schedules for this week first
       const startDate = weekDates[0].toISOString().split('T')[0]
       const endDate = weekDates[6].toISOString().split('T')[0]
+      
+      console.log('🗑️ Deleting existing schedules for week:', { startDate, endDate })
       
       const { error: deleteError } = await supabase
         .from('staff_schedules')
@@ -1119,15 +1733,31 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         .gte('schedule_date', startDate)
         .lte('schedule_date', endDate)
       
-      if (deleteError) throw deleteError
+      if (deleteError) {
+        console.error('❌ Delete error:', deleteError)
+        throw deleteError
+      }
+      
+      console.log('✅ Old schedules deleted')
       
       // Insert new schedule data only if there's data to insert
       if (scheduleData.length > 0) {
-        const { error: insertError } = await supabase
+        console.log('💾 Inserting', scheduleData.length, 'new schedule records...')
+        
+        const { data: insertedData, error: insertError } = await supabase
           .from('staff_schedules')
           .insert(scheduleData)
+          .select()
         
-        if (insertError) throw insertError
+        if (insertError) {
+          console.error('❌ Insert error:', insertError)
+          throw insertError
+        }
+        
+        console.log('✅ Schedules saved successfully!')
+        console.log('📊 Saved records:', insertedData)
+      } else {
+        console.log('ℹ️ No schedule data to save')
       }
       
        // Update original schedule and hours to match current after successful save
@@ -1135,8 +1765,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
        setOriginalStaffHours(JSON.parse(JSON.stringify(staffHours)))
        setOriginalDayStatus(JSON.parse(JSON.stringify(dayStatus)))
        
+       console.log('🔄 Refreshing today\'s schedules...')
        // Refresh today's schedules
        loadTodaySchedules()
+       
+       console.log('✨ Save schedule complete!')
      } catch (error) {
       console.error('Error saving schedule:', error)
       setError('Failed to save schedule')
@@ -1182,6 +1815,13 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
            </div>
            <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-3">
              <button
+               onClick={openAnnouncementModal}
+               className={`flex items-center justify-center space-x-2 px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700`}
+             >
+               <Megaphone className="h-4 w-4" />
+               <span>Announcement</span>
+             </button>
+             <button
                onClick={openScheduleModal}
                className={`flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700`}
              >
@@ -1199,6 +1839,65 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
          </div>
       </div>
 
+      {/* Leave Request Notifications */}
+      {leaveRequests.length > 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Calendar className="h-5 w-5 text-yellow-600" />
+              <h3 className="text-sm font-medium text-yellow-800">
+                {leaveRequests.length} Pending Leave Request{leaveRequests.length > 1 ? 's' : ''}
+              </h3>
+            </div>
+            <button
+              onClick={() => setShowLeaveRequests(!showLeaveRequests)}
+              className="text-sm text-yellow-700 hover:text-yellow-900"
+            >
+              {showLeaveRequests ? 'Hide' : 'View'}
+            </button>
+          </div>
+          
+          {showLeaveRequests && (
+            <div className="mt-4 space-y-3">
+              {leaveRequests.map((request) => (
+                <div key={request.id} className="bg-white rounded-lg border border-yellow-200 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-sm font-medium text-gray-900">
+                          {request.staff_registrations.full_name}
+                        </span>
+                        <span className="px-2 py-1 text-xs rounded-full bg-orange-100 text-orange-800">
+                          {request.request_type === 'absence_sickness' ? 'Sickness' :
+                           request.request_type === 'absence_family' ? 'Family Emergency' :
+                           request.request_type === 'absence_authorized' ? 'Authorized Absence' :
+                           request.request_type === 'absence_personal' ? 'Personal Leave' :
+                           request.request_type === 'absence_bereavement' ? 'Bereavement Leave' :
+                           request.request_type === 'absence_vacation' ? 'Vacation Leave' :
+                           request.request_type === 'absence_admin' ? 'Absent' : 'Absence'}
+                        </span>
+                      </div>
+                      <div className="text-sm text-gray-600 mt-1">
+                        {request.locations.name} • {new Date(request.start_date).toLocaleDateString()} - {new Date(request.end_date).toLocaleDateString()}
+                      </div>
+                      <div className="text-sm text-gray-700 mt-1">
+                        {request.reason}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => openLeaveRequestModal(request)}
+                      className="ml-4 px-3 py-1 text-sm font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-md hover:bg-blue-100"
+                    >
+                      Review
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Staff List */}
       <div className="bg-white rounded-lg shadow overflow-hidden">
         <div className="overflow-x-auto">
@@ -1208,6 +1907,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Staff Member</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Contact</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assignments</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Leave Balance / Warnings</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
@@ -1231,7 +1931,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                  if (showOnlyTodayStaff && filteredStaff.length === 0) {
                    return (
                      <tr>
-                       <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
+                       <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
                          <div className="flex flex-col items-center space-y-2">
                            <MapPin className="h-8 w-8 text-gray-400" />
                            <p className="text-lg font-medium">No staff scheduled for today</p>
@@ -1247,7 +1947,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   <React.Fragment key={locationName}>
                     {/* Location Group Header */}
                     <tr className="bg-gray-100">
-                      <td colSpan={5} className="px-6 py-3">
+                      <td colSpan={6} className="px-6 py-3">
                         <div className="flex items-center space-x-2">
                           <MapPin className="h-4 w-4 text-gray-600" />
                           <span className="font-semibold text-gray-900">{locationName}</span>
@@ -1315,6 +2015,28 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                        )}
                      </div>
                    </td>
+                   <td className="px-6 py-4 whitespace-nowrap">
+                     <div className="flex flex-col space-y-1">
+                       <div className="flex items-center space-x-2">
+                         <span className="text-xs text-gray-500">Leave:</span>
+                         <div className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                           (staffMember.leave_balance ?? 10) > 5 
+                             ? 'bg-green-100 text-green-800' 
+                             : (staffMember.leave_balance ?? 10) > 2 
+                             ? 'bg-yellow-100 text-yellow-800' 
+                             : 'bg-red-100 text-red-800'
+                         }`}>
+                           {staffMember.leave_balance ?? 10} days
+                         </div>
+                       </div>
+                       <div className="flex items-center space-x-2">
+                         <span className="text-xs text-gray-500">Warnings:</span>
+                         <div className="px-2 py-1 text-xs font-semibold rounded-full bg-orange-100 text-orange-800">
+                           {staffMember.total_warnings ?? 0}
+                         </div>
+                       </div>
+                     </div>
+                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <button
                       onClick={() => toggleStaffStatus(staffMember.id, staffMember.is_active)}
@@ -1328,13 +2050,29 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                     </button>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                    <button
-                      onClick={() => openEditModal(staffMember)}
-                      className="text-blue-600 hover:text-blue-900 flex items-center space-x-1"
-                      title="Edit staff"
-                    >
-                      <Edit3 className="h-4 w-4" />
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        onClick={() => openEditModal(staffMember)}
+                        className="text-blue-600 hover:text-blue-900 flex items-center space-x-1"
+                        title="Edit staff"
+                      >
+                        <Edit3 className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => openLeaveHistoryModal(staffMember)}
+                        className="text-orange-600 hover:text-orange-900 flex items-center space-x-1"
+                        title="View leave history"
+                      >
+                        <CalendarX className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => openMessageModal(staffMember)}
+                        className="text-purple-600 hover:text-purple-900 flex items-center space-x-1"
+                        title="Send message"
+                      >
+                        <Mail className="h-4 w-4" />
+                      </button>
+                    </div>
                   </td>
                     </tr>
                     ))}
@@ -1496,7 +2234,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div className="space-y-2">
                       <label className="block text-sm font-medium text-gray-700">Staff Code *</label>
                       <input
@@ -1504,7 +2242,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         value={editForm.staff_code}
                         onChange={(e) => setEditForm({ ...editForm, staff_code: e.target.value })}
                         maxLength={8}
-                        className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       />
                     </div>
                     <div className="space-y-2">
@@ -1515,8 +2253,31 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         step="0.01"
                         value={editForm.hourly_rate}
                         onChange={(e) => setEditForm({ ...editForm, hourly_rate: parseFloat(e.target.value) || 0 })}
-                        className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                         placeholder="0.00"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-gray-700">Leave Balance</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="10"
+                        value={editForm.leave_balance}
+                        onChange={(e) => setEditForm({ ...editForm, leave_balance: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="10"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-gray-700">Total Warnings</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={editForm.total_warnings}
+                        onChange={(e) => setEditForm({ ...editForm, total_warnings: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="0"
                       />
                     </div>
                   </div>
@@ -1544,11 +2305,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                             <div className="flex-1">
                               <div className="flex items-center space-x-2 mb-2">
                                 <MapPin className="h-4 w-4 text-gray-400" />
-                                <span className="font-medium">{assignment.location.name}</span>
+                                <span className="font-medium text-gray-900">{assignment.location.name}</span>
                               </div>
                               <div className="flex items-center space-x-2 text-sm text-gray-600">
                                 <Building2 className="h-3 w-3" />
-                                <span>{assignment.location.brand?.name}</span>
+                                <span className="text-gray-900">{assignment.location.brand?.name}</span>
                               </div>
                               <div className="text-xs text-gray-500 mt-1">
                                 Assigned on {formatDate(assignment.created_at)}
@@ -1840,37 +2601,50 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                       if (!staff) return null
                                       
                                       const staffHours = getStaffHours(location.id, dayKey, staff.id)
+                                      const isAbsent = isStaffAbsent(location.id, dayKey, staff.id)
                                       const colorClasses = getStaffColorClasses(dayKey)
                                       
                                       return (
                                         <div 
                                           key={staff.id}
-                                          className={`group relative text-xs px-2 py-1 rounded-lg ${colorClasses.container} transition-all duration-200 max-w-full overflow-hidden`}
+                                          className={`group relative text-xs px-2 py-1 rounded-lg transition-all duration-200 max-w-full overflow-hidden ${
+                                            isAbsent 
+                                              ? 'bg-red-200 hover:bg-red-300 text-red-900 border border-red-300' 
+                                              : colorClasses.container
+                                          }`}
                                         >
                                           <div className="flex items-center justify-between mb-1">
                                             <span className="truncate font-medium text-xs max-w-[100px]">{staff.full_name}</span>
                                             <button
                                               onClick={() => removeStaffFromSchedule(staff.id, dayKey, location.id)}
                                               disabled={saving}
-                                              className={`opacity-0 group-hover:opacity-100 ${colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center text-xs font-bold transition-all duration-200 hover:scale-110`}
+                                              className={`opacity-0 group-hover:opacity-100 ${isAbsent ? 'text-red-700 hover:text-red-900 hover:bg-red-400' : colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center text-xs font-bold transition-all duration-200 hover:scale-110`}
                                               title="Remove from schedule"
                                             >
                                               ×
                                             </button>
                                           </div>
                                           <div className="flex items-center space-x-1">
-                                            <label className={`text-xs ${colorClasses.label} font-medium`}>Hours:</label>
+                                            <label className={`text-xs font-medium ${isAbsent ? 'text-red-800' : colorClasses.label}`}>Hours:</label>
                                             <input
                                               type="number"
                                               min="0"
                                               max="24"
                                               step="0.5"
-                                              value={staffHours}
+                                              value={isAbsent ? 0 : staffHours}
                                               onChange={(e) => updateStaffHours(location.id, dayKey, staff.id, parseFloat(e.target.value) || 0)}
-                                              className={`w-12 text-xs border-2 bg-white hover:bg-gray-50 focus:bg-white focus:ring-1 ${colorClasses.input} rounded px-1 py-0.5 text-center font-medium`}
+                                              className={`w-12 text-xs border-2 bg-white hover:bg-gray-50 focus:bg-white focus:ring-1 ${isAbsent ? 'border-red-300 focus:ring-red-500' : colorClasses.input} rounded px-1 py-0.5 text-center font-medium`}
                                               placeholder="11"
-                                              disabled={saving}
+                                              disabled={saving || isAbsent}
                                             />
+                                            <button
+                                              onClick={() => toggleStaffAbsence(location.id, dayKey, staff.id)}
+                                              disabled={saving}
+                                              className={`${isAbsent ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${isAbsent ? 'text-red-600 hover:text-red-900 hover:bg-red-400' : colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center transition-all duration-200 hover:scale-110`}
+                                              title={isAbsent ? 'Unmark absence (click to restore)' : 'Mark as absent (sets hours to 0)'}
+                                            >
+                                              <CalendarX className="h-3 w-3" />
+                                            </button>
                                           </div>
                                         </div>
                                       )
@@ -1941,6 +2715,576 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       {success && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-4">
           <p className="text-green-800">{success}</p>
+        </div>
+      )}
+
+      {/* Leave Request Approval Modal */}
+      {isLeaveRequestModalOpen && selectedLeaveRequest && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Review Leave Request</h3>
+              <button
+                onClick={() => setIsLeaveRequestModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              {/* Request Details */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="text-sm font-medium text-gray-900 mb-3">Request Details</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="font-medium text-gray-700">Staff Member:</span>
+                    <p className="text-gray-900">{selectedLeaveRequest.staff_registrations.full_name}</p>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">Staff Code:</span>
+                    <p className="text-gray-900">{selectedLeaveRequest.staff_registrations.staff_code}</p>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">Branch:</span>
+                    <p className="text-gray-900">{selectedLeaveRequest.locations.name}</p>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">Request Type:</span>
+                    <span className="ml-2 px-2 py-1 text-xs rounded-full bg-orange-100 text-orange-800">
+                      {selectedLeaveRequest.request_type === 'absence_sickness' ? 'Sickness' :
+                       selectedLeaveRequest.request_type === 'absence_family' ? 'Family Emergency' :
+                       selectedLeaveRequest.request_type === 'absence_authorized' ? 'Authorized Absence' :
+                       selectedLeaveRequest.request_type === 'absence_personal' ? 'Personal Leave' :
+                       selectedLeaveRequest.request_type === 'absence_bereavement' ? 'Bereavement Leave' :
+                       selectedLeaveRequest.request_type === 'absence_vacation' ? 'Vacation Leave' :
+                       selectedLeaveRequest.request_type === 'absence_admin' ? 'Absent' : 'Absence'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">Start Date:</span>
+                    <p className="text-gray-900">{new Date(selectedLeaveRequest.start_date).toLocaleDateString()}</p>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">End Date:</span>
+                    <p className="text-gray-900">{new Date(selectedLeaveRequest.end_date).toLocaleDateString()}</p>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">Days Requested:</span>
+                    <p className="text-gray-900 font-semibold">
+                      {calculateDays(selectedLeaveRequest.start_date, selectedLeaveRequest.end_date)} day(s)
+                    </p>
+                  </div>
+                  <div>
+                    <span className="font-medium text-gray-700">Current Balance:</span>
+                    <div className={`inline-block px-2 py-1 rounded-lg font-semibold ${
+                      (selectedLeaveRequest.staff_registrations.leave_balance ?? 10) > 5 
+                        ? 'bg-green-100 text-green-800' 
+                        : (selectedLeaveRequest.staff_registrations.leave_balance ?? 10) > 2 
+                        ? 'bg-yellow-100 text-yellow-800' 
+                        : 'bg-red-100 text-red-800'
+                    }`}>
+                      {selectedLeaveRequest.staff_registrations.leave_balance ?? 10} day(s)
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <span className="font-medium text-gray-700">Reason:</span>
+                  <p className="text-gray-900 mt-1">{selectedLeaveRequest.reason}</p>
+                </div>
+                {/* Remaining Balance After Approval */}
+                {selectedLeaveRequest.status === 'pending' && (
+                  <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                    {selectedLeaveRequest.request_type === 'absence_authorized' ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-gray-700">Balance After Approval:</span>
+                        <div className="flex items-center space-x-2">
+                          <span className="px-3 py-1 rounded-lg font-semibold bg-blue-100 text-blue-800">
+                            {selectedLeaveRequest.staff_registrations.leave_balance ?? 10} day(s)
+                          </span>
+                          <span className="text-xs text-blue-600">(No deduction)</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium text-gray-700">Balance After Approval:</span>
+                          <span className={`px-3 py-1 rounded-lg font-semibold ${
+                            ((selectedLeaveRequest.staff_registrations.leave_balance ?? 10) - calculateDays(selectedLeaveRequest.start_date, selectedLeaveRequest.end_date)) > 5 
+                              ? 'bg-green-100 text-green-800' 
+                              : ((selectedLeaveRequest.staff_registrations.leave_balance ?? 10) - calculateDays(selectedLeaveRequest.start_date, selectedLeaveRequest.end_date)) >= 0 
+                              ? 'bg-yellow-100 text-yellow-800' 
+                              : 'bg-red-100 text-red-800'
+                          }`}>
+                            {(selectedLeaveRequest.staff_registrations.leave_balance ?? 10) - calculateDays(selectedLeaveRequest.start_date, selectedLeaveRequest.end_date)} day(s)
+                          </span>
+                        </div>
+                        {((selectedLeaveRequest.staff_registrations.leave_balance ?? 10) - calculateDays(selectedLeaveRequest.start_date, selectedLeaveRequest.end_date)) < 0 && (
+                          <p className="text-xs text-red-600 mt-2">⚠️ Warning: Request exceeds available balance</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Admin Notes */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Admin Notes (Optional)
+                </label>
+                <textarea
+                  value={adminNotes}
+                  onChange={(e) => setAdminNotes(e.target.value)}
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Add any notes about this decision..."
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex space-x-3 pt-4">
+                <button
+                  onClick={() => setIsLeaveRequestModalOpen(false)}
+                  className="flex-1 px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handleLeaveRequestDecision('rejected')}
+                  disabled={saving}
+                  className="flex-1 px-4 py-2 text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-50"
+                >
+                  {saving ? 'Processing...' : 'Reject'}
+                </button>
+                <button
+                  onClick={() => handleLeaveRequestDecision('approved')}
+                  disabled={saving}
+                  className="flex-1 px-4 py-2 text-white bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-50"
+                >
+                  {saving ? 'Processing...' : 'Approve'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Leave History Modal */}
+      {isLeaveHistoryModalOpen && selectedStaffForHistory && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Leave Request History</h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  {selectedStaffForHistory.full_name} • {selectedStaffForHistory.staff_code}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsLeaveHistoryModalOpen(false)
+                  setSelectedStaffForHistory(null)
+                  setStaffLeaveHistory([])
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              {staffLeaveHistory.length === 0 ? (
+                <div className="text-center py-12">
+                  <Calendar className="h-16 w-16 text-gray-300 mx-auto mb-4" />
+                  <p className="text-gray-600">No leave requests found for this staff member.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {staffLeaveHistory.map((request) => (
+                    <div key={request.id} className={`border rounded-lg p-4 hover:shadow-md transition-shadow ${
+                      request.status === 'approved' && request.request_type === 'absence_admin'
+                        ? 'border-orange-300'
+                        : 'border-gray-200'
+                    }`}>
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-2 mb-2">
+                            <h4 className="text-md font-semibold text-gray-900">
+                              {request.request_type === 'absence_sickness' ? 'Sickness' :
+                               request.request_type === 'absence_family' ? 'Family Emergency' :
+                               request.request_type === 'absence_authorized' ? 'Authorized Absence' :
+                               request.request_type === 'absence_personal' ? 'Personal Leave' :
+                               request.request_type === 'absence_bereavement' ? 'Bereavement Leave' :
+                               request.request_type === 'absence_vacation' ? 'Vacation Leave' :
+                               request.request_type === 'absence_admin' ? 'Absent' : 'Absence Report'}
+                            </h4>
+                            <span className={`px-3 py-1 text-xs font-medium rounded-full ${
+                              request.status === 'pending' 
+                                ? 'bg-yellow-100 text-yellow-800 border border-yellow-300' 
+                                : request.status === 'approved' && request.request_type === 'absence_admin'
+                                ? 'bg-orange-100 text-orange-800 border border-orange-300'
+                                : request.status === 'approved'
+                                ? 'bg-green-100 text-green-800 border border-green-300'
+                                : 'bg-red-100 text-red-800 border border-red-300'
+                            }`}>
+                              {request.status === 'approved' && request.request_type === 'absence_admin' ? 'Warning' : request.status.charAt(0).toUpperCase() + request.status.slice(1)}
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => deleteLeaveRequest(request.id, request.staff_registration_id)}
+                          disabled={saving}
+                          className="ml-4 p-2 text-red-600 hover:text-red-800 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+                          title="Delete leave request"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 text-sm text-gray-600">
+                        <div>
+                          <span className="font-medium">Branch:</span> {request.locations.name}
+                        </div>
+                        <div>
+                          <span className="font-medium">Submitted:</span> {new Date(request.created_at).toLocaleDateString()}
+                        </div>
+                        <div>
+                          <span className="font-medium">Start Date:</span> {new Date(request.start_date).toLocaleDateString()}
+                        </div>
+                        <div>
+                          <span className="font-medium">End Date:</span> {new Date(request.end_date).toLocaleDateString()}
+                        </div>
+                        <div>
+                          <span className="font-medium">Days Requested:</span> 
+                          <span className="ml-1 px-2 py-0.5 bg-blue-100 text-blue-800 rounded-full text-xs font-semibold">
+                            {calculateDays(request.start_date, request.end_date)} day(s)
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="border-t border-gray-100 pt-3 mt-3">
+                        <div className="mb-3">
+                          <p className="text-sm font-medium text-gray-700 mb-1">Reason:</p>
+                          <p className="text-sm text-gray-600 bg-gray-50 p-2 rounded">{request.reason}</p>
+                        </div>
+
+                        {request.admin_notes && (
+                          <div className={`p-3 rounded text-sm ${
+                            request.status === 'approved' 
+                              ? 'bg-green-50 border border-green-200' 
+                              : request.status === 'rejected'
+                              ? 'bg-red-50 border border-red-200'
+                              : 'bg-gray-50 border border-gray-200'
+                          }`}>
+                            <p className="font-medium text-gray-700 mb-1">Admin Notes:</p>
+                            <p className="text-gray-600">{request.admin_notes}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-gray-200 p-6 bg-gray-50 sticky bottom-0">
+              <button
+                onClick={() => {
+                  setIsLeaveHistoryModalOpen(false)
+                  setSelectedStaffForHistory(null)
+                  setStaffLeaveHistory([])
+                }}
+                className="w-full px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* General Announcement Modal */}
+      {isAnnouncementModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">General Announcements</h3>
+              <button
+                onClick={() => {
+                  setIsAnnouncementModalOpen(false)
+                  setAnnouncementForm({ title: '', message: '', type: 'general' })
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6">
+                {/* Create New Announcement */}
+                <div className="space-y-4">
+                  <h4 className="font-semibold text-gray-900">Create New Announcement</h4>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Title</label>
+                    <input
+                      type="text"
+                      value={announcementForm.title}
+                      onChange={(e) => setAnnouncementForm({ ...announcementForm, title: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      placeholder="Enter announcement title"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Message</label>
+                    <textarea
+                      value={announcementForm.message}
+                      onChange={(e) => setAnnouncementForm({ ...announcementForm, message: e.target.value })}
+                      rows={6}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      placeholder="Enter announcement message"
+                    />
+                  </div>
+
+                  {error && (
+                    <div className="text-red-600 text-sm">{error}</div>
+                  )}
+
+                  {success && (
+                    <div className="text-green-600 text-sm">{success}</div>
+                  )}
+
+                  <button
+                    onClick={createAnnouncement}
+                    disabled={saving}
+                    className="w-full px-4 py-2 text-white bg-purple-600 rounded-md hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    {saving ? 'Creating...' : 'Create Announcement'}
+                  </button>
+                </div>
+
+                {/* Announcement History */}
+                <div className="space-y-4">
+                  <h4 className="font-semibold text-gray-900">Recent Announcements</h4>
+                  <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                    {announcementHistory.length === 0 ? (
+                      <div className="text-center py-8 text-gray-500">
+                        <Megaphone className="h-12 w-12 text-gray-300 mx-auto mb-2" />
+                        <p className="text-sm">No announcements yet</p>
+                      </div>
+                    ) : (
+                      announcementHistory.map((announcement) => (
+                        <div key={announcement.id} className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                          <div className="flex items-start justify-between mb-2">
+                            <h5 className="font-semibold text-purple-900 text-sm">{announcement.title}</h5>
+                            <div className="flex items-center space-x-2">
+                              <span className="text-xs text-purple-600">
+                                {new Date(announcement.created_at).toLocaleDateString()}
+                              </span>
+                              <button
+                                onClick={() => deleteAnnouncement(announcement.id)}
+                                disabled={saving}
+                                className="text-red-600 hover:text-red-900 disabled:opacity-50"
+                                title="Delete announcement"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-sm text-purple-800 whitespace-pre-line">{announcement.message}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 p-6 border-t border-gray-200 bg-gray-50">
+              <button
+                onClick={() => {
+                  setIsAnnouncementModalOpen(false)
+                  setAnnouncementForm({ title: '', message: '', type: 'general' })
+                }}
+                className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Staff Message Modal */}
+      {isMessageModalOpen && selectedStaffForMessage && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Messages for {selectedStaffForMessage.full_name}</h3>
+                <p className="text-sm text-gray-600 mt-1">Staff Code: {selectedStaffForMessage.staff_code}</p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsMessageModalOpen(false)
+                  setSelectedStaffForMessage(null)
+                  setAnnouncementForm({ title: '', message: '', type: 'notice' })
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6">
+                {/* Send New Message */}
+                <div className="space-y-4">
+                  <h4 className="font-semibold text-gray-900">Send New Message</h4>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Message Type</label>
+                    <div className="flex space-x-4">
+                      <label className="flex items-center">
+                        <input
+                          type="radio"
+                          value="notice"
+                          checked={announcementForm.type === 'notice'}
+                          onChange={(e) => setAnnouncementForm({ ...announcementForm, type: e.target.value as 'notice' | 'warning' })}
+                          className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+                        />
+                        <span className="ml-2 text-sm text-gray-700">Notice</span>
+                      </label>
+                      <label className="flex items-center">
+                        <input
+                          type="radio"
+                          value="warning"
+                          checked={announcementForm.type === 'warning'}
+                          onChange={(e) => setAnnouncementForm({ ...announcementForm, type: e.target.value as 'notice' | 'warning' })}
+                          className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300"
+                        />
+                        <span className="ml-2 text-sm text-gray-700">Warning</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Title</label>
+                    <input
+                      type="text"
+                      value={announcementForm.title}
+                      onChange={(e) => setAnnouncementForm({ ...announcementForm, title: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      placeholder="Enter message title"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Message</label>
+                    <textarea
+                      value={announcementForm.message}
+                      onChange={(e) => setAnnouncementForm({ ...announcementForm, message: e.target.value })}
+                      rows={6}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      placeholder="Enter your message"
+                    />
+                  </div>
+
+                  {error && (
+                    <div className="text-red-600 text-sm">{error}</div>
+                  )}
+
+                  {success && (
+                    <div className="text-green-600 text-sm">{success}</div>
+                  )}
+
+                  <button
+                    onClick={sendStaffMessage}
+                    disabled={saving}
+                    className={`w-full px-4 py-2 text-white rounded-md disabled:opacity-50 ${
+                      announcementForm.type === 'warning' 
+                        ? 'bg-red-600 hover:bg-red-700' 
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    {saving ? 'Sending...' : `Send ${announcementForm.type === 'warning' ? 'Warning' : 'Notice'}`}
+                  </button>
+                </div>
+
+                {/* Message History */}
+                <div className="space-y-4">
+                  <h4 className="font-semibold text-gray-900">Message History</h4>
+                  <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                    {messageHistory.length === 0 ? (
+                      <div className="text-center py-8 text-gray-500">
+                        <Mail className="h-12 w-12 text-gray-300 mx-auto mb-2" />
+                        <p className="text-sm">No messages sent yet</p>
+                      </div>
+                    ) : (
+                      messageHistory.map((msg) => (
+                        <div key={msg.id} className={`border rounded-lg p-3 ${
+                          msg.type === 'warning' 
+                            ? 'bg-red-50 border-red-200' 
+                            : 'bg-blue-50 border-blue-200'
+                        }`}>
+                          <div className="flex items-start justify-between mb-2">
+                            <div className="flex items-center space-x-2 flex-1">
+                              <h5 className={`font-semibold text-sm ${
+                                msg.type === 'warning' ? 'text-red-900' : 'text-blue-900'
+                              }`}>
+                                {msg.title}
+                              </h5>
+                              <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                                msg.type === 'warning' 
+                                  ? 'bg-red-100 text-red-800' 
+                                  : 'bg-blue-100 text-blue-800'
+                              }`}>
+                                {msg.type === 'warning' ? 'Warning' : 'Notice'}
+                              </span>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                              <span className={`text-xs ${
+                                msg.type === 'warning' ? 'text-red-600' : 'text-blue-600'
+                              }`}>
+                                {new Date(msg.created_at).toLocaleDateString()}
+                              </span>
+                              <button
+                                onClick={() => deleteMessage(msg.id, selectedStaffForMessage.id)}
+                                disabled={saving}
+                                className="text-red-600 hover:text-red-900 disabled:opacity-50"
+                                title="Delete message"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </div>
+                          <p className={`text-sm whitespace-pre-line ${
+                            msg.type === 'warning' ? 'text-red-800' : 'text-blue-800'
+                          }`}>
+                            {msg.message}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-3 p-6 border-t border-gray-200 bg-gray-50">
+              <button
+                onClick={() => {
+                  setIsMessageModalOpen(false)
+                  setSelectedStaffForMessage(null)
+                  setAnnouncementForm({ title: '', message: '', type: 'notice' })
+                }}
+                className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

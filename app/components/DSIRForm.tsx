@@ -56,8 +56,8 @@ interface IceCreamInventoryItem {
   id?: string
   flavor: string
   beginning: number
-  production_500ml: number
-  additions: number
+  arrival: number
+  pull_out: number
   ending: number
 }
 
@@ -292,12 +292,226 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
     }
   }
 
+  const saveAllSectionData = async () => {
+    // Save sales inventory items
+    for (const item of salesInventory) {
+      if (item.item_name?.trim()) {
+        if (item.id) {
+          await supabase
+            .from('dsir_sales_inventory')
+            .update({
+              item_name: item.item_name,
+              beginning_inventory: item.beginning_inventory,
+              arrival: item.arrival,
+              pull_out: item.pull_out,
+              new_inventory: item.new_inventory,
+              ending_inventory: item.ending_inventory,
+              sold: item.sold,
+              price: item.price,
+              sales: item.sales
+            })
+            .eq('id', item.id)
+        } else {
+          const { data } = await supabase
+            .from('dsir_sales_inventory')
+            .insert({
+              dsir_report_id: report.id,
+              item_name: item.item_name,
+              beginning_inventory: item.beginning_inventory,
+              arrival: item.arrival,
+              pull_out: item.pull_out,
+              new_inventory: item.new_inventory,
+              ending_inventory: item.ending_inventory,
+              sold: item.sold,
+              price: item.price,
+              sales: item.sales
+            })
+            .select()
+            .single()
+          
+          if (data) {
+            item.id = data.id
+          }
+        }
+      }
+    }
+
+    // Save ice cream inventory items
+    for (const item of iceCreamInventory) {
+      if (item.flavor?.trim()) {
+        if (item.id) {
+          await supabase
+            .from('dsir_ice_cream_inventory')
+            .update({
+              flavor: item.flavor,
+              beginning: item.beginning,
+              arrival: item.arrival,
+              pull_out: item.pull_out,
+              ending: item.ending
+            })
+            .eq('id', item.id)
+        } else {
+          const { data } = await supabase
+            .from('dsir_ice_cream_inventory')
+            .insert({
+              dsir_report_id: report.id,
+              flavor: item.flavor,
+              beginning: item.beginning,
+              arrival: item.arrival,
+              pull_out: item.pull_out,
+              ending: item.ending
+            })
+            .select()
+            .single()
+          
+          if (data) {
+            item.id = data.id
+          }
+        }
+      }
+    }
+
+    // Save materials inventory items
+    for (const item of materialsInventory) {
+      if (item.item_name?.trim()) {
+        if (item.id) {
+          await supabase
+            .from('dsir_materials_inventory')
+            .update({
+              item_name: item.item_name,
+              beginning: item.beginning,
+              arrival: item.arrival,
+              ending: item.ending
+            })
+            .eq('id', item.id)
+        } else {
+          const { data } = await supabase
+            .from('dsir_materials_inventory')
+            .insert({
+              dsir_report_id: report.id,
+              item_name: item.item_name,
+              beginning: item.beginning,
+              arrival: item.arrival,
+              ending: item.ending
+            })
+            .select()
+            .single()
+          
+          if (data) {
+            item.id = data.id
+          }
+        }
+      }
+    }
+
+    // Save discount items
+    for (const item of discounts) {
+      if (item.name?.trim() && item.id_no?.trim() && item.order_type) {
+        if (item.id) {
+          await supabase
+            .from('dsir_discounts')
+            .update({
+              name: item.name,
+              id_type: item.id_type,
+              id_no: item.id_no,
+              order_type: item.order_type,
+              order_amount: item.order_amount,
+              discount_amount: item.discount_amount
+            })
+            .eq('id', item.id)
+        } else {
+          const { data } = await supabase
+            .from('dsir_discounts')
+            .insert({
+              dsir_report_id: report.id,
+              name: item.name,
+              id_type: item.id_type,
+              id_no: item.id_no,
+              order_type: item.order_type,
+              order_amount: item.order_amount,
+              discount_amount: item.discount_amount
+            })
+            .select()
+            .single()
+          
+          if (data) {
+            item.id = data.id
+          }
+        }
+      }
+    }
+
+    // Save expense items
+    for (const item of expenses) {
+      if (item.particulars?.trim()) {
+        if (item.id) {
+          await supabase
+            .from('dsir_expenses')
+            .update({
+              particulars: item.particulars,
+              amount: item.amount
+            })
+            .eq('id', item.id)
+        } else {
+          const { data } = await supabase
+            .from('dsir_expenses')
+            .insert({
+              dsir_report_id: report.id,
+              particulars: item.particulars,
+              amount: item.amount
+            })
+            .select()
+            .single()
+          
+          if (data) {
+            item.id = data.id
+          }
+        }
+      }
+    }
+
+    // Save sales recon items
+    for (const item of salesRecon) {
+      if (item.denomination?.trim()) {
+        if (item.id) {
+          await supabase
+            .from('dsir_sales_recon')
+            .update({
+              denomination: item.denomination,
+              quantity: item.quantity,
+              amount: item.amount
+            })
+            .eq('id', item.id)
+        } else {
+          const { data } = await supabase
+            .from('dsir_sales_recon')
+            .insert({
+              dsir_report_id: report.id,
+              denomination: item.denomination,
+              quantity: item.quantity,
+              amount: item.amount
+            })
+            .select()
+            .single()
+          
+          if (data) {
+            item.id = data.id
+          }
+        }
+      }
+    }
+  }
+
   const saveReport = async () => {
     setSaving(true)
     setError('')
     setSuccess('')
 
     try {
+      console.log('🍦 Save Report - Ice Cream Inventory Data:', iceCreamInventory)
+      // Save all section data first
+      await saveAllSectionData()
+
       // Update main report
       const { error: reportError } = await supabase
         .from('dsir_reports')
@@ -337,6 +551,9 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
     setSuccess('')
 
     try {
+      // Save all section data first
+      await saveAllSectionData()
+
       const { error: reportError } = await supabase
         .from('dsir_reports')
         .update({

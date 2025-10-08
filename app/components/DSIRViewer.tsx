@@ -138,6 +138,32 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
   // Check if report is read-only (submitted or reviewed)
   const isReadOnly = report?.status === 'submitted' || report?.status === 'reviewed'
 
+  // Check if sales reconciliation has any values
+  const hasSalesReconData = () => {
+    // Check existing data from database
+    const hasExistingData = salesRecon.some(item => 
+      item.quantity && typeof item.quantity === 'number' && item.quantity > 0
+    )
+    
+    // Check form data for any sales recon entries with quantity > 0
+    const hasFormData = Object.keys(formData).some(key => {
+      if (!key.startsWith('salesrecon-') || !key.includes('-quantity')) {
+        return false
+      }
+      
+      const value = formData[key]
+      // Explicitly check if the value is a meaningful number > 0
+      if (!value || value === '' || value === '0') {
+        return false
+      }
+      
+      const numValue = parseInt(value)
+      return !isNaN(numValue) && numValue > 0
+    })
+    
+    return hasExistingData || hasFormData
+  }
+
   // Helper function to get cell styling based on read-only status
   const getCellClassName = () => {
     return `text-center min-h-[24px] flex items-center justify-center ${
@@ -595,8 +621,8 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
     const item = items.find(i => i.item_name === itemName || i.flavor === itemName || i.material_name === itemName)
     if (!item) return ''
     const value = item[field]
-    // Return empty string if value is 0, null, undefined, or empty
-    if (value === 0 || value === null || value === undefined || value === '') {
+    // Return empty string if value is null, undefined, or empty (but allow 0)
+    if (value === null || value === undefined || value === '') {
       return ''
     }
     return value
@@ -1477,15 +1503,32 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
     if (formData[fieldId] !== undefined) {
       return formData[fieldId]
     }
-    // Otherwise show the original value
-    return originalValue?.toString() || ''
+    // Otherwise show the original value (allow 0 to display)
+    if (originalValue === null || originalValue === undefined) {
+      return ''
+    }
+    return originalValue.toString()
   }
 
   const saveDraft = async (showSuccessMessage = true) => {
-    if (!report?.id) return
+    if (!report?.id) {
+      console.error('Cannot save: No report ID')
+      return
+    }
     
     setSaving(true)
     try {
+      // Verify the report exists before attempting to save
+      const { data: reportCheck, error: reportError } = await supabase
+        .from('dsir_reports')
+        .select('id')
+        .eq('id', report.id)
+        .single()
+      
+      if (reportError || !reportCheck) {
+        throw new Error('Report not found in database. Please refresh the page and try again.')
+      }
+      
       console.log('Saving draft with data:', formData)
       
       // Process all form data and save to database
@@ -1534,6 +1577,8 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
             // Debug logging
             console.log('Sales field parsing:', { fieldId, itemId, field, value, processedValue })
             
+            // Only add to updates if the value is meaningful (not 0, null, or undefined)
+            // We still include it for tracking but will validate later
             let item = salesUpdates.find(u => u.itemId === itemId)
             if (!item) {
               item = { itemId, updates: {} }
@@ -1547,11 +1592,6 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
           if (match) {
             const itemId = match[1] // "new-0" or full UUID
             const field = match[2]  // "beginning_inventory"
-            
-            // Skip ending field as it's calculated (beg + arrival - pull_out)
-            if (field === 'ending') {
-              return
-            }
             
             let item = iceCreamUpdates.find(u => u.itemId === itemId)
             if (!item) {
@@ -1643,88 +1683,341 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
       
       // Save sales inventory updates
       for (const item of salesUpdates) {
+        // For existing records (UUID itemIds), skip hasData validation
+        // Any update to an existing record is meaningful (including changing values to 0)
+        const isExistingRecord = !item.itemId.startsWith('new-')
+        
+        if (!isExistingRecord) {
+          // Only validate for new records
+          // Skip if all fields are empty, null, undefined, or 0
+          // EXCEPT: Allow rows where ending_inventory is explicitly 0 (everything sold)
+          const hasData = Object.entries(item.updates).some(([key, value]) => {
+            if (key === 'ending_inventory') {
+              // ending_inventory can be 0 - check if it's explicitly set
+              return value !== undefined && value !== null && value !== ''
+            }
+            return value !== undefined && 
+                   value !== null && 
+                   value !== '' && 
+                   typeof value === 'number' && 
+                   value > 0
+          })
+          
+          if (!hasData) {
+            console.log('Skipping sales item - no meaningful data (all zeros or empty):', item)
+            continue
+          }
+        }
+        
         console.log('Processing sales item:', item)
         if (item.itemId.startsWith('new-')) {
           // Insert new item - extract index from itemId (e.g., "new-0" -> 0)
           const itemIndex = parseInt(item.itemId.replace('new-', ''))
           const itemName = predefinedSalesItems[itemIndex]?.name
           
-          const insertData = {
-            dsir_report_id: report.id,
-            item_name: itemName,
-            ...item.updates
+          // Check if this item already exists for this report to prevent duplicates
+          const existingItem = salesInventory.find(i => i.item_name === itemName)
+          if (!existingItem) {
+            // Filter out zero and null values - only include fields with meaningful data
+            // EXCEPT ending_inventory which can be 0 (meaning everything was sold)
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (key === 'ending_inventory') {
+                // Always include ending_inventory even if it's 0
+                if (value !== undefined && value !== null && value !== '') {
+                  acc[key] = value
+                }
+              } else if (value !== undefined && value !== null && value !== '' && value !== 0) {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            const insertData = {
+              dsir_report_id: report.id,
+              item_name: itemName,
+              ...filteredUpdates
+            }
+            console.log('Inserting sales data:', insertData)
+            console.log('Ending inventory value being inserted:', insertData.ending_inventory, 'Type:', typeof insertData.ending_inventory)
+            console.log('All fields in insertData:', Object.keys(insertData))
+            const { error } = await supabase
+              .from('dsir_sales_inventory')
+              .insert(insertData)
+            if (error) throw error
+          } else {
+            // Update existing item instead of inserting duplicate
+            // For updates to existing records, allow all values including 0
+            // Only filter out undefined, null, and empty string
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (value !== undefined && value !== null && value !== '') {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            console.log('Updating sales item:', existingItem.id, 'with data:', filteredUpdates)
+            console.log('Ending inventory value being updated:', filteredUpdates.ending_inventory, 'Type:', typeof filteredUpdates.ending_inventory)
+            
+            // Only update if there's something to update
+            if (Object.keys(filteredUpdates).length > 0) {
+              const { error } = await supabase
+                .from('dsir_sales_inventory')
+                .update(filteredUpdates)
+                .eq('id', existingItem.id)
+              if (error) throw error
+            }
           }
-          console.log('Inserting sales data:', insertData)
-          console.log('Ending inventory value being inserted:', insertData.ending_inventory, 'Type:', typeof insertData.ending_inventory)
-          console.log('All fields in insertData:', Object.keys(insertData))
-          const { error } = await supabase
-            .from('dsir_sales_inventory')
-            .insert(insertData)
-          if (error) throw error
         } else {
           // Update existing item
-          console.log('Updating sales item:', item.itemId, 'with data:', item.updates)
-          console.log('Ending inventory value being updated:', item.updates.ending_inventory, 'Type:', typeof item.updates.ending_inventory)
-          const { error } = await supabase
-            .from('dsir_sales_inventory')
-            .update(item.updates)
-            .eq('id', item.itemId)
-          if (error) throw error
+          // For updates to existing records, allow all values including 0
+          // Only filter out undefined, null, and empty string
+          const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+            if (value !== undefined && value !== null && value !== '') {
+              acc[key] = value
+            }
+            return acc
+          }, {} as any)
+          
+          console.log('Updating sales item:', item.itemId, 'with data:', filteredUpdates)
+          console.log('Ending inventory value being updated:', filteredUpdates.ending_inventory, 'Type:', typeof filteredUpdates.ending_inventory)
+          
+          // Only update if there's something to update
+          if (Object.keys(filteredUpdates).length > 0) {
+            const { error } = await supabase
+              .from('dsir_sales_inventory')
+              .update(filteredUpdates)
+              .eq('id', item.itemId)
+            if (error) throw error
+          }
         }
       }
       
       // Save ice cream inventory updates
       for (const item of iceCreamUpdates) {
+        // For existing records (UUID itemIds), skip hasData validation
+        // Any update to an existing record is meaningful (including changing values to 0)
+        const isExistingRecord = !item.itemId.startsWith('new-')
+        
+        if (!isExistingRecord) {
+          // Only validate for new records
+          // Skip if all fields are empty, null, undefined, or 0
+          // EXCEPT: Allow rows where ending is explicitly 0 (all ice cream sold)
+          const hasData = Object.entries(item.updates).some(([key, value]) => {
+            if (key === 'ending') {
+              // ending can be 0 - check if it's explicitly set
+              return value !== undefined && value !== null && value !== ''
+            }
+            return value !== undefined && 
+                   value !== null && 
+                   value !== '' && 
+                   typeof value === 'number' && 
+                   value > 0
+          })
+          
+          if (!hasData) {
+            console.log('Skipping ice cream item - no meaningful data (all zeros or empty):', item)
+            continue
+          }
+        }
+        
+        // Always recalculate ending value when any of the components change
+        if (item.updates.beginning !== undefined || item.updates.arrival !== undefined || item.updates.pull_out !== undefined) {
+          // Get existing values from database or use updated values
+          const existingItem = iceCreamInventory.find(i => 
+            i.id === item.itemId || 
+            (item.itemId.startsWith('new-') && i.flavor === predefinedIceCreamFlavors[parseInt(item.itemId.replace('new-', ''))]?.name)
+          )
+          
+          const beginning = item.updates.beginning !== undefined ? item.updates.beginning : (existingItem?.beginning || 0)
+          const arrival = item.updates.arrival !== undefined ? item.updates.arrival : (existingItem?.arrival || 0)
+          const pullOut = item.updates.pull_out !== undefined ? item.updates.pull_out : (existingItem?.pull_out || 0)
+          
+          item.updates.ending = beginning + arrival - pullOut
+        }
+        
         if (item.itemId.startsWith('new-')) {
           // Insert new item - extract index from itemId (e.g., "new-0" -> 0)
           const itemIndex = parseInt(item.itemId.replace('new-', ''))
           const flavorName = predefinedIceCreamFlavors[itemIndex]?.name
           
-          const insertData = {
-            dsir_report_id: report.id,
-            flavor: flavorName,
-            ...item.updates
+          // Check if this flavor already exists for this report to prevent duplicates
+          const existingItem = iceCreamInventory.find(i => i.flavor === flavorName)
+          if (!existingItem) {
+            // Filter out zero and null values
+            // EXCEPT ending which can be 0 (meaning all ice cream was sold)
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (key === 'ending') {
+                // Always include ending even if it's 0
+                if (value !== undefined && value !== null && value !== '') {
+                  acc[key] = value
+                }
+              } else if (value !== undefined && value !== null && value !== '' && value !== 0) {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            const insertData = {
+              dsir_report_id: report.id,
+              flavor: flavorName,
+              ...filteredUpdates
+            }
+            const { error } = await supabase
+              .from('dsir_ice_cream_inventory')
+              .insert(insertData)
+            if (error) throw error
+          } else {
+            // Update existing item instead of inserting duplicate
+            // For updates to existing records, allow all values including 0
+            // Only filter out undefined, null, and empty string
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (value !== undefined && value !== null && value !== '') {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            if (Object.keys(filteredUpdates).length > 0) {
+              const { error } = await supabase
+                .from('dsir_ice_cream_inventory')
+                .update(filteredUpdates)
+                .eq('id', existingItem.id)
+              if (error) throw error
+            }
           }
-          const { error } = await supabase
-            .from('dsir_ice_cream_inventory')
-            .insert(insertData)
-          if (error) throw error
         } else {
-          const { error } = await supabase
-            .from('dsir_ice_cream_inventory')
-            .update(item.updates)
-            .eq('id', item.itemId)
-          if (error) throw error
+          // For updates to existing records, allow all values including 0
+          // Only filter out undefined, null, and empty string
+          const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+            if (value !== undefined && value !== null && value !== '') {
+              acc[key] = value
+            }
+            return acc
+          }, {} as any)
+          
+          if (Object.keys(filteredUpdates).length > 0) {
+            const { error } = await supabase
+              .from('dsir_ice_cream_inventory')
+              .update(filteredUpdates)
+              .eq('id', item.itemId)
+            if (error) throw error
+          }
         }
       }
       
       // Save materials inventory updates
       for (const item of materialsUpdates) {
+        // For existing records (UUID itemIds), skip hasData validation
+        // Any update to an existing record is meaningful (including changing values to 0)
+        const isExistingRecord = !item.itemId.startsWith('new-')
+        
+        if (!isExistingRecord) {
+          // Only validate for new records
+          // Skip if all fields are empty, null, undefined, or 0
+          // EXCEPT: Allow rows where ending is explicitly 0 (all materials used)
+          const hasData = Object.entries(item.updates).some(([key, value]) => {
+            if (key === 'ending') {
+              // ending can be 0 - check if it's explicitly set
+              return value !== undefined && value !== null && value !== ''
+            }
+            return value !== undefined && 
+                   value !== null && 
+                   value !== '' && 
+                   typeof value === 'number' && 
+                   value > 0
+          })
+          
+          if (!hasData) {
+            console.log('Skipping materials item - no meaningful data (all zeros or empty):', item)
+            continue
+          }
+        }
+        
         if (item.itemId.startsWith('new-')) {
           // Insert new item - extract index from itemId (e.g., "new-0" -> 0)
           const itemIndex = parseInt(item.itemId.replace('new-', ''))
           const materialName = predefinedMaterials[itemIndex]?.name
           
-          const insertData = {
-            dsir_report_id: report.id,
-            material_name: materialName,
-            ...item.updates
+          // Check if this material already exists for this report to prevent duplicates
+          const existingItem = materialsInventory.find(i => i.material_name === materialName)
+          if (!existingItem) {
+            // Filter out zero and null values
+            // EXCEPT ending which can be 0 (meaning all materials were used)
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (key === 'ending') {
+                // Always include ending even if it's 0
+                if (value !== undefined && value !== null && value !== '') {
+                  acc[key] = value
+                }
+              } else if (value !== undefined && value !== null && value !== '' && value !== 0) {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            const insertData = {
+              dsir_report_id: report.id,
+              material_name: materialName,
+              ...filteredUpdates
+            }
+            const { error } = await supabase
+              .from('dsir_materials_inventory')
+              .insert(insertData)
+            if (error) throw error
+          } else {
+            // Update existing item instead of inserting duplicate
+            // For updates to existing records, allow all values including 0
+            // Only filter out undefined, null, and empty string
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (value !== undefined && value !== null && value !== '') {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            if (Object.keys(filteredUpdates).length > 0) {
+              const { error } = await supabase
+                .from('dsir_materials_inventory')
+                .update(filteredUpdates)
+                .eq('id', existingItem.id)
+              if (error) throw error
+            }
           }
-          const { error } = await supabase
-            .from('dsir_materials_inventory')
-            .insert(insertData)
-          if (error) throw error
         } else {
-          const { error } = await supabase
-            .from('dsir_materials_inventory')
-            .update(item.updates)
-            .eq('id', item.itemId)
-          if (error) throw error
+          // For updates to existing records, allow all values including 0
+          // Only filter out undefined, null, and empty string
+          const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+            if (value !== undefined && value !== null && value !== '') {
+              acc[key] = value
+            }
+            return acc
+          }, {} as any)
+          
+          if (Object.keys(filteredUpdates).length > 0) {
+            const { error } = await supabase
+              .from('dsir_materials_inventory')
+              .update(filteredUpdates)
+              .eq('id', item.itemId)
+            if (error) throw error
+          }
         }
       }
       
       // Save discount updates
       for (const item of discountUpdates) {
+        // Skip if all fields are empty, null, undefined, or 0
+        // For discounts, check if there's any meaningful data (name, id_no, or order_amount > 0)
+        const hasData = (
+          (item.updates.name && item.updates.name.toString().trim() !== '') ||
+          (item.updates.id_no && item.updates.id_no.toString().trim() !== '') ||
+          (typeof item.updates.order_amount === 'number' && item.updates.order_amount > 0)
+        )
+        
+        if (!hasData) {
+          console.log('Skipping discount item - no meaningful data (all empty or zero):', item)
+          continue
+        }
+        
         if (item.itemId.startsWith('new-')) {
           const insertData = {
             dsir_report_id: report.id,
@@ -1760,6 +2053,18 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
       
       // Save expense updates
       for (const item of expenseUpdates) {
+        // Skip if all fields are empty, null, undefined, or 0
+        // For expenses, check if there's any meaningful data (expense_type or amount > 0)
+        const hasData = (
+          (item.updates.expense_type && item.updates.expense_type.toString().trim() !== '') ||
+          (typeof item.updates.amount === 'number' && item.updates.amount > 0)
+        )
+        
+        if (!hasData) {
+          console.log('Skipping expense item - no meaningful data (all empty or zero):', item)
+          continue
+        }
+        
         if (item.itemId.startsWith('new-')) {
           const insertData = {
             dsir_report_id: report.id,
@@ -1780,26 +2085,88 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
       
       // Save sales recon updates
       for (const item of salesReconUpdates) {
+        // For existing records (UUID itemIds), skip hasData validation
+        // Any update to an existing record is meaningful (including changing values to 0)
+        const isExistingRecord = !item.itemId.startsWith('new-')
+        
+        if (!isExistingRecord) {
+          // Only validate for new records
+          // Skip if all fields are empty, null, undefined, or 0
+          const hasData = Object.values(item.updates).some(value => 
+            value !== undefined && 
+            value !== null && 
+            value !== '' && 
+            typeof value === 'number' && 
+            value > 0
+          )
+          
+          if (!hasData) {
+            console.log('Skipping sales recon item - no meaningful data (all zeros or empty):', item)
+            continue
+          }
+        }
+        
         if (item.itemId.startsWith('new-')) {
           // Get the denomination name from the predefined denominations array
           const itemIndex = parseInt(item.itemId.replace('new-', ''))
           const denominationName = predefinedDenominations[itemIndex]?.name || ''
           
-          const insertData = {
-            dsir_report_id: report.id,
-            denomination: denominationName,
-            ...item.updates
+          // Check if this denomination already exists for this report to prevent duplicates
+          const existingItem = salesRecon.find(i => i.denomination === denominationName)
+          if (!existingItem) {
+            // Filter out zero and null values
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (value !== undefined && value !== null && value !== '' && value !== 0) {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            const insertData = {
+              dsir_report_id: report.id,
+              denomination: denominationName,
+              ...filteredUpdates
+            }
+            const { error } = await supabase
+              .from('dsir_sales_recon')
+              .insert(insertData)
+            if (error) throw error
+          } else {
+            // Update existing item instead of inserting duplicate
+            // For updates to existing records, allow all values including 0
+            // Only filter out undefined, null, and empty string
+            const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+              if (value !== undefined && value !== null && value !== '') {
+                acc[key] = value
+              }
+              return acc
+            }, {} as any)
+            
+            if (Object.keys(filteredUpdates).length > 0) {
+              const { error } = await supabase
+                .from('dsir_sales_recon')
+                .update(filteredUpdates)
+                .eq('id', existingItem.id)
+              if (error) throw error
+            }
           }
-          const { error } = await supabase
-            .from('dsir_sales_recon')
-            .insert(insertData)
-          if (error) throw error
         } else {
-          const { error } = await supabase
-            .from('dsir_sales_recon')
-            .update(item.updates)
-            .eq('id', item.itemId)
-          if (error) throw error
+          // For updates to existing records, allow all values including 0
+          // Only filter out undefined, null, and empty string
+          const filteredUpdates = Object.entries(item.updates).reduce((acc, [key, value]) => {
+            if (value !== undefined && value !== null && value !== '') {
+              acc[key] = value
+            }
+            return acc
+          }, {} as any)
+          
+          if (Object.keys(filteredUpdates).length > 0) {
+            const { error } = await supabase
+              .from('dsir_sales_recon')
+              .update(filteredUpdates)
+              .eq('id', item.itemId)
+            if (error) throw error
+          }
         }
       }
       
@@ -2029,8 +2396,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `sales-${itemId}-beginning_inventory` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`sales-${itemId}-beginning_inventory`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`sales-${itemId}-beginning_inventory`)}
                               onKeyDown={(e) => handleKeyDown(`sales-${itemId}-beginning_inventory`, e)}
@@ -2080,8 +2451,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `sales-${itemId}-arrival` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`sales-${itemId}-arrival`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`sales-${itemId}-arrival`)}
                               onKeyDown={(e) => handleKeyDown(`sales-${itemId}-arrival`, e)}
@@ -2114,8 +2489,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `sales-${itemId}-pull_out` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`sales-${itemId}-pull_out`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`sales-${itemId}-pull_out`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2152,8 +2531,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `sales-${itemId}-ending_inventory` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`sales-${itemId}-ending_inventory`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`sales-${itemId}-ending_inventory`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2269,8 +2652,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `icecream-${itemId}-beginning` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`icecream-${itemId}-beginning`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`icecream-${itemId}-beginning`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2319,8 +2706,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `icecream-${itemId}-arrival` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`icecream-${itemId}-arrival`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`icecream-${itemId}-arrival`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2352,8 +2743,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `icecream-${itemId}-pull_out` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`icecream-${itemId}-pull_out`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`icecream-${itemId}-pull_out`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2388,7 +2783,9 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               const arrival = parseInt(getDisplayValue(`icecream-${itemId}-arrival`, getItemValue(iceCreamInventory, flavorObj.name, 'arrival')) || '0') || 0
                               const pullOut = parseInt(getDisplayValue(`icecream-${itemId}-pull_out`, getItemValue(iceCreamInventory, flavorObj.name, 'pull_out')) || '0') || 0
                               const calculatedEnd = beg + arrival - pullOut
-                              return calculatedEnd > 0 ? calculatedEnd : ''
+                              // Show 0 or positive values, hide only if all inputs are empty/0
+                              if (beg === 0 && arrival === 0 && pullOut === 0) return ''
+                              return calculatedEnd
                             })()}
                               </div>
                         </td>
@@ -2437,8 +2834,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `materials-${itemId}-beginning` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`materials-${itemId}-beginning`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`materials-${itemId}-beginning`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2487,8 +2888,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `materials-${itemId}-arrival` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`materials-${itemId}-arrival`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`materials-${itemId}-arrival`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2520,8 +2925,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `materials-${itemId}-ending` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`materials-${itemId}-ending`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`materials-${itemId}-ending`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2852,8 +3261,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `expenses-${itemId}-amount` && !isReadOnly ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseFloat(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`expenses-${itemId}-amount`)}
                               onKeyPress={(e) => e.key === 'Enter' && saveEditing(`expenses-${itemId}-amount`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -2953,8 +3366,12 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                           {editingField === `salesrecon-${itemId}-quantity` ? (
                             <input
                               type="number"
+                              min="0"
                               value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
+                              onChange={(e) => {
+                                const value = Math.max(0, parseInt(e.target.value) || 0)
+                                setEditingValue(value.toString())
+                              }}
                               onBlur={() => handleBlur(`salesrecon-${itemId}-quantity`)}
                               onKeyPress={(e) => e.key === 'Enter' && handleBlur(`salesrecon-${itemId}-quantity`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -3060,7 +3477,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                   </button>
                 <button
                   onClick={submitReport}
-                    disabled={submitting || saving}
+                    disabled={submitting || saving || !hasSalesReconData()}
                     className="px-6 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 font-medium disabled:bg-gray-400 disabled:cursor-not-allowed"
                 >
                     {submitting ? 'Submitting...' : 'Submit Report'}
@@ -3069,6 +3486,11 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                 {hasUnsavedChanges && (
                   <p className="text-xs text-orange-600 font-medium">
                     You have unsaved changes. Please save your draft before submitting.
+                  </p>
+                )}
+                {!hasSalesReconData() && (
+                  <p className="text-xs text-red-600 font-medium">
+                    Sales reconciliation required before submission.
                   </p>
                 )}
                 <p className="text-xs text-gray-600 mt-2">

@@ -2581,7 +2581,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                           >
                             -
                           </button>
-                          <span className="w-12 text-center">{detail.quantity}</span>
+                          <span className="w-12 text-center text-gray-900">{detail.quantity}</span>
                           <button
                             onClick={() => updateProductQuantity(detail.product_id, detail.quantity + 1)}
                             disabled={!canIncreaseQuantity(detail.product_id)}

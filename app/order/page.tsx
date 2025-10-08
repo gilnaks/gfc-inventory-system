@@ -45,6 +45,7 @@ export default function OrderPage() {
   const [currentView, setCurrentView] = useState<ViewMode>('home')
   const [loading, setLoading] = useState(false)
   const [initialLoading, setInitialLoading] = useState(true)
+  const [checkingOrders, setCheckingOrders] = useState(true)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [showPastOrders, setShowPastOrders] = useState(false)
@@ -356,6 +357,7 @@ export default function OrderPage() {
   }
 
   const checkPendingOrders = async (locationId: string) => {
+    setCheckingOrders(true)
     try {
       const { data, error } = await supabase
         .from('customer_orders')
@@ -380,6 +382,8 @@ export default function OrderPage() {
       }
     } catch (error) {
       console.error('Error checking pending orders:', error)
+    } finally {
+      setCheckingOrders(false)
     }
   }
 
@@ -2189,36 +2193,43 @@ export default function OrderPage() {
                 )}
 
                 {/* No Pending Orders */}
-                <div className="bg-white rounded-lg shadow-sm border p-8 text-center">
-                  <ShoppingCart className={`mx-auto h-16 w-16 mb-4 ${
-                    currentTheme === 'green' ? 'text-green-400' :
-                    currentTheme === 'red' ? 'text-red-400' :
-                    currentTheme === 'yellow' ? 'text-yellow-400' :
-                    'text-blue-400'
-                  }`} />
-                  <h2 className="text-2xl font-bold text-gray-900 mb-2">No Active Orders</h2>
-                  <p className="text-gray-600 mb-6">
-                    {canStartNewOrder() 
-                      ? "You can start a new order by clicking the button below."
-                      : "Please complete your current order before starting a new one."
-                    }
-                  </p>
-                  <button
-                    onClick={startNewOrder}
-                    disabled={!canStartNewOrder()}
-                    className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
-                      canStartNewOrder()
-                        ? currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                          currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                          currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
-                          'bg-blue-600 hover:bg-blue-700'
-                        : 'bg-gray-400 cursor-not-allowed'
-                    }`}
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>Start New Order</span>
-                  </button>
-                </div>
+                {checkingOrders ? (
+                  <div className="bg-white rounded-lg shadow-sm border p-8 text-center">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-300 mx-auto mb-4"></div>
+                    <p className="text-gray-600">Checking order status...</p>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-lg shadow-sm border p-8 text-center">
+                    <ShoppingCart className={`mx-auto h-16 w-16 mb-4 ${
+                      currentTheme === 'green' ? 'text-green-400' :
+                      currentTheme === 'red' ? 'text-red-400' :
+                      currentTheme === 'yellow' ? 'text-yellow-400' :
+                      'text-blue-400'
+                    }`} />
+                    <h2 className="text-2xl font-bold text-gray-900 mb-2">No Active Orders</h2>
+                    <p className="text-gray-600 mb-6">
+                      {canStartNewOrder() 
+                        ? "You can start a new order by clicking the button below."
+                        : "Please complete your current order before starting a new one."
+                      }
+                    </p>
+                    <button
+                      onClick={startNewOrder}
+                      disabled={!canStartNewOrder()}
+                      className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
+                        canStartNewOrder()
+                          ? currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                            currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                            currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                            'bg-blue-600 hover:bg-blue-700'
+                          : 'bg-gray-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <Plus className="h-4 w-4" />
+                      <span>Start New Order</span>
+                    </button>
+                  </div>
+                )}
               </>
             )}
             </div>
@@ -2229,7 +2240,7 @@ export default function OrderPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-8">
             <div className="lg:col-span-2 min-w-0">
               <div className="bg-white rounded-lg shadow-sm border p-3 sm:p-6">
-                <h2 className="text-lg sm:text-xl font-semibold mb-4 sm:mb-6 truncate">{location?.brand?.name} Products</h2>
+                <h2 className="text-lg sm:text-xl font-semibold text-gray-900 mb-4 sm:mb-6 truncate">{location?.brand?.name} Products</h2>
                 <div className="space-y-6">
                   {Object.entries(getProductsByCategory()).map(([category, categoryProducts]) => (
                     <div key={category}>
@@ -2256,7 +2267,7 @@ export default function OrderPage() {
                                 <h4 className="font-medium text-gray-900 text-sm sm:text-base pr-2 truncate min-w-0 flex-1">{product.product_name || product.name}</h4>
                                 <div className="flex items-center space-x-2 flex-shrink-0">
                                   {cartQuantity > 0 && (
-                                    <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2 py-1 rounded-full">
+                                    <span className="bg-blue-100 text-gray-900 text-xs font-medium px-2 py-1 rounded-full">
                                       {cartQuantity}
                                     </span>
                                   )}
@@ -2298,7 +2309,7 @@ export default function OrderPage() {
             {/* Desktop Cart - Hidden on mobile */}
             <div className="hidden lg:block lg:col-span-1">
               <div className="bg-white rounded-lg shadow-sm border p-6 sticky top-8">
-                <h3 className="text-lg font-semibold mb-4">Cart ({calculateItemCount()} items)</h3>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Cart ({calculateItemCount()} items)</h3>
                 
                 {cartItems.length === 0 ? (
                   <div className="text-center py-8">
@@ -2328,7 +2339,7 @@ export default function OrderPage() {
                             hasIssue ? 'bg-red-50 border border-red-200' : 'bg-gray-50'
                           }`}>
                             <div className="flex-1">
-                              <p className="text-sm font-medium">{item.product.product_name || item.product.name}</p>
+                              <p className="text-sm font-medium text-gray-900">{item.product.product_name || item.product.name}</p>
                               <p className="text-xs text-gray-500">₱{(item.product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {item.product.unit}</p>
                               <div className="flex items-center space-x-2 mt-1">
                                 <button
@@ -2514,7 +2525,7 @@ export default function OrderPage() {
                                 <h4 className="font-medium text-gray-900 text-sm sm:text-base pr-2 truncate min-w-0 flex-1">{product.product_name || product.name}</h4>
                                 <div className="flex items-center space-x-2 flex-shrink-0">
                                   {cartQuantity > 0 && (
-                                    <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2 py-1 rounded-full">
+                                    <span className="bg-blue-100 text-gray-900 text-xs font-medium px-2 py-1 rounded-full">
                                       {cartQuantity}
                               </span>
                             )}
@@ -2556,7 +2567,7 @@ export default function OrderPage() {
             {/* Desktop Cart - Hidden on mobile */}
             <div className="hidden lg:block lg:col-span-1">
               <div className="bg-white rounded-lg shadow-sm border p-6 sticky top-8">
-                <h3 className="text-lg font-semibold mb-4">Order Draft ({calculateItemCount()} items)</h3>
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Order Draft ({calculateItemCount()} items)</h3>
               
                 {cartItems.length === 0 ? (
                   <p className="text-gray-500 text-center py-8">No items in draft</p>
@@ -2572,7 +2583,7 @@ export default function OrderPage() {
                             hasIssue ? 'bg-red-50 border border-red-200' : 'bg-gray-50'
                           }`}>
                           <div className="flex-1">
-                            <p className="text-sm font-medium">{item.product.product_name || item.product.name}</p>
+                            <p className="text-sm font-medium text-gray-900">{item.product.product_name || item.product.name}</p>
                             <p className="text-xs text-gray-500">₱{(item.product.price || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {item.product.unit}</p>
                             <div className="flex items-center space-x-2 mt-1">
                               <button
@@ -2638,7 +2649,7 @@ export default function OrderPage() {
           <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg z-40">
             <div className="px-2 py-2">
               <div className="flex justify-between items-center mb-2 min-w-0">
-                <span className="font-medium text-sm truncate">Draft: {calculateItemCount()} items • {deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                <span className="font-medium text-sm text-gray-900 truncate">Draft: {calculateItemCount()} items • {deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}</span>
                 <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
               <button
@@ -2669,7 +2680,7 @@ export default function OrderPage() {
           <div className="bg-white rounded-t-lg sm:rounded-lg w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
             <div className="flex items-center justify-between p-3 sm:p-4 border-b min-w-0 flex-shrink-0">
-              <h2 className="text-base sm:text-lg font-semibold truncate min-w-0 flex-1">
+              <h2 className="text-base sm:text-lg font-semibold text-gray-900 truncate min-w-0 flex-1">
                 {currentView === 'modify' ? 'Order Draft' : 'Your Cart'} ({calculateItemCount()} items)
               </h2>
               <button
@@ -2793,7 +2804,7 @@ export default function OrderPage() {
                     </div>
                   )}
                   <div className="flex justify-between items-center border-t pt-2">
-                    <span className="font-medium text-sm sm:text-base">Total:</span>
+                    <span className="font-medium text-sm sm:text-base text-gray-900">Total:</span>
                     <span className="font-semibold text-green-600 text-base sm:text-lg flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
                 </div>

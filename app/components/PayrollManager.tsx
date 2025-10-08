@@ -39,7 +39,7 @@ interface PayrollData {
   totalPay: number
   daysWorked: Array<{date: string, dayName: string, hours: number}>
   daysWorkedDates: string[]
-  locationGroups: {[locationName: string]: Array<{date: string, dayName: string, hours: number, scheduleDate: string, brandName: string}>}
+  locationGroups: {[locationName: string]: Array<{date: string, dayName: string, hours: number, scheduleDate: string, brandName: string, isAbsent?: boolean}>}
   regularHours: number
   doublePayHours: number
   specialPayHours: number
@@ -350,7 +350,8 @@ export function PayrollManager() {
     const dayHoursMap: {[key: string]: number} = {}
     
     staffSchedules.forEach(schedule => {
-      const hours = schedule.hours || 11
+      // If staff is marked absent, hours should be 0
+      const hours = schedule.is_absent ? 0 : (schedule.hours || 11)
       const dayStatus = dayStatusMap[schedule.schedule_date] || 'default'
       
       // Store hours for each day
@@ -380,7 +381,8 @@ export function PayrollManager() {
     // If total hours < 48, add all excess daily hours to regular hours
     if (totalHours < 48) {
       staffSchedules.forEach(schedule => {
-        const hours = schedule.hours || 11
+        // If staff is marked absent, hours should be 0
+        const hours = schedule.is_absent ? 0 : (schedule.hours || 11)
         const dayStatus = dayStatusMap[schedule.schedule_date] || 'default'
         const excessHours = Math.max(0, hours - 8)
         
@@ -409,7 +411,7 @@ export function PayrollManager() {
     const locations = Array.from(new Set(staffSchedules.map(s => s.location?.name || 'Unknown'))).join(', ')
     
     // Group days worked by location
-    const locationGroups: {[locationName: string]: Array<{date: string, dayName: string, hours: number, scheduleDate: string, brandName: string}>} = {}
+    const locationGroups: {[locationName: string]: Array<{date: string, dayName: string, hours: number, scheduleDate: string, brandName: string, isAbsent?: boolean}>} = {}
     
     staffSchedules.forEach(schedule => {
       const locationName = schedule.location?.name || 'Unknown'
@@ -431,7 +433,8 @@ export function PayrollManager() {
         dayName: dayName,  // "Tue"
         hours: dayHoursMap[date] || 0,
         scheduleDate: date,
-        brandName: brandName
+        brandName: brandName,
+        isAbsent: schedule.is_absent || false
       })
     })
     
@@ -1366,10 +1369,10 @@ export function PayrollManager() {
               <select
                 value={selectedPeriod}
                 onChange={(e) => setSelectedPeriod(e.target.value as 'weekly' | 'custom')}
-                className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="border border-gray-300 rounded-md px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
-                <option value="weekly">Weekly</option>
-                <option value="custom">Custom</option>
+                <option value="weekly" className="text-gray-900">Weekly</option>
+                <option value="custom" className="text-gray-900">Custom</option>
               </select>
             </div>
             
@@ -1388,7 +1391,7 @@ export function PayrollManager() {
                   className="flex items-center space-x-2 px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition-colors min-w-[200px]"
                 >
                   <Calendar className="h-4 w-4 text-gray-500" />
-                  <span className="text-sm">{getFormattedDate()}</span>
+                  <span className="text-sm text-gray-900">{getFormattedDate()}</span>
                 </button>
                 
                 {/* Popup Calendar */}
@@ -1585,11 +1588,11 @@ export function PayrollManager() {
             <select
               value={selectedStaff}
               onChange={(e) => setSelectedStaff(e.target.value)}
-              className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 min-w-[150px]"
+              className="border border-gray-300 rounded-md px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 min-w-[150px]"
             >
-              <option value="all">All Staff</option>
+              <option value="all" className="text-gray-900">All Staff</option>
               {staff.map((staffMember) => (
-                <option key={staffMember.id} value={staffMember.id}>
+                <option key={staffMember.id} value={staffMember.id} className="text-gray-900">
                   {staffMember.full_name}
                 </option>
               ))}
@@ -1724,7 +1727,9 @@ export function PayrollManager() {
                              <div className="grid grid-cols-4 gap-2 max-w-xs">
                                {(days as any[]).map((day, dayIndex) => {
                                  const dayStatus = getDayStatusForDate(day.scheduleDate)
-                                 const colorClasses = getDayColorClasses(dayStatus)
+                                 const colorClasses = day.isAbsent 
+                                   ? 'bg-red-200 text-red-900 border border-red-300'
+                                   : getDayColorClasses(dayStatus)
                                  
                                  return (
                                    <div
@@ -1733,6 +1738,7 @@ export function PayrollManager() {
                                    >
                                      <span className="font-semibold">{day.date}</span>
                                      <span className="text-xs opacity-75">{day.dayName} {day.hours}h</span>
+                                     {day.isAbsent && <span className="text-[9px] font-semibold">ABSENT</span>}
                                    </div>
                                  )
                                })}

@@ -327,8 +327,8 @@ export function IceCreamInventorySection({
     const newItem = {
       flavor: '',
       beginning: 0,
-      production_500ml: 0,
-      additions: 0,
+      arrival: 0,
+      pull_out: 0,
       ending: 0
     }
     onItemsChange([...items, newItem])
@@ -338,15 +338,29 @@ export function IceCreamInventorySection({
     const updatedItems = [...items]
     updatedItems[index] = { ...updatedItems[index], [field]: value }
     
-    // Calculate ending inventory
-    if (field === 'beginning' || field === 'production_500ml' || field === 'additions') {
+    console.log(`🍦 Ice Cream updateItem - field: ${field}, value: ${value}, index: ${index}`)
+    console.log(`🍦 Current item before calculation:`, updatedItems[index])
+    
+    // Calculate ending inventory ONLY if ending field hasn't been manually set
+    if (field === 'beginning' || field === 'arrival' || field === 'pull_out') {
       const beg = updatedItems[index].beginning || 0
-      const production = updatedItems[index].production_500ml || 0
-      const additions = updatedItems[index].additions || 0
-      // Auto-calculate ending
-      updatedItems[index].ending = beg + production + additions
+      const arrival = updatedItems[index].arrival || 0
+      const pullOut = updatedItems[index].pull_out || 0
+      
+      console.log(`🍦 Calculation values - beg: ${beg}, arrival: ${arrival}, pullOut: ${pullOut}`)
+      console.log(`🍦 Current ending value: ${updatedItems[index].ending}`)
+      
+      // Only auto-calculate ending if it hasn't been manually set and is currently 0 or empty
+      if (updatedItems[index].ending === 0 || updatedItems[index].ending === '' || updatedItems[index].ending === null || updatedItems[index].ending === undefined) {
+        const newEnding = beg + arrival - pullOut
+        updatedItems[index].ending = newEnding
+        console.log(`🍦 Auto-calculated new ending: ${newEnding}`)
+      } else {
+        console.log(`🍦 Not auto-calculating - ending already set to: ${updatedItems[index].ending}`)
+      }
     }
 
+    console.log(`🍦 Final item after calculation:`, updatedItems[index])
     onItemsChange(updatedItems)
   }
 
@@ -358,36 +372,43 @@ export function IceCreamInventorySection({
   const saveItem = async (item: any, index: number) => {
     if (!item.flavor.trim()) return
 
+    console.log(`🍦 Saving ice cream item:`, item)
+    console.log(`🍦 Item values - beginning: ${item.beginning}, arrival: ${item.arrival}, pull_out: ${item.pull_out}, ending: ${item.ending}`)
+
     setLoading(true)
     try {
       if (item.id) {
+        console.log(`🍦 Updating existing item with ID: ${item.id}`)
         const { error } = await supabase
           .from('dsir_ice_cream_inventory')
           .update({
             flavor: item.flavor,
             beginning: item.beginning,
-            production_500ml: item.production_500ml,
-            additions: item.additions,
+            arrival: item.arrival,
+            pull_out: item.pull_out,
             ending: item.ending
           })
           .eq('id', item.id)
 
         if (error) throw error
+        console.log(`🍦 Successfully updated item`)
       } else {
+        console.log(`🍦 Inserting new item`)
         const { data, error } = await supabase
           .from('dsir_ice_cream_inventory')
           .insert({
             dsir_report_id: reportId,
             flavor: item.flavor,
             beginning: item.beginning,
-            production_500ml: item.production_500ml,
-            additions: item.additions,
+            arrival: item.arrival,
+            pull_out: item.pull_out,
             ending: item.ending
           })
           .select()
           .single()
 
         if (error) throw error
+        console.log(`🍦 Successfully inserted item with ID: ${data.id}`)
 
         const updatedItems = [...items]
         updatedItems[index] = { ...updatedItems[index], id: data.id }
@@ -410,8 +431,8 @@ export function IceCreamInventorySection({
             <tr>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">FLAVOR</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">BEG</th>
-              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">500ml</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">(+)</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">(-)</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">END</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
             </tr>
@@ -444,16 +465,16 @@ export function IceCreamInventorySection({
                 <td className="px-3 py-2">
                   <input
                     type="number"
-                    value={item.production_500ml}
-                    onChange={(e) => updateItem(index, 'production_500ml', parseInt(e.target.value) || 0)}
+                    value={item.arrival}
+                    onChange={(e) => updateItem(index, 'arrival', parseInt(e.target.value) || 0)}
                     className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
                   />
                 </td>
                 <td className="px-3 py-2">
                   <input
                     type="number"
-                    value={item.additions}
-                    onChange={(e) => updateItem(index, 'additions', parseInt(e.target.value) || 0)}
+                    value={item.pull_out}
+                    onChange={(e) => updateItem(index, 'pull_out', parseInt(e.target.value) || 0)}
                     className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
                   />
                 </td>
@@ -462,7 +483,7 @@ export function IceCreamInventorySection({
                     type="number"
                     value={item.ending}
                     onChange={(e) => updateItem(index, 'ending', parseInt(e.target.value) || 0)}
-                    className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
+                    className="w-full px-2 py-1 border border-gray-300 rounded text-sm bg-gray-50"
                   />
                 </td>
                 <td className="px-3 py-2">
