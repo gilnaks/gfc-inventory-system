@@ -69,6 +69,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
   const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
   const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
   const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<PaidOrder | null>(null)
+  const [completedOrdersPage, setCompletedOrdersPage] = useState(1)
+  const completedOrdersPerPage = 10
 
   // Helper function to get franchise icon color based on theme
   const getFranchiseIconColor = () => {
@@ -89,6 +91,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       fetchPaidOrders()
       fetchReleasedOrders()
       fetchTotalReceivable()
+      setCompletedOrdersPage(1) // Reset pagination when filter changes
     }
   }, [selectedBrand, timeFilter])
 
@@ -396,6 +399,21 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
 
   const getTotalAmount = (order: PaidOrder) => {
     return order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
+  }
+
+  // Pagination logic for completed orders
+  const getCompletedOrdersForPage = () => {
+    const startIndex = (completedOrdersPage - 1) * completedOrdersPerPage
+    const endIndex = startIndex + completedOrdersPerPage
+    return completedOrders.slice(startIndex, endIndex)
+  }
+
+  const getTotalCompletedPages = () => {
+    return Math.ceil(completedOrders.length / completedOrdersPerPage)
+  }
+
+  const handleCompletedPageChange = (page: number) => {
+    setCompletedOrdersPage(page)
   }
 
   const isCompanyOwned = (order: PaidOrder) => {
@@ -1225,7 +1243,14 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       {/* Completed Orders List */}
       <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200 bg-indigo-50">
-          <h4 className="text-lg font-medium text-indigo-900">Completed Orders ({completedOrders.length})</h4>
+          <div className="flex items-center justify-between">
+            <h4 className="text-lg font-medium text-indigo-900">Completed Orders ({completedOrders.length})</h4>
+            {completedOrders.length > completedOrdersPerPage && (
+              <div className="text-sm text-indigo-700">
+                Page {completedOrdersPage} of {getTotalCompletedPages()}
+              </div>
+            )}
+          </div>
         </div>
         
         {loading ? (
@@ -1270,7 +1295,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {completedOrders.map((order) => (
+                {getCompletedOrdersForPage().map((order) => (
                   <tr key={order.id} className="hover:bg-indigo-100 hover:shadow-md transition-all duration-75">
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 align-middle">
                       {order.id.slice(0, 8)}...
@@ -1351,6 +1376,48 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Pagination Controls */}
+        {completedOrders.length > completedOrdersPerPage && (
+          <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-gray-700">
+                Showing {((completedOrdersPage - 1) * completedOrdersPerPage) + 1} to {Math.min(completedOrdersPage * completedOrdersPerPage, completedOrders.length)} of {completedOrders.length} orders
+              </div>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => handleCompletedPageChange(completedOrdersPage - 1)}
+                  disabled={completedOrdersPage === 1}
+                  className="px-3 py-1 text-sm border border-gray-300 rounded-md bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <div className="flex items-center space-x-1">
+                  {Array.from({ length: getTotalCompletedPages() }, (_, i) => i + 1).map((page) => (
+                    <button
+                      key={page}
+                      onClick={() => handleCompletedPageChange(page)}
+                      className={`px-3 py-1 text-sm border rounded-md ${
+                        page === completedOrdersPage
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {page}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => handleCompletedPageChange(completedOrdersPage + 1)}
+                  disabled={completedOrdersPage === getTotalCompletedPages()}
+                  className="px-3 py-1 text-sm border border-gray-300 rounded-md bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

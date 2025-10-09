@@ -361,7 +361,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
       return
     }
 
-    if (!confirm('Are you sure you want to finalize the stock? This will move final stock to initial stock and clear production/released quantities for all products.')) {
+    if (!confirm('Are you sure you want to finalize the stock? This will add production to initial stock and reset production for all products.')) {
       return
     }
 
@@ -391,7 +391,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
           date: getPhilippinesDate(), // YYYY-MM-DD format in Philippines timezone
           total_production: allProducts.reduce((sum, p) => sum + (p.production || 0), 0),
           total_released: allProducts.reduce((sum, p) => sum + (p.released || 0), 0),
-          total_final_stock: allProducts.reduce((sum, p) => sum + (p.initial_stock || 0) + (p.production || 0) - (p.released || 0), 0)
+          total_final_stock: allProducts.reduce((sum, p) => sum + (p.initial_stock || 0) + (p.production || 0), 0)
         })
         .select()
         .single()
@@ -402,16 +402,15 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
         return
       }
 
-      // Update each product: move final stock to initial stock, clear production and released
+      // Update each product: add production to initial stock and reset production
       for (const product of allProducts) {
-        const finalStock = (product.initial_stock || 0) + (product.production || 0) - (product.released || 0)
+        const newInitialStock = (product.initial_stock || 0) + (product.production || 0)
         
         const { error: updateError } = await supabase
           .from('products')
           .update({
-            initial_stock: finalStock,
+            initial_stock: newInitialStock,
             production: 0,
-            released: 0,
             updated_at: new Date().toISOString()
           })
           .eq('id', product.id)
@@ -423,7 +422,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
         }
       }
 
-      alert('Stock finalized successfully! All products have been updated for the next day.')
+      alert('Stock finalized successfully! Production has been added to initial stock.')
       
       // Refresh the products list
       await fetchProducts()

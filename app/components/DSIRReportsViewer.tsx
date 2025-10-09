@@ -69,14 +69,34 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [predefinedItems, setPredefinedItems] = useState<any[]>([])
   const [loadingItems, setLoadingItems] = useState(false)
   const [savingItems, setSavingItems] = useState(false)
-  const [newItem, setNewItem] = useState({ name: '', price: 0, category: '' })
+  const [newItem, setNewItem] = useState({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
+  const [editingItemId, setEditingItemId] = useState<string | null>(null)
   
   // Inventory differences tracking
   const [inventoryDifferences, setInventoryDifferences] = useState<{[reportId: string]: boolean}>({})
+  
+  // Monthly summary state
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date()
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  })
+  const [monthlySummaryByLocation, setMonthlySummaryByLocation] = useState<{
+    [locationId: string]: {
+      locationName: string
+      netSales: number
+      totalReceivedPans: number
+      totalUsedPans: number
+      currentStockPans: number
+    }
+  }>({})
 
   useEffect(() => {
     loadReports()
   }, [selectedBrand, selectedLocation])
+  
+  useEffect(() => {
+    calculateMonthlySummary()
+  }, [reports, selectedMonth, selectedLocation])
 
   // Close report view when brand changes
   useEffect(() => {
@@ -90,6 +110,96 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       loadPredefinedItems()
     }
   }, [isEditItemsModalOpen])
+
+  const calculateMonthlySummary = async () => {
+    if (!selectedMonth) return
+    
+    // Parse the selected month (format: YYYY-MM)
+    const [year, month] = selectedMonth.split('-')
+    const startDate = `${year}-${month}-01`
+    const endDate = `${year}-${month}-${new Date(parseInt(year), parseInt(month), 0).getDate()}`
+    
+    try {
+      // Filter reports by selected month
+      let filteredReports = reports.filter(report => {
+        const reportDate = report.report_date
+        const matchesMonth = reportDate >= startDate && reportDate <= endDate
+        return matchesMonth && report.status !== 'draft'
+      })
+      
+      // Group by location and find latest report for each location
+      const summaryByLocation: {[locationId: string]: {
+        locationName: string
+        netSales: number
+        totalReceivedPans: number
+        totalUsedPans: number
+        currentStockPans: number
+        latestReportDate: string
+      }} = {}
+      
+      for (const report of filteredReports) {
+        const locationId = report.location_id
+        const locationName = report.location?.name || 'Unknown'
+        
+        if (!summaryByLocation[locationId]) {
+          summaryByLocation[locationId] = {
+            locationName: locationName,
+            netSales: 0,
+            totalReceivedPans: 0,
+            totalUsedPans: 0,
+            currentStockPans: 0,
+            latestReportDate: report.report_date
+          }
+        }
+        
+        // Update latest report date
+        if (report.report_date > summaryByLocation[locationId].latestReportDate) {
+          summaryByLocation[locationId].latestReportDate = report.report_date
+        }
+        
+        // Add net sales
+        summaryByLocation[locationId].netSales += report.net_sales || 0
+        
+        // Fetch ice cream inventory to get received pans (arrival) and used pans (pull_out)
+        const { data: iceCreamInventory } = await supabase
+          .from('dsir_ice_cream_inventory')
+          .select('arrival, pull_out')
+          .eq('dsir_report_id', report.id)
+        
+        if (iceCreamInventory) {
+          iceCreamInventory.forEach(item => {
+            summaryByLocation[locationId].totalReceivedPans += item.arrival || 0
+            summaryByLocation[locationId].totalUsedPans += item.pull_out || 0
+          })
+        }
+      }
+      
+      // Fetch current stock pans from the latest report for each location
+      for (const [locationId, summary] of Object.entries(summaryByLocation)) {
+        // Get the latest report for this location
+        const latestReport = filteredReports
+          .filter(r => r.location_id === locationId)
+          .sort((a, b) => new Date(b.report_date).getTime() - new Date(a.report_date).getTime())[0]
+        
+        if (latestReport) {
+          // Fetch ice cream inventory ending values from the latest report
+          const { data: latestInventory } = await supabase
+            .from('dsir_ice_cream_inventory')
+            .select('ending')
+            .eq('dsir_report_id', latestReport.id)
+          
+          if (latestInventory) {
+            const totalEnding = latestInventory.reduce((sum, item) => sum + (item.ending || 0), 0)
+            summaryByLocation[locationId].currentStockPans = totalEnding
+          }
+        }
+      }
+      
+      setMonthlySummaryByLocation(summaryByLocation)
+    } catch (error) {
+      console.error('Error calculating monthly summary:', error)
+    }
+  }
 
   const loadReports = async () => {
     setLoading(true)
@@ -376,7 +486,9 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         name: newItem.name.trim(),
         category: newItem.category,
         brand_id: selectedBrand.id,
-        is_active: true
+        is_active: true,
+        show_in_local: newItem.show_in_local,
+        show_in_remote: newItem.show_in_remote
       }
       
       // Only include price for sales inventory
@@ -392,7 +504,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       if (error) throw error
 
       setPredefinedItems(prev => [...prev, ...data])
-      setNewItem({ name: '', price: 0, category: '' })
+      setNewItem({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
       setSuccess('Item added successfully!')
     } catch (error) {
       console.error('Error adding predefined item:', error)
@@ -402,12 +514,14 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     }
   }
 
-  const updatePredefinedItem = async (id: string, name: string, price: number, category: string) => {
+  const updatePredefinedItem = async (id: string, name: string, price: number, category: string, show_in_local: boolean, show_in_remote: boolean) => {
     setSavingItems(true)
     try {
       const updateData: any = { 
         name: name.trim(), 
-        category 
+        category,
+        show_in_local,
+        show_in_remote
       }
       
       // Only include price for sales inventory
@@ -423,7 +537,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       if (error) throw error
 
       setPredefinedItems(prev => prev.map(item => 
-        item.id === id ? { ...item, name: name.trim(), price: category === 'sales' ? price : item.price, category } : item
+        item.id === id ? { ...item, name: name.trim(), price: category === 'sales' ? price : item.price, category, show_in_local, show_in_remote } : item
       ))
       setSuccess('Item updated successfully!')
     } catch (error) {
@@ -581,6 +695,55 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             <span>Refresh</span>
           </button>
         </div>
+      </div>
+
+      {/* Monthly Summary */}
+      <div className="bg-white rounded-lg shadow-sm border p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-base font-semibold text-gray-900">Branch Monthly Summary</h2>
+          <input
+            type="month"
+            value={selectedMonth}
+            onChange={(e) => setSelectedMonth(e.target.value)}
+            className="px-2 py-1 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+          />
+        </div>
+        
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          {Object.entries(monthlySummaryByLocation)
+            .sort(([, a], [, b]) => b.netSales - a.netSales)
+            .map(([locationId, summary]) => (
+            <div key={locationId} className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <div className="text-xs font-semibold text-gray-700 mb-2 truncate">{summary.locationName}</div>
+              <div className="space-y-1">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-gray-600">Net Sales:</span>
+                  <span className="text-sm font-semibold text-green-600">
+                    ₱{summary.netSales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-gray-600">Total Received Pans:</span>
+                  <span className="text-sm font-semibold text-blue-600">{summary.totalReceivedPans.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-gray-600">Total Used Pans:</span>
+                  <span className="text-sm font-semibold text-orange-600">{summary.totalUsedPans.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-gray-600">Current Stock Pans:</span>
+                  <span className="text-sm font-semibold text-gray-700">{summary.currentStockPans.toLocaleString()}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        {Object.keys(monthlySummaryByLocation).length === 0 && (
+          <div className="text-center py-4 text-sm text-gray-500">
+            No data available for the selected month
+          </div>
+        )}
       </div>
 
       {/* Filters */}
@@ -888,7 +1051,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
               <button
                 onClick={() => {
                   setIsEditItemsModalOpen(false)
-                  setNewItem({ name: '', price: 0, category: '' })
+                  setNewItem({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
+                  setEditingItemId(null)
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -949,6 +1113,28 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                     </button>
                   </div>
                 </div>
+                
+                {/* Visibility Checkboxes */}
+                <div className="mt-4 flex items-center space-x-6">
+                  <label className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      checked={newItem.show_in_local}
+                      onChange={(e) => setNewItem({ ...newItem, show_in_local: e.target.checked })}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <span className="text-sm text-gray-700">Show in Local DSIR</span>
+                  </label>
+                  <label className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      checked={newItem.show_in_remote}
+                      onChange={(e) => setNewItem({ ...newItem, show_in_remote: e.target.checked })}
+                      className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
+                    />
+                    <span className="text-sm text-gray-700">Show in Remote DSIR</span>
+                  </label>
+                </div>
               </div>
 
               {/* Items List */}
@@ -984,6 +1170,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                               onUpdate={updatePredefinedItem}
                               onDelete={deletePredefinedItem}
                               saving={savingItems}
+                              editingItemId={editingItemId}
+                              setEditingItemId={setEditingItemId}
                             />
                           ))}
                         </div>
@@ -998,7 +1186,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
               <button
                 onClick={() => {
                   setIsEditItemsModalOpen(false)
-                  setNewItem({ name: '', price: 0, category: '' })
+                  setNewItem({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
+                  setEditingItemId(null)
                 }}
                 className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300"
               >
@@ -1013,24 +1202,28 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
 }
 
 // Editable Item Row Component
-function EditableItemRow({ item, onUpdate, onDelete, saving }: { 
+function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setEditingItemId }: { 
   item: any, 
-  onUpdate: (id: string, name: string, price: number, category: string) => void, 
+  onUpdate: (id: string, name: string, price: number, category: string, show_in_local: boolean, show_in_remote: boolean) => void, 
   onDelete: (id: string) => void,
-  saving: boolean 
+  saving: boolean,
+  editingItemId: string | null,
+  setEditingItemId: (id: string | null) => void
 }) {
-  const [isEditing, setIsEditing] = useState(false)
+  const isEditing = editingItemId === item.id
   const [editName, setEditName] = useState(item.name)
   const [editPrice, setEditPrice] = useState(item.price)
   const [editCategory, setEditCategory] = useState(item.category)
+  const [editShowInLocal, setEditShowInLocal] = useState(item.show_in_local ?? true)
+  const [editShowInRemote, setEditShowInRemote] = useState(item.show_in_remote ?? true)
 
   const handleSave = () => {
     if (editName.trim() && editCategory) {
       if (editCategory === 'sales' && editPrice <= 0) {
         return // Don't save if sales category but no valid price
       }
-      onUpdate(item.id, editName, editPrice, editCategory)
-      setIsEditing(false)
+      onUpdate(item.id, editName, editPrice, editCategory, editShowInLocal, editShowInRemote)
+      setEditingItemId(null)
     }
   }
 
@@ -1038,7 +1231,13 @@ function EditableItemRow({ item, onUpdate, onDelete, saving }: {
     setEditName(item.name)
     setEditPrice(item.price)
     setEditCategory(item.category)
-    setIsEditing(false)
+    setEditShowInLocal(item.show_in_local ?? true)
+    setEditShowInRemote(item.show_in_remote ?? true)
+    setEditingItemId(null)
+  }
+
+  const handleEdit = () => {
+    setEditingItemId(item.id)
   }
 
   const getCategoryDisplayName = (category: string) => {
@@ -1054,88 +1253,126 @@ function EditableItemRow({ item, onUpdate, onDelete, saving }: {
   return (
     <div className="p-3 bg-white border border-gray-200 rounded-lg">
       {isEditing ? (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="md:col-span-2">
-            <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
-            <select
-              value={editCategory}
-              onChange={(e) => setEditCategory(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
-            >
-              <option value="sales">Sales Inventory</option>
-              <option value="ice_cream">Ice Cream Flavors</option>
-              <option value="materials">Materials Inventory</option>
-              <option value="denominations">Sales Reconciliation</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Item Name</label>
-            <input
-              type="text"
-              value={editName}
-              onChange={(e) => setEditName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
-            />
-          </div>
-          {editCategory === 'sales' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="md:col-span-2">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
+              <select
+                value={editCategory}
+                onChange={(e) => setEditCategory(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
+              >
+                <option value="sales">Sales Inventory</option>
+                <option value="ice_cream">Ice Cream Flavors</option>
+                <option value="materials">Materials Inventory</option>
+                <option value="denominations">Sales Reconciliation</option>
+              </select>
+            </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Price (₱)</label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Item Name</label>
               <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={editPrice}
-                onChange={(e) => setEditPrice(parseFloat(e.target.value) || 0)}
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
               />
             </div>
-          )}
-          <div className="flex items-end space-x-2">
-            <button
-              onClick={handleSave}
-              disabled={saving || !editName.trim() || (editCategory === 'sales' && editPrice <= 0) || !editCategory}
-              className="px-3 py-2 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:opacity-50"
-            >
-              Save
-            </button>
-            <button
-              onClick={handleCancel}
-              disabled={saving}
-              className="px-3 py-2 bg-gray-300 text-gray-700 text-sm rounded hover:bg-gray-400"
-            >
-              Cancel
-            </button>
+            {editCategory === 'sales' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Price (₱)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={editPrice}
+                  onChange={(e) => setEditPrice(parseFloat(e.target.value) || 0)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
+                />
+              </div>
+            )}
+            <div className="flex items-end space-x-2">
+              <button
+                onClick={handleSave}
+                disabled={saving || !editName.trim() || (editCategory === 'sales' && editPrice <= 0) || !editCategory}
+                className="px-3 py-2 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:opacity-50"
+              >
+                Save
+              </button>
+              <button
+                onClick={handleCancel}
+                disabled={saving}
+                className="px-3 py-2 bg-gray-300 text-gray-700 text-sm rounded hover:bg-gray-400"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+          
+          {/* Visibility Checkboxes */}
+          <div className="flex items-center space-x-6">
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={editShowInLocal}
+                onChange={(e) => setEditShowInLocal(e.target.checked)}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+              />
+              <span className="text-sm text-gray-700">Show in Local DSIR</span>
+            </label>
+            <label className="flex items-center space-x-2">
+              <input
+                type="checkbox"
+                checked={editShowInRemote}
+                onChange={(e) => setEditShowInRemote(e.target.checked)}
+                className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
+              />
+              <span className="text-sm text-gray-700">Show in Remote DSIR</span>
+            </label>
           </div>
         </div>
       ) : (
-        <div className="flex items-center justify-between">
-          <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Item Name</span>
-              <p className="text-sm font-medium text-gray-900">{item.name}</p>
-            </div>
-            {item.category === 'sales' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Price</span>
-                <p className="text-sm font-medium text-gray-900">₱{item.price.toFixed(2)}</p>
+                <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Item Name</span>
+                <p className="text-sm font-medium text-gray-900">{item.name}</p>
               </div>
-            )}
+              {item.category === 'sales' && (
+                <div>
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Price</span>
+                  <p className="text-sm font-medium text-gray-900">₱{item.price.toFixed(2)}</p>
+                </div>
+              )}
+            </div>
+            <div className="flex space-x-2 ml-4">
+              <button
+                onClick={handleEdit}
+                disabled={saving}
+                className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
+              >
+                Edit
+              </button>
+              <button
+                onClick={() => onDelete(item.id)}
+                disabled={saving}
+                className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
           </div>
-          <div className="flex space-x-2 ml-4">
-            <button
-              onClick={() => setIsEditing(true)}
-              disabled={saving}
-              className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
-            >
-              Edit
-            </button>
-            <button
-              onClick={() => onDelete(item.id)}
-              disabled={saving}
-              className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
-            >
-              Delete
-            </button>
+          
+          {/* Visibility Status */}
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <div className={`w-2 h-2 rounded-full ${item.show_in_local ? 'bg-blue-500' : 'bg-gray-300'}`}></div>
+              <span className="text-xs text-gray-600">Local DSIR</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className={`w-2 h-2 rounded-full ${item.show_in_remote ? 'bg-purple-500' : 'bg-gray-300'}`}></div>
+              <span className="text-xs text-gray-600">Remote DSIR</span>
+            </div>
           </div>
         </div>
       )}

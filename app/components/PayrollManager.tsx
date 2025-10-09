@@ -1,7 +1,7 @@
 'use client'
 import React, { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Calculator, Clock, DollarSign, Calendar, TrendingUp, Users, Printer, ChevronLeft, ChevronRight, Minus } from 'lucide-react'
+import { Calculator, Clock, DollarSign, Calendar, TrendingUp, Users, Printer, ChevronLeft, ChevronRight, Minus, Save } from 'lucide-react'
 
 interface StaffRegistration {
   id: string
@@ -56,7 +56,9 @@ interface PayrollData {
     penalties: number
     others: number
   }
+  refunds: number
   netPay: number
+  averageWeeklySales?: number
 }
 
 interface PayrollSummary {
@@ -89,6 +91,7 @@ export function PayrollManager() {
   const [calendarClosed, setCalendarClosed] = useState(true) // Track if calendar is closed
   const [selectedStaff, setSelectedStaff] = useState<string>('all')
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [dayStatusMap, setDayStatusMap] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
   const [deductions, setDeductions] = useState<{[staffId: string]: {
     utilities: number
@@ -97,13 +100,16 @@ export function PayrollManager() {
     penalties: number
     others: number
   }}>({})
+  const [refunds, setRefunds] = useState<{[staffId: string]: number}>({})
   const [inputValues, setInputValues] = useState<{[staffId: string]: {
     utilities: string
     shortages: string
     cashAdvances: string
     penalties: string
     others: string
+    refunds: string
   }}>({})
+  const [savingDeductions, setSavingDeductions] = useState(false)
 
   useEffect(() => {
     // Only refresh data if calendar is closed or if it's not custom period
@@ -118,14 +124,6 @@ export function PayrollManager() {
       loadPayrollData(staff)
     }
   }, [staff])
-
-  // Recalculate payroll when deductions change
-  useEffect(() => {
-    if (staff.length > 0 && Object.keys(payrollData.weekly).length > 0) {
-      // Recalculate payroll with current deductions
-      loadPayrollData(staff)
-    }
-  }, [deductions])
 
   // Sync calendar date with selected date
   useEffect(() => {
@@ -272,9 +270,15 @@ export function PayrollManager() {
       
       setDayStatusMap(dayStatusMap)
 
-      const payroll = calculatePayroll(staffData, filteredScheduleData, dayStatusMap)
+      const payroll = await calculatePayroll(staffData, filteredScheduleData, dayStatusMap, startDate, endDate)
       setPayrollData(payroll)
       setError('') // Clear any previous errors
+
+      // Load deductions and refunds from Supabase for the current week
+      // This needs to be after setting payroll data to trigger a recalculation
+      if (selectedPeriod === 'weekly') {
+        await loadDeductionsAndRefunds(startDate, endDate, staffData, filteredScheduleData, dayStatusMap)
+      }
     } catch (error) {
       console.error('Error loading payroll data:', error)
       setError('Failed to load payroll data')
@@ -287,6 +291,157 @@ export function PayrollManager() {
           custom: 0
         }
       })
+    }
+  }
+
+  const fetchStaffAverageWeeklySales = async (staffIds: string[]) => {
+    try {
+      // Get the last 4 weeks of data for average calculation
+      const fourWeeksAgo = new Date()
+      fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28)
+      const fourWeeksAgoStr = fourWeeksAgo.toISOString().split('T')[0]
+      
+      // Fetch DSIR reports for these staff members in the last 4 weeks
+      const { data: dsirReports, error } = await supabase
+        .from('dsir_reports')
+        .select('staff_registration_id, net_sales, report_date')
+        .in('staff_registration_id', staffIds)
+        .gte('report_date', fourWeeksAgoStr)
+        .eq('status', 'submitted') // Only count submitted reports
+      
+      if (error) {
+        console.error('Error fetching DSIR reports for sales:', error)
+        return {}
+      }
+      
+      // Group by staff and calculate average weekly sales
+      const salesByStaff: {[staffId: string]: number[]} = {}
+      
+      dsirReports?.forEach(report => {
+        if (!salesByStaff[report.staff_registration_id]) {
+          salesByStaff[report.staff_registration_id] = []
+        }
+        salesByStaff[report.staff_registration_id].push(report.net_sales || 0)
+      })
+      
+      // Calculate average for each staff
+      const averageSalesMap: {[staffId: string]: number} = {}
+      Object.entries(salesByStaff).forEach(([staffId, sales]) => {
+        if (sales.length > 0) {
+          const totalSales = sales.reduce((sum, sale) => sum + sale, 0)
+          // Calculate weekly average (total sales / number of weeks)
+          const weeks = Math.ceil(sales.length / 7) || 1
+          averageSalesMap[staffId] = totalSales / weeks
+        }
+      })
+      
+      return averageSalesMap
+    } catch (error) {
+      console.error('Error calculating staff average sales:', error)
+      return {}
+    }
+  }
+
+  const getScheduleDataForWeek = async (startDate: string, endDate: string) => {
+    const today = new Date().toISOString().split('T')[0]
+
+    // Get company-owned location IDs
+    const { data: companyLocations, error: locationError } = await supabase
+      .from('locations')
+      .select('id')
+      .eq('company_owned', true)
+
+    if (locationError) throw locationError
+
+    const companyLocationIds = companyLocations?.map(loc => loc.id) || []
+
+    const { data: scheduleData, error: scheduleError } = await supabase
+      .from('staff_schedules')
+      .select(`
+        *,
+        staff:staff_registrations(id, full_name, hourly_rate),
+        location:locations(id, name, brand:brands(id, name))
+      `)
+      .gte('schedule_date', startDate)
+      .lte('schedule_date', endDate)
+      .in('location_id', companyLocationIds)
+      .order('schedule_date', { ascending: true })
+
+    if (scheduleError) throw scheduleError
+
+    // Filter out future dates
+    const filteredScheduleData = (scheduleData || []).filter(schedule => 
+      schedule.schedule_date <= today
+    )
+
+    return filteredScheduleData
+  }
+
+  const loadDeductionsAndRefunds = async (startDate: string, endDate: string, staffData?: StaffWithAssignments[], scheduleData?: any[], dayStatusMap?: {[key: string]: string}) => {
+    try {
+      const { data, error } = await supabase
+        .from('payroll_deductions_refunds')
+        .select('*')
+        .eq('week_start_date', startDate)
+        .eq('week_end_date', endDate)
+
+      if (error) throw error
+
+      if (data && data.length > 0) {
+        const loadedDeductions: {[staffId: string]: {
+          utilities: number
+          shortages: number
+          cashAdvances: number
+          penalties: number
+          others: number
+        }} = {}
+        const loadedRefunds: {[staffId: string]: number} = {}
+
+        data.forEach(record => {
+          loadedDeductions[record.staff_id] = {
+            utilities: record.utilities || 0,
+            shortages: record.shortages || 0,
+            cashAdvances: record.cash_advances || 0,
+            penalties: record.penalties || 0,
+            others: record.others || 0
+          }
+          loadedRefunds[record.staff_id] = record.refunds || 0
+        })
+
+        // Temporarily store in a variable to pass directly to calculation
+        const tempDeductions = loadedDeductions
+        const tempRefunds = loadedRefunds
+
+        setDeductions(loadedDeductions)
+        setRefunds(loadedRefunds)
+
+        // Recalculate payroll with loaded deductions and refunds
+        if (staffData && scheduleData && dayStatusMap) {
+          // Use setTimeout to ensure state updates are processed
+          setTimeout(async () => {
+            // Override the deductions and refunds for this calculation
+            Object.assign(deductions, tempDeductions)
+            Object.assign(refunds, tempRefunds)
+            
+            const payroll = await calculatePayroll(staffData, scheduleData, dayStatusMap, startDate, endDate)
+            setPayrollData(payroll)
+          }, 100)
+        }
+      } else {
+        // Clear deductions and refunds if no data found
+        setDeductions({})
+        setRefunds({})
+
+        // Recalculate payroll with cleared deductions and refunds
+        if (staffData && scheduleData && dayStatusMap) {
+          setTimeout(async () => {
+            const payroll = await calculatePayroll(staffData, scheduleData, dayStatusMap, startDate, endDate)
+            setPayrollData(payroll)
+          }, 100)
+        }
+      }
+    } catch (error) {
+      console.error('Error loading deductions and refunds:', error)
     }
   }
 
@@ -462,11 +617,14 @@ export function PayrollManager() {
     // Get deductions for this staff member
     const staffDeductions = getDeductionsForStaff(staff.id)
     
+    // Get refunds for this staff member
+    const staffRefunds = refunds[staff.id] || 0
+    
     // Calculate total deductions
     const totalDeductions = Object.values(staffDeductions).reduce((sum, amount) => sum + amount, 0)
     
-    // Calculate net pay
-    const netPay = totalPay - totalDeductions
+    // Calculate net pay (Total Pay - Deductions + Refunds)
+    const netPay = totalPay - totalDeductions + staffRefunds
 
     return {
       staffId: staff.id,
@@ -489,13 +647,17 @@ export function PayrollManager() {
       overtimePay: overtimePay,  // Overtime pay for hours beyond 48 per week
       minimumDailyRate: minimumDailyRate,
       deductions: staffDeductions,
+      refunds: staffRefunds,
       netPay: netPay
     }
   }
 
-  const calculatePayroll = (staffData: StaffWithAssignments[], scheduleData: any[], dayStatusMap: {[key: string]: string}): PayrollSummary => {
+  const calculatePayroll = async (staffData: StaffWithAssignments[], scheduleData: any[], dayStatusMap: {[key: string]: string}, startDate: string, endDate: string): Promise<PayrollSummary> => {
     const weekly: { [week: string]: PayrollData[] } = {}
     const custom: PayrollData[] = []
+
+    // Fetch average weekly sales for all staff
+    const staffSalesMap = await fetchStaffAverageWeeklySales(staffData.map(s => s.id))
 
     // Group schedule data by staff
     const staffGroups: { [staffId: string]: any[] } = {}
@@ -513,6 +675,9 @@ export function PayrollManager() {
       if (!staff) return
 
       const payrollEntry = calculateStaffPayroll(staff, staffSchedules, dayStatusMap)
+      
+      // Add average weekly sales
+      payrollEntry.averageWeeklySales = staffSalesMap[staffId] || 0
 
       custom.push(payrollEntry)
 
@@ -635,6 +800,9 @@ export function PayrollManager() {
       entries = entries.filter(entry => entry.staffId === selectedStaff)
     }
     
+    // Sort by net pay from highest to lowest
+    entries.sort((a, b) => b.netPay - a.netPay)
+    
     return entries
   }
 
@@ -683,9 +851,11 @@ export function PayrollManager() {
       }
     }))
     
-    // Update the actual deduction value
-    const numericValue = parseFloat(value) || 0
-    updateDeduction(staffId, deductionType, numericValue)
+    // Update the actual deduction value (but not for refunds, which is handled separately)
+    if (deductionType !== 'refunds') {
+      const numericValue = parseFloat(value) || 0
+      updateDeduction(staffId, deductionType, numericValue)
+    }
   }
 
   const getInputValue = (staffId: string, deductionType: keyof typeof inputValues[string], currentValue: number) => {
@@ -710,6 +880,109 @@ export function PayrollManager() {
       cashAdvances: staffDeductions.cashAdvances || 0,
       penalties: staffDeductions.penalties || 0,
       others: staffDeductions.others || 0
+    }
+  }
+
+  const saveDeductionsAndRefunds = async () => {
+    if (selectedPeriod !== 'weekly') return
+
+    setSavingDeductions(true)
+    setError('')
+    setSuccess('')
+
+    try {
+      const startDate = getStartDate()
+      const endDate = getEndDate()
+      const weekKey = getWeekKey(new Date(selectedDate))
+
+      // Get all staff entries for this week
+      const weekEntries = payrollData.weekly[weekKey] || []
+      
+      if (weekEntries.length === 0) {
+        setError('No payroll data found for this week')
+        return
+      }
+
+      // Save deductions and refunds for each staff member
+      for (const entry of weekEntries) {
+        const staffDeductions = deductions[entry.staffId]
+        const staffRefunds = refunds[entry.staffId]
+
+        // Check if all values are 0
+        const allValuesZero = (
+          (!staffDeductions?.utilities || staffDeductions.utilities === 0) &&
+          (!staffDeductions?.shortages || staffDeductions.shortages === 0) &&
+          (!staffDeductions?.cashAdvances || staffDeductions.cashAdvances === 0) &&
+          (!staffDeductions?.penalties || staffDeductions.penalties === 0) &&
+          (!staffDeductions?.others || staffDeductions.others === 0) &&
+          (!staffRefunds || staffRefunds === 0)
+        )
+
+        // Check if record already exists
+        const { data: existingRecords } = await supabase
+          .from('payroll_deductions_refunds')
+          .select('id')
+          .eq('staff_id', entry.staffId)
+          .eq('week_start_date', startDate)
+          .eq('week_end_date', endDate)
+        
+        const existingRecord = existingRecords && existingRecords.length > 0 ? existingRecords[0] : null
+
+        if (allValuesZero) {
+          // If all values are 0, delete the record if it exists
+          if (existingRecord) {
+            const { error: deleteError } = await supabase
+              .from('payroll_deductions_refunds')
+              .delete()
+              .eq('id', existingRecord.id)
+
+            if (deleteError) throw deleteError
+          }
+        } else if (staffDeductions || staffRefunds) {
+          // If there are non-zero values, save them
+          const recordData = {
+            staff_id: entry.staffId,
+            week_start_date: startDate,
+            week_end_date: endDate,
+            utilities: staffDeductions?.utilities || 0,
+            shortages: staffDeductions?.shortages || 0,
+            cash_advances: staffDeductions?.cashAdvances || 0,
+            penalties: staffDeductions?.penalties || 0,
+            others: staffDeductions?.others || 0,
+            refunds: staffRefunds || 0,
+            updated_at: new Date().toISOString()
+          }
+
+          if (!existingRecord) {
+            // Record doesn't exist, create new one
+            const { error: insertError } = await supabase
+              .from('payroll_deductions_refunds')
+              .insert(recordData)
+
+            if (insertError) throw insertError
+          } else {
+            // Record exists, update it
+            const { error: updateError } = await supabase
+              .from('payroll_deductions_refunds')
+              .update(recordData)
+              .eq('id', existingRecord.id)
+
+            if (updateError) throw updateError
+          }
+        }
+      }
+
+      // Just reload the deductions/refunds and recalculate, no need to reload everything
+      const currentWeekEntries = payrollData.weekly[weekKey] || []
+      if (currentWeekEntries.length > 0 && staff.length > 0) {
+        const scheduleData = await getScheduleDataForWeek(startDate, endDate)
+        await loadDeductionsAndRefunds(startDate, endDate, staff, scheduleData, dayStatusMap)
+      }
+    } catch (error) {
+      console.error('Error saving deductions and refunds:', error)
+      setError('Failed to save deductions and refunds')
+    } finally {
+      setSavingDeductions(false)
     }
   }
 
@@ -1268,7 +1541,7 @@ export function PayrollManager() {
                 </table>
           
           <div class="deductions">
-            <div class="section-title">Deductions</div>
+            <div class="section-title">Deductions & Refunds</div>
             <div class="deduction-row">
               <span>Utilities</span>
               <span>₱${entry.deductions.utilities.toFixed(2)}</span>
@@ -1290,9 +1563,15 @@ export function PayrollManager() {
               <span>₱${entry.deductions.others.toFixed(2)}</span>
             </div>
             <div class="deduction-row total-deductions">
-              <span>TOTAL DEDUCTIONS</span>
+              <span>DEDUCTIONS</span>
               <span>₱${Object.values(entry.deductions).reduce((sum, amount) => sum + amount, 0).toFixed(2)}</span>
             </div>
+            ${entry.refunds > 0 ? `
+            <div class="deduction-row" style="color: #000; font-weight: 600; margin-top: 8px;">
+              <span>Refunds</span>
+              <span>+₱${entry.refunds.toFixed(2)}</span>
+            </div>
+            ` : ''}
           </div>
           
           <div class="net-pay">
@@ -1337,6 +1616,485 @@ export function PayrollManager() {
               }, 1000)
             }
           }
+  }
+
+  const printAllPayslips = () => {
+    const entries = getPayrollEntries()
+    if (entries.length === 0) return
+
+    const currentDate = new Date()
+    const payslipDate = currentDate.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    })
+    
+    const periodText = getDateRangeText()
+
+    // Generate all payslips
+    const allPayslipsHTML = entries.map((entry, index) => {
+      // Generate days worked section
+      const generateDaysWorked = () => {
+        if (!entry.locationGroups || Object.keys(entry.locationGroups).length === 0) {
+          return '<div class="no-days">No days worked recorded</div>'
+        }
+
+        let daysHTML = ''
+        Object.entries(entry.locationGroups).forEach(([locationName, days]) => {
+          daysHTML += `
+            <div class="location-group">
+              <div class="location-header">${locationName}</div>
+              <div class="days-grid">
+                ${(days as any[]).map(day => {
+                  const dayStatus = getDayStatusForDate(day.scheduleDate)
+                  const statusClass = dayStatus === 'regular-holiday' ? 'holiday' : 
+                                    dayStatus === 'special-holiday' ? 'special' : 'regular'
+                  return `
+                    <div class="day-item ${statusClass}">
+                      <div class="day-date">${day.date}</div>
+                      <div class="day-name">${day.dayName}</div>
+                      <div class="day-hours">${day.hours}h</div>
+                    </div>
+                  `
+                }).join('')}
+              </div>
+            </div>
+          `
+        })
+        return daysHTML
+      }
+
+      return `
+        ${index > 0 ? '<div style="page-break-before: always;"></div>' : ''}
+        <div class="payslip">
+          <div class="header">
+            <div class="company-name">Gilnaks Food Corporation</div>
+            <div class="payslip-title">PAYSLIP</div>
+            <div class="generated-date">Generated on: ${payslipDate}</div>
+          </div>
+          
+          <div class="employee-info">
+            <div class="info-item">
+              <div class="info-label">Employee</div>
+              <div class="info-value">${entry.staffName}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Period</div>
+              <div class="info-value">${periodText}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Rate</div>
+              <div class="info-value">₱${entry.hourlyRate.toFixed(2)}/hr</div>
+            </div>
+          </div>
+          
+          <div class="days-worked">
+            <div class="section-title">Days Worked</div>
+            ${generateDaysWorked()}
+          </div>
+          
+          <div class="section-title">Earnings Breakdown</div>
+          <table class="earnings-table">
+            <thead>
+              <tr>
+                <th>Description</th>
+                <th>Hours</th>
+                <th>Rate</th>
+                <th>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Regular Hours</td>
+                <td>${entry.regularHours.toFixed(1)}</td>
+                <td>₱${entry.hourlyRate.toFixed(2)}</td>
+                <td class="amount">₱${entry.regularPay.toFixed(2)}</td>
+              </tr>
+              ${entry.doublePay > 0 ? `
+              <tr>
+                <td>Regular Holiday (x2)</td>
+                <td>${entry.doublePayHours.toFixed(1)}</td>
+                <td>₱${(entry.hourlyRate * 2).toFixed(2)}</td>
+                <td class="amount">₱${entry.doublePay.toFixed(2)}</td>
+              </tr>
+              ` : ''}
+              ${entry.specialPay > 0 ? `
+              <tr>
+                <td>Special Holiday (1.3x)</td>
+                <td>${entry.specialPayHours.toFixed(1)}</td>
+                <td>₱${(entry.hourlyRate * 1.3).toFixed(2)}</td>
+                <td class="amount">₱${entry.specialPay.toFixed(2)}</td>
+              </tr>
+              ` : ''}
+              ${entry.overtimePay > 0 ? `
+              <tr>
+                <td>Overtime (after 48 hrs)</td>
+                <td>${entry.overtimeHours.toFixed(1)}</td>
+                <td>₱${(entry.hourlyRate * 1.25).toFixed(2)}</td>
+                <td class="amount">₱${entry.overtimePay.toFixed(2)}</td>
+              </tr>
+              ` : ''}
+              <tr style="border-top: 2px solid #000; font-weight: 700;">
+                <td>TOTAL PAY</td>
+                <td></td>
+                <td></td>
+                <td class="amount">₱${entry.totalPay.toFixed(2)}</td>
+              </tr>
+            </tbody>
+          </table>
+          
+          <div class="deductions">
+            <div class="section-title">Deductions & Refunds</div>
+            <div class="deduction-row">
+              <span>Utilities</span>
+              <span>₱${entry.deductions.utilities.toFixed(2)}</span>
+            </div>
+            <div class="deduction-row">
+              <span>Shortages</span>
+              <span>₱${entry.deductions.shortages.toFixed(2)}</span>
+            </div>
+            <div class="deduction-row">
+              <span>Cash Advances</span>
+              <span>₱${entry.deductions.cashAdvances.toFixed(2)}</span>
+            </div>
+            <div class="deduction-row">
+              <span>Penalties</span>
+              <span>₱${entry.deductions.penalties.toFixed(2)}</span>
+            </div>
+            <div class="deduction-row">
+              <span>Others</span>
+              <span>₱${entry.deductions.others.toFixed(2)}</span>
+            </div>
+            <div class="deduction-row total-deductions">
+              <span>DEDUCTIONS</span>
+              <span>₱${(Object.values(entry.deductions).reduce((sum: number, amount: any) => sum + (amount || 0), 0) as number).toFixed(2)}</span>
+            </div>
+            ${entry.refunds > 0 ? `
+            <div class="deduction-row" style="color: #000; font-weight: 600; margin-top: 8px;">
+              <span>Refunds</span>
+              <span>+₱${entry.refunds.toFixed(2)}</span>
+            </div>
+            ` : ''}
+          </div>
+          
+          <div class="net-pay">
+            <div class="net-pay-label">NET PAY</div>
+            <div class="net-pay-amount">₱${entry.netPay.toFixed(2)}</div>
+          </div>
+          
+          <div class="footer">
+            <p>This payslip is computer generated and does not require a signature.</p>
+            <p>For inquiries, please contact the HR department.</p>
+          </div>
+        </div>
+      `
+    }).join('')
+
+    const fullHTML = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>All Payslips</title>
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+          }
+          
+          body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f8fafc;
+            color: #1e293b;
+            line-height: 1.6;
+          }
+          
+          .payslip {
+            width: 7.5in;
+            margin: 0 auto;
+            background: white;
+            padding: 0.15in;
+            font-size: 12px;
+            line-height: 1.3;
+          }
+          
+          .header {
+            text-align: center;
+            margin-bottom: 10px;
+          }
+          
+          .company-name {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 3px;
+            color: #000;
+          }
+          
+          .payslip-title {
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 3px;
+            color: #000;
+          }
+          
+          .generated-date {
+            font-size: 11px;
+            color: #000;
+          }
+          
+          .employee-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 12px;
+          }
+          
+          .info-item {
+            text-align: center;
+          }
+          
+          .info-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: #000;
+            text-transform: uppercase;
+            margin-bottom: 2px;
+          }
+          
+          .info-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: #000;
+          }
+          
+          .section-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #000;
+            margin: 10px 0 6px 0;
+          }
+          
+          .days-worked {
+            margin-bottom: 12px;
+          }
+          
+          .location-group {
+            margin-bottom: 8px;
+            display: inline-block;
+            margin-right: 20px;
+            vertical-align: top;
+          }
+          
+          .location-header {
+            font-size: 13px;
+            font-weight: 600;
+            color: #000;
+            margin-bottom: 6px;
+            padding: 4px 0;
+            background: #f0f0f0;
+            text-align: center;
+          }
+          
+          .days-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(55px, 1fr));
+            gap: 5px;
+            max-width: 200px;
+            justify-content: center;
+          }
+          
+          .day-item {
+            padding: 5px;
+            text-align: center;
+            font-size: 12px;
+            background: white;
+            color: #000;
+            border: 1px solid #ddd;
+          }
+          
+          .day-item.regular {
+            background: white;
+            color: #000;
+          }
+          
+          .day-item.holiday {
+            background: #f0f0f0;
+            color: #000;
+          }
+          
+          .day-item.special {
+            background: #e0e0e0;
+            color: #000;
+          }
+          
+          .day-date {
+            font-weight: 600;
+            font-size: 11px;
+            margin-bottom: 3px;
+          }
+          
+          .day-name {
+            font-size: 10px;
+            opacity: 0.8;
+            margin-bottom: 3px;
+          }
+          
+          .day-hours {
+            font-weight: 600;
+            font-size: 11px;
+          }
+          
+          .no-days {
+            text-align: center;
+            color: #000;
+            font-style: italic;
+            padding: 10px;
+            font-size: 11px;
+          }
+          
+          .earnings-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 10px;
+            font-size: 15px;
+          }
+          
+          .earnings-table th {
+            background: #f0f0f0;
+            padding: 10px 14px;
+            text-align: left;
+            font-size: 14px;
+            font-weight: 600;
+            color: #000;
+            text-transform: uppercase;
+            border-bottom: 1px solid #000;
+          }
+          
+          .earnings-table th:last-child {
+            text-align: right;
+          }
+          
+          .earnings-table td {
+            padding: 10px 14px;
+            font-size: 15px;
+            color: #000;
+            border-bottom: 1px solid #eee;
+          }
+          
+          .earnings-table .amount {
+            text-align: right;
+            font-weight: 600;
+            color: #000;
+          }
+          
+          .deductions {
+            margin-bottom: 10px;
+          }
+          
+          .deduction-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            font-size: 13px;
+            color: #000;
+          }
+          
+          .total-deductions {
+            font-weight: 700;
+            color: #000;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #000;
+          }
+          
+          .net-pay {
+            padding: 10px;
+            text-align: center;
+            background: #f0f0f0;
+            border: 1px solid #000;
+          }
+          
+          .net-pay-label {
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: #000;
+          }
+          
+          .net-pay-amount {
+            font-size: 18px;
+            font-weight: 700;
+            color: #000;
+          }
+          
+          .footer {
+            text-align: center;
+            font-size: 10px;
+            color: #000;
+            margin-top: 10px;
+            padding-top: 6px;
+            border-top: 1px solid #000;
+          }
+          
+          .footer p {
+            margin-bottom: 3px;
+          }
+          
+          @media print {
+            body {
+              background: white;
+              margin: 0;
+              padding: 0;
+            }
+            .payslip {
+              box-shadow: none;
+              margin: 0;
+              border: none;
+              padding: 0.15in;
+              width: 7.5in;
+            }
+            @page {
+              margin: 0.5in;
+              size: letter;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        ${allPayslipsHTML}
+      </body>
+      </html>
+    `
+
+    // Create hidden iframe for printing
+    const iframe = document.createElement('iframe')
+    iframe.style.position = 'absolute'
+    iframe.style.left = '-9999px'
+    iframe.style.top = '-9999px'
+    iframe.style.width = '0'
+    iframe.style.height = '0'
+    iframe.style.border = 'none'
+    
+    document.body.appendChild(iframe)
+    
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document
+    if (iframeDoc) {
+      iframeDoc.open()
+      iframeDoc.write(fullHTML)
+      iframeDoc.close()
+      
+      // Wait for content to load, then print
+      iframe.onload = () => {
+        iframe.contentWindow?.focus()
+        iframe.contentWindow?.print()
+        
+        // Clean up iframe after printing
+        setTimeout(() => {
+          document.body.removeChild(iframe)
+        }, 1000)
+      }
+    }
   }
 
   if (loading) {
@@ -1598,6 +2356,7 @@ export function PayrollManager() {
               ))}
             </select>
           </div>
+
         </div>
       </div>
 
@@ -1667,9 +2426,34 @@ export function PayrollManager() {
              <h3 className="text-lg font-medium text-gray-900">
                {selectedPeriod.charAt(0).toUpperCase() + selectedPeriod.slice(1)} Payroll Details
              </h3>
-             <div className="flex items-center space-x-2 text-sm text-gray-600">
-               <Printer className="h-4 w-4" />
-               <span>Click row to print payslip</span>
+             <div className="flex items-center space-x-4">
+               {/* Save Deductions & Refunds Button - Only show for weekly period */}
+               {selectedPeriod === 'weekly' && (
+                 <button
+                   onClick={saveDeductionsAndRefunds}
+                   disabled={savingDeductions}
+                   className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                 >
+                   {savingDeductions ? (
+                     <>
+                       <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                       <span>Saving...</span>
+                     </>
+                   ) : (
+                     <>
+                       <Save className="h-4 w-4" />
+                       <span>Save Deductions & Refunds</span>
+                     </>
+                   )}
+                 </button>
+               )}
+               <button
+                 onClick={printAllPayslips}
+                 className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+               >
+                 <Printer className="h-4 w-4" />
+                 <span>Print All</span>
+               </button>
              </div>
            </div>
          </div>
@@ -1697,9 +2481,9 @@ export function PayrollManager() {
                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                      Pay Breakdown
                    </th>
-                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                     Deductions
-                   </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Deductions & Refunds
+                  </th>
                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                      Net Pay
                    </th>
@@ -1716,6 +2500,11 @@ export function PayrollManager() {
                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                        <div className="font-medium text-gray-900">{entry.staffName}</div>
                        <div className="text-xs text-gray-600 font-medium">₱{entry.hourlyRate.toFixed(2)}/hr</div>
+                       {entry.averageWeeklySales !== undefined && entry.averageWeeklySales > 0 && (
+                         <div className="text-xs text-blue-600 font-medium mt-0.5">
+                           Avg Weekly Sales: ₱{entry.averageWeeklySales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                         </div>
+                       )}
                      </td>
                      <td className="px-6 py-4 text-sm text-gray-900">
                        <div className="space-y-3">
@@ -1724,7 +2513,7 @@ export function PayrollManager() {
                              <div className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
                                {locationName} - {(days as any[])[0]?.brandName || 'Unknown Brand'}
                              </div>
-                             <div className="grid grid-cols-4 gap-2 max-w-xs">
+                              <div className="grid grid-cols-3 gap-2 max-w-md">
                                {(days as any[]).map((day, dayIndex) => {
                                  const dayStatus = getDayStatusForDate(day.scheduleDate)
                                  const colorClasses = day.isAbsent 
@@ -1874,12 +2663,33 @@ export function PayrollManager() {
                              onBlur={(e) => e.stopPropagation()}
                            />
                          </div>
-                         <div className="flex justify-between border-t pt-1">
-                           <span className="text-gray-600 font-medium text-xs">Total:</span>
-                           <span className="font-bold text-red-600 text-xs">{formatCurrency(Number(Object.values(entry.deductions).reduce((sum: number, amount: any) => sum + (amount || 0), 0)))}</span>
-                         </div>
-                       </div>
-                     </td>
+                        <div className="flex justify-between border-t pt-1">
+                          <span className="text-gray-600 font-medium text-xs">Deductions:</span>
+                          <span className="font-bold text-red-600 text-xs">{formatCurrency(Number(Object.values(entry.deductions).reduce((sum: number, amount: any) => sum + (amount || 0), 0)))}</span>
+                        </div>
+                        <div className="flex justify-between items-center mt-2">
+                          <span className="text-gray-600 text-xs">Refunds:</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={getInputValue(entry.staffId, 'refunds', entry.refunds)}
+                            onChange={(e) => {
+                              const value = parseFloat(e.target.value) || 0
+                              setRefunds(prev => ({
+                                ...prev,
+                                [entry.staffId]: value
+                              }))
+                              updateInputValue(entry.staffId, 'refunds', e.target.value)
+                            }}
+                            className="w-12 text-xs border border-gray-300 rounded px-1 py-1 text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            onClick={(e) => e.stopPropagation()}
+                            onFocus={(e) => e.stopPropagation()}
+                            onBlur={(e) => e.stopPropagation()}
+                          />
+                        </div>
+                      </div>
+                    </td>
                      <td className="px-6 py-4 text-sm text-gray-900">
                        <div className="text-right">
                          <span className="text-lg font-bold text-blue-600">{formatCurrency(entry.netPay)}</span>
@@ -1896,6 +2706,12 @@ export function PayrollManager() {
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-md p-4">
           <p className="text-red-800">{error}</p>
+        </div>
+      )}
+
+      {success && (
+        <div className="bg-green-50 border border-green-200 rounded-md p-4">
+          <p className="text-green-800">{success}</p>
         </div>
       )}
     </div>

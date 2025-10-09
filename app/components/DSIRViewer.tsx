@@ -59,6 +59,7 @@ interface MaterialsInventoryItem {
   material_name: string
   beginning: number
   arrival: number
+  pull_out: number
   ending: number
   used: number
   price: number
@@ -547,20 +548,32 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
 
       const { data, error } = await supabase
         .from('dsir_predefined_items')
-        .select('category, name, price')
+        .select('category, name, price, show_in_local, show_in_remote')
         .eq('brand_id', (report?.location as any)?.brand_id)
         .eq('is_active', true)
 
       if (error) throw error
 
+      // Determine if this is a remote location
+      const isRemoteLocation = (report?.location as any)?.is_remote || false
+      
+      // Filter items based on location type (local vs remote)
+      const filterByLocation = (item: any) => {
+        if (isRemoteLocation) {
+          return item.show_in_remote !== false // Show if explicitly enabled or null (default true)
+        } else {
+          return item.show_in_local !== false // Show if explicitly enabled or null (default true)
+        }
+      }
+
       // Group items by category and sort them
-      const sales = (data?.filter(item => item.category === 'sales') || [])
+      const sales = (data?.filter(item => item.category === 'sales' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
-      const iceCream = (data?.filter(item => item.category === 'ice_cream') || [])
+      const iceCream = (data?.filter(item => item.category === 'ice_cream' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
-      const materials = (data?.filter(item => item.category === 'materials') || [])
+      const materials = (data?.filter(item => item.category === 'materials' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
-      const denominations = (data?.filter(item => item.category === 'denominations') || [])
+      const denominations = (data?.filter(item => item.category === 'denominations' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
 
       setPredefinedSalesItems(sales)
@@ -1933,6 +1946,21 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
           }
         }
         
+        // Always recalculate ending value when any of the components change
+        if (item.updates.beginning !== undefined || item.updates.arrival !== undefined || item.updates.pull_out !== undefined) {
+          // Get existing values from database or use updated values
+          const existingItem = materialsInventory.find(i => 
+            i.id === item.itemId || 
+            (item.itemId.startsWith('new-') && i.material_name === predefinedMaterials[parseInt(item.itemId.replace('new-', ''))]?.name)
+          )
+          
+          const beginning = item.updates.beginning !== undefined ? item.updates.beginning : (existingItem?.beginning || 0)
+          const arrival = item.updates.arrival !== undefined ? item.updates.arrival : (existingItem?.arrival || 0)
+          const pullOut = item.updates.pull_out !== undefined ? item.updates.pull_out : (existingItem?.pull_out || 0)
+          
+          item.updates.ending = beginning + arrival - pullOut
+        }
+        
         if (item.itemId.startsWith('new-')) {
           // Insert new item - extract index from itemId (e.g., "new-0" -> 0)
           const itemIndex = parseInt(item.itemId.replace('new-', ''))
@@ -2785,7 +2813,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               const calculatedEnd = beg + arrival - pullOut
                               // Show 0 or positive values, hide only if all inputs are empty/0
                               if (beg === 0 && arrival === 0 && pullOut === 0) return ''
-                              return calculatedEnd
+                              return <span className={calculatedEnd < 0 ? 'text-red-600' : ''}>{calculatedEnd}</span>
                             })()}
                               </div>
                         </td>
@@ -2818,8 +2846,9 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                     {showDiscrepancyColumns && (
                       <th className="border-r border-black px-1 py-1 text-center font-semibold w-8">DIFF</th>
                     )}
-                    <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">ARRIVAL</th>
-                    <th className="px-1 py-1 text-center font-semibold w-10">END</th>
+                    <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">(+)</th>
+                    <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">(-)</th>
+                    <th className="px-1 py-1 text-center font-semibold w-10 bg-gray-200">END</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2921,8 +2950,8 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               </div>
                           )}
                         </td>
-                        <td className="px-1 py-1 text-center w-10">
-                          {editingField === `materials-${itemId}-ending` ? (
+                        <td className="border-r border-black px-1 py-1 text-center w-10">
+                          {editingField === `materials-${itemId}-pull_out` ? (
                             <input
                               type="number"
                               min="0"
@@ -2931,8 +2960,8 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                                 const value = Math.max(0, parseInt(e.target.value) || 0)
                                 setEditingValue(value.toString())
                               }}
-                              onBlur={() => handleBlur(`materials-${itemId}-ending`)}
-                              onKeyPress={(e) => e.key === 'Enter' && saveEditing(`materials-${itemId}-ending`)}
+                              onBlur={() => handleBlur(`materials-${itemId}-pull_out`)}
+                              onKeyPress={(e) => e.key === 'Enter' && saveEditing(`materials-${itemId}-pull_out`)}
                               className="w-full h-6 text-center bg-transparent focus:outline-none border-0 p-0 m-0 text-xs [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                               style={{
                                 minWidth: 0, 
@@ -2949,14 +2978,27 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               <div 
                                 className={getCellClassName()}
                                 onClick={(e) => {
-                                  const currentValue = getItemValueForEditing(materialsInventory, materialObj.name, 'ending')
-                                  handleCellClick(e, `materials-${itemId}-ending`, currentValue || '')
+                                  const currentValue = getItemValueForEditing(materialsInventory, materialObj.name, 'pull_out')
+                                  handleCellClick(e, `materials-${itemId}-pull_out`, currentValue || '')
                                 }}
                                 style={{minHeight: '24px'}}
                               >
-                                {getDisplayValue(`materials-${itemId}-ending`, getItemValue(materialsInventory, materialObj.name, 'ending'))}
+                                {getDisplayValue(`materials-${itemId}-pull_out`, getItemValue(materialsInventory, materialObj.name, 'pull_out'))}
                               </div>
                           )}
+                        </td>
+                        <td className="px-1 py-1 text-center w-10 bg-gray-200">
+                          <div className="text-center font-medium">
+                            {(() => {
+                              const beg = parseInt(getDisplayValue(`materials-${itemId}-beginning`, getItemValue(materialsInventory, materialObj.name, 'beginning')) || '0') || 0
+                              const arrival = parseInt(getDisplayValue(`materials-${itemId}-arrival`, getItemValue(materialsInventory, materialObj.name, 'arrival')) || '0') || 0
+                              const pullOut = parseInt(getDisplayValue(`materials-${itemId}-pull_out`, getItemValue(materialsInventory, materialObj.name, 'pull_out')) || '0') || 0
+                              const calculatedEnd = beg + arrival - pullOut
+                              // Show 0 or positive/negative values, hide only if all inputs are empty/0
+                              if (beg === 0 && arrival === 0 && pullOut === 0) return ''
+                              return <span className={calculatedEnd < 0 ? 'text-red-600' : ''}>{calculatedEnd}</span>
+                            })()}
+                          </div>
                         </td>
                     </tr>
                     )

@@ -1262,15 +1262,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       if (currentStatus !== originalStatus) return true
     }
     
-    // Check for absence changes
+    // Check for absence changes - any change in absentStaff state indicates a change
     const currentAbsenceLocations = Object.keys(absentStaff)
-    for (const locationId of currentAbsenceLocations) {
-      const locationAbsences = absentStaff[locationId] || {}
-      for (const dayKey of Object.keys(locationAbsences)) {
-        const dayAbsences = locationAbsences[dayKey] || {}
-        for (const staffId of Object.keys(dayAbsences)) {
-          // If there's any absence marked, consider it a change
-          if (dayAbsences[staffId] === true) return true
+    if (currentAbsenceLocations.length > 0) {
+      for (const locationId of currentAbsenceLocations) {
+        const locationAbsences = absentStaff[locationId] || {}
+        for (const dayKey of Object.keys(locationAbsences)) {
+          const dayAbsences = locationAbsences[dayKey] || {}
+          // If there are any absence entries (true or false), consider it a change
+          if (Object.keys(dayAbsences).length > 0) return true
         }
       }
     }

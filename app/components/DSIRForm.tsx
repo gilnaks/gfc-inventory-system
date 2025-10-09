@@ -36,6 +36,7 @@ interface DSIRReport {
     franchisee?: string
     contact_number?: string
     company_owned?: boolean
+    is_remote?: boolean
   }
 }
 
@@ -157,21 +158,33 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
 
       const { data, error } = await supabase
         .from('dsir_predefined_items')
-        .select('category, name, price')
+        .select('category, name, price, show_in_local, show_in_remote')
         .eq('brand_id', report.location.brand_id)
         .eq('is_active', true)
         .order('name')
 
       if (error) throw error
 
+      // Determine if this is a remote location
+      const isRemoteLocation = report.location?.is_remote || false
+      
+      // Filter items based on location type (local vs remote)
+      const filterByLocation = (item: any) => {
+        if (isRemoteLocation) {
+          return item.show_in_remote !== false // Show if explicitly enabled or null (default true)
+        } else {
+          return item.show_in_local !== false // Show if explicitly enabled or null (default true)
+        }
+      }
+
       // Group items by category
-      const sales = data?.filter(item => item.category === 'sales').map(item => ({
+      const sales = data?.filter(item => item.category === 'sales' && filterByLocation(item)).map(item => ({
         name: item.name,
         price: item.price || 0
       })) || []
-      const iceCream = data?.filter(item => item.category === 'ice_cream').map(item => item.name) || []
-      const materials = data?.filter(item => item.category === 'materials').map(item => item.name) || []
-      const denominations = data?.filter(item => item.category === 'denominations').map(item => ({
+      const iceCream = data?.filter(item => item.category === 'ice_cream' && filterByLocation(item)).map(item => item.name) || []
+      const materials = data?.filter(item => item.category === 'materials' && filterByLocation(item)).map(item => item.name) || []
+      const denominations = data?.filter(item => item.category === 'denominations' && filterByLocation(item)).map(item => ({
         name: item.name,
         value: ['1,000', '500', '200', '100', '50', '20'].includes(item.name) 
           ? parseInt(item.name.replace(',', '')) 

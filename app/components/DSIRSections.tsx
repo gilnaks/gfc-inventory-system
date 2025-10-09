@@ -483,7 +483,7 @@ export function IceCreamInventorySection({
                     type="number"
                     value={item.ending}
                     onChange={(e) => updateItem(index, 'ending', parseInt(e.target.value) || 0)}
-                    className="w-full px-2 py-1 border border-gray-300 rounded text-sm bg-gray-50"
+                    className={`w-full px-2 py-1 border border-gray-300 rounded text-sm bg-gray-50 ${item.ending < 0 ? 'text-red-600' : ''}`}
                   />
                 </td>
                 <td className="px-3 py-2">
@@ -539,6 +539,7 @@ export function MaterialsInventorySection({
       item_name: '',
       beginning: 0,
       arrival: 0,
+      pull_out: 0,
       ending: 0
     }
     onItemsChange([...items, newItem])
@@ -548,11 +549,12 @@ export function MaterialsInventorySection({
     const updatedItems = [...items]
     updatedItems[index] = { ...updatedItems[index], [field]: value }
     
-    // Calculate ending inventory
-    if (field === 'beginning' || field === 'arrival') {
+    // Auto-calculate ending when beginning, arrival, or pull_out changes
+    if (field === 'beginning' || field === 'arrival' || field === 'pull_out') {
       const beg = updatedItems[index].beginning || 0
       const arrival = updatedItems[index].arrival || 0
-      updatedItems[index].ending = beg + arrival
+      const pullOut = updatedItems[index].pull_out || 0
+      updatedItems[index].ending = beg + arrival - pullOut
     }
 
     onItemsChange(updatedItems)
@@ -575,6 +577,7 @@ export function MaterialsInventorySection({
             item_name: item.item_name,
             beginning: item.beginning,
             arrival: item.arrival,
+            pull_out: item.pull_out,
             ending: item.ending
           })
           .eq('id', item.id)
@@ -588,6 +591,7 @@ export function MaterialsInventorySection({
             item_name: item.item_name,
             beginning: item.beginning,
             arrival: item.arrival,
+            pull_out: item.pull_out,
             ending: item.ending
           })
           .select()
@@ -616,8 +620,9 @@ export function MaterialsInventorySection({
             <tr>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ITEM</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">BEG</th>
-              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ARRIVAL</th>
-              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">END</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">(+)</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">(-)</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-100">END</th>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
             </tr>
           </thead>
@@ -657,10 +662,15 @@ export function MaterialsInventorySection({
                 <td className="px-3 py-2">
                   <input
                     type="number"
-                    value={item.ending}
-                    onChange={(e) => updateItem(index, 'ending', parseInt(e.target.value) || 0)}
+                    value={item.pull_out || 0}
+                    onChange={(e) => updateItem(index, 'pull_out', parseInt(e.target.value) || 0)}
                     className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
                   />
+                </td>
+                <td className="px-3 py-2">
+                  <div className={`px-2 py-1 bg-gray-50 rounded text-sm font-medium text-center ${(item.ending || 0) < 0 ? 'text-red-600' : ''}`}>
+                    {item.ending || 0}
+                  </div>
                 </td>
                 <td className="px-3 py-2">
                   <div className="flex space-x-1">
