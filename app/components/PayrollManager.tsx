@@ -368,13 +368,16 @@ export function PayrollManager() {
         salesByStaff4Week[report.staff_registration_id].push(report.gross_sales || 0)
       })
       
-      // Group by staff for monthly average
-      const salesByStaffMonthly: {[staffId: string]: number[]} = {}
+      // Group by staff for monthly average (with actual days worked)
+      const salesByStaffMonthly: {[staffId: string]: Array<{date: string, sales: number}>} = {}
       dsirReportsMonthly?.forEach(report => {
         if (!salesByStaffMonthly[report.staff_registration_id]) {
           salesByStaffMonthly[report.staff_registration_id] = []
         }
-        salesByStaffMonthly[report.staff_registration_id].push(report.gross_sales || 0)
+        salesByStaffMonthly[report.staff_registration_id].push({
+          date: report.report_date,
+          sales: report.gross_sales || 0
+        })
       })
       
       // Calculate averages for each staff
@@ -390,12 +393,13 @@ export function PayrollManager() {
         }
       })
       
-      // Calculate monthly average from the last 4 weeks of data
-      Object.entries(salesByStaff4Week).forEach(([staffId, salesData]) => {
-        if (salesData.length > 0) {
-          const totalSales = salesData.reduce((sum, sale) => sum + sale, 0)
-          // Monthly average = total sales divided by actual number of days worked in the month
-          averageMonthlySalesMap[staffId] = totalSales / salesData.length
+      // Calculate monthly average from the last 4 weeks of data (based on actual days worked)
+      Object.entries(salesByStaffMonthly).forEach(([staffId, dailySales]) => {
+        if (dailySales.length > 0) {
+          const totalSales = dailySales.reduce((sum, day) => sum + day.sales, 0)
+          const daysWorked = dailySales.length
+          // Monthly average = total sales divided by number of days worked
+          averageMonthlySalesMap[staffId] = totalSales / daysWorked
         }
       })
       
@@ -1137,15 +1141,20 @@ export function PayrollManager() {
       return false
     }
     
+    // Normalize the date being checked (ignore time)
+    const dateOnly = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+    
     const startOfWeek = new Date(selectedDate)
     const dayOfWeek = selectedDate.getDay()
     const diff = -dayOfWeek // Sunday as start (0 = Sunday)
     startOfWeek.setDate(selectedDate.getDate() + diff)
+    // Normalize start of week to midnight
+    startOfWeek.setHours(0, 0, 0, 0)
     
     const endOfWeek = new Date(startOfWeek)
     endOfWeek.setDate(startOfWeek.getDate() + 6) // Saturday as end
     
-    return date >= startOfWeek && date <= endOfWeek
+    return dateOnly >= startOfWeek && dateOnly <= endOfWeek
   }
 
   // Check if a date is selected
@@ -2574,7 +2583,9 @@ export function PayrollManager() {
                         <div className="mt-1 text-xs">
                           <div className="text-gray-500 font-semibold mb-0.5">Daily Sales (This Week):</div>
                           <div className="space-y-0.5 max-h-20 overflow-y-auto">
-                            {entry.dailySalesBreakdown.map((daySale, idx) => (
+                            {entry.dailySalesBreakdown
+                              .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+                              .map((daySale, idx) => (
                               <div key={idx} className="flex justify-between text-gray-600">
                                 <span>{new Date(daySale.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}:</span>
                                 <span className="font-medium">₱{daySale.sales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>

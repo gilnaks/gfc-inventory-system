@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
 import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X } from 'lucide-react'
@@ -83,10 +83,12 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [monthlySummaryByLocation, setMonthlySummaryByLocation] = useState<{
     [locationId: string]: {
       locationName: string
+      totalGrossSales: number
+      totalDiscounts: number
+      totalExpenses: number
       netSales: number
-      totalReceivedPans: number
-      totalUsedPans: number
       currentStockPans: number
+      reportCount: number
     }
   }>({})
 
@@ -130,10 +132,12 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       // Group by location and find latest report for each location
       const summaryByLocation: {[locationId: string]: {
         locationName: string
+        totalGrossSales: number
+        totalDiscounts: number
+        totalExpenses: number
         netSales: number
-        totalReceivedPans: number
-        totalUsedPans: number
         currentStockPans: number
+        reportCount: number
         latestReportDate: string
       }} = {}
       
@@ -144,10 +148,12 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         if (!summaryByLocation[locationId]) {
           summaryByLocation[locationId] = {
             locationName: locationName,
+            totalGrossSales: 0,
+            totalDiscounts: 0,
+            totalExpenses: 0,
             netSales: 0,
-            totalReceivedPans: 0,
-            totalUsedPans: 0,
             currentStockPans: 0,
+            reportCount: 0,
             latestReportDate: report.report_date
           }
         }
@@ -157,21 +163,12 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           summaryByLocation[locationId].latestReportDate = report.report_date
         }
         
-        // Add net sales
+        // Add sales data and increment report count
+        summaryByLocation[locationId].totalGrossSales += report.gross_sales || 0
+        summaryByLocation[locationId].totalDiscounts += report.total_discounts || 0
+        summaryByLocation[locationId].totalExpenses += report.total_expenses || 0
         summaryByLocation[locationId].netSales += report.net_sales || 0
-        
-        // Fetch ice cream inventory to get received pans (arrival) and used pans (pull_out)
-        const { data: iceCreamInventory } = await supabase
-          .from('dsir_ice_cream_inventory')
-          .select('arrival, pull_out')
-          .eq('dsir_report_id', report.id)
-        
-        if (iceCreamInventory) {
-          iceCreamInventory.forEach(item => {
-            summaryByLocation[locationId].totalReceivedPans += item.arrival || 0
-            summaryByLocation[locationId].totalUsedPans += item.pull_out || 0
-          })
-        }
+        summaryByLocation[locationId].reportCount += 1
       }
       
       // Fetch current stock pans from the latest report for each location
@@ -624,6 +621,29 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     return dateB.getTime() - dateA.getTime() // Most recent first
   })
 
+  // Group reports by date
+  const groupedReports = filteredReports.reduce((groups, report) => {
+    const date = report.report_date
+    if (!groups[date]) {
+      groups[date] = []
+    }
+    groups[date].push(report)
+    return groups
+  }, {} as { [date: string]: DSIRReport[] })
+
+  // Sort dates in descending order
+  const sortedDates = Object.keys(groupedReports).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())
+
+  const formatDateTime = (dateString: string) => {
+    return new Date(dateString).toLocaleString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
   if (selectedReport) {
     return (
       <div className="space-y-4 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -714,25 +734,40 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             .sort(([, a], [, b]) => b.netSales - a.netSales)
             .map(([locationId, summary]) => (
             <div key={locationId} className="bg-gray-50 border border-gray-200 rounded-lg p-3">
-              <div className="text-xs font-semibold text-gray-700 mb-2 truncate">{summary.locationName}</div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-semibold text-gray-700 truncate">{summary.locationName}</div>
+                <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full font-medium">
+                  {summary.reportCount} report{summary.reportCount !== 1 ? 's' : ''}
+                </span>
+              </div>
               <div className="space-y-1">
                 <div className="flex justify-between items-center">
-                  <span className="text-xs text-gray-600">Net Sales:</span>
-                  <span className="text-sm font-semibold text-green-600">
-                    ₱{summary.netSales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  <span className="text-xs text-gray-600">Total Gross Sales:</span>
+                  <span className="text-sm font-semibold text-blue-600">
+                    ₱{summary.totalGrossSales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-xs text-gray-600">Total Received Pans:</span>
-                  <span className="text-sm font-semibold text-blue-600">{summary.totalReceivedPans.toLocaleString()}</span>
+                  <span className="text-xs text-gray-600">Total Discounts:</span>
+                  <span className="text-sm font-semibold text-orange-600">
+                    ₱{summary.totalDiscounts.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-xs text-gray-600">Total Used Pans:</span>
-                  <span className="text-sm font-semibold text-orange-600">{summary.totalUsedPans.toLocaleString()}</span>
+                  <span className="text-xs text-gray-600">Total Expenses:</span>
+                  <span className="text-sm font-semibold text-red-600">
+                    ₱{summary.totalExpenses.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-xs text-gray-600">Current Stock Pans:</span>
                   <span className="text-sm font-semibold text-gray-700">{summary.currentStockPans.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between items-center border-t border-gray-300 pt-1">
+                  <span className="text-xs text-gray-600 font-semibold">Net Sales:</span>
+                  <span className="text-sm font-bold text-green-600">
+                    ₱{summary.netSales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </span>
                 </div>
               </div>
             </div>
@@ -866,55 +901,167 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Discrepancy
                     </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Last Updated
+                    </th>
                     <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {filteredReports.map((report) => (
-                    <tr key={report.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        <div className="flex items-center">
-                          {formatDate(report.report_date)}
-                          {inventoryDifferences[report.id] && (
-                            <div className="ml-2 w-2 h-2 bg-red-500 rounded-full" title="Inventory differences detected"></div>
-                          )}
+                  {sortedDates.map((date) => (
+                    <React.Fragment key={date}>
+                      {/* Date Group Header */}
+                      <tr className="bg-gray-100">
+                        <td colSpan={8} className="px-6 py-3 text-sm font-semibold text-gray-700">
+                          {formatDate(date)} ({groupedReports[date].length} report{groupedReports[date].length !== 1 ? 's' : ''})
+                        </td>
+                      </tr>
+                      {/* Reports for this date */}
+                      {groupedReports[date].map((report) => (
+                        <tr key={report.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            <div className="flex items-center">
+                              {inventoryDifferences[report.id] && (
+                                <div className="mr-2 w-2 h-2 bg-red-500 rounded-full" title="Inventory differences detected"></div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {report.location?.name || 'Unknown Location'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {report.staff_name || 'Unknown Staff'}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.status)}`}>
+                              {report.status.toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {formatNetSales(report)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm">
+                            <span className={formatDiscrepancy(report).color}>
+                              {formatDiscrepancy(report).text}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            {formatDateTime(report.updated_at)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                            <div className="flex items-center justify-end space-x-2">
+                              <button
+                                onClick={() => setSelectedReport(report)}
+                                className="text-blue-600 hover:text-blue-900"
+                                title="View Report"
+                              >
+                                <Eye className="h-4 w-4" />
+                              </button>
+                              {(report.status === 'submitted' || report.status === 'reviewed') && (
+                                <button
+                                  onClick={() => revertToDraft(report.id)}
+                                  disabled={reverting === report.id}
+                                  className="text-orange-600 hover:text-orange-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title={reverting === report.id ? 'Reverting...' : 'Revert to Draft'}
+                                >
+                                  <RotateCcw className="h-4 w-4" />
+                                </button>
+                              )}
+                              <button
+                                onClick={() => deleteReport(report.id)}
+                                disabled={deleting === report.id}
+                                className="text-red-600 hover:text-red-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                                title={deleting === report.id ? 'Deleting...' : 'Delete Report'}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Mobile Card View */}
+          <div className="lg:hidden space-y-4">
+            {sortedDates.map((date) => (
+              <div key={date} className="space-y-3">
+                {/* Date Group Header */}
+                <div className="bg-gray-100 rounded-lg p-3">
+                  <h3 className="text-sm font-semibold text-gray-700">
+                    {formatDate(date)} ({groupedReports[date].length} report{groupedReports[date].length !== 1 ? 's' : ''})
+                  </h3>
+                </div>
+                
+                {/* Reports for this date */}
+                <div className="space-y-3">
+                  {groupedReports[date].map((report) => (
+                    <div key={report.id} className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center mb-2">
+                            {inventoryDifferences[report.id] && (
+                              <div className="mr-2 w-2 h-2 bg-red-500 rounded-full" title="Inventory differences detected"></div>
+                            )}
+                          </div>
+                          <div className="flex items-center mb-2">
+                            <MapPin className="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" />
+                            <span className="text-sm text-gray-600 truncate">
+                              {report.location?.name || 'Unknown Location'}
+                            </span>
+                          </div>
+                          <div className="flex items-center mb-2">
+                            <User className="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" />
+                            <span className="text-sm text-gray-600 truncate">
+                              {report.staff_name || 'Unknown Staff'}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-sm text-gray-600">Net Sales:</div>
+                            <div className="text-sm font-semibold text-gray-900">
+                              {formatNetSales(report)}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-sm text-gray-600">Discrepancy:</div>
+                            <div className={`text-sm font-semibold ${formatDiscrepancy(report).color}`}>
+                              {formatDiscrepancy(report).text}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="text-sm text-gray-600">Last Updated:</div>
+                            <div className="text-sm text-gray-500">
+                              {formatDateTime(report.updated_at)}
+                            </div>
+                          </div>
                         </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {report.location?.name || 'Unknown Location'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {report.staff_name || 'Unknown Staff'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.status)}`}>
-                          {report.status.toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {formatNetSales(report)}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm">
-                        <span className={formatDiscrepancy(report).color}>
-                          {formatDiscrepancy(report).text}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <div className="flex items-center justify-end space-x-2">
-                          <button
-                            onClick={() => setSelectedReport(report)}
-                            className="text-blue-600 hover:text-blue-900"
-                            title="View Report"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
+                        <div className="ml-3 flex flex-col items-end">
+                          <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.status)}`}>
+                            {report.status.toUpperCase()}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between pt-3 border-t border-gray-200">
+                        <button
+                          onClick={() => setSelectedReport(report)}
+                          className="flex items-center justify-center px-4 py-2 text-blue-600 hover:text-blue-900 hover:bg-blue-50 rounded-md border border-blue-200"
+                          title="View Report"
+                        >
+                          <Eye className="h-4 w-4 mr-2" />
+                          View Report
+                        </button>
+                        <div className="flex items-center space-x-2">
                           {(report.status === 'submitted' || report.status === 'reviewed') && (
                             <button
                               onClick={() => revertToDraft(report.id)}
                               disabled={reverting === report.id}
-                              className="text-orange-600 hover:text-orange-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="flex items-center justify-center px-4 py-2 text-orange-600 hover:text-orange-900 hover:bg-orange-50 rounded-md border border-orange-200 disabled:opacity-50 disabled:cursor-not-allowed"
                               title={reverting === report.id ? 'Reverting...' : 'Revert to Draft'}
                             >
                               <RotateCcw className="h-4 w-4" />
@@ -923,95 +1070,15 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                           <button
                             onClick={() => deleteReport(report.id)}
                             disabled={deleting === report.id}
-                            className="text-red-600 hover:text-red-900 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="flex items-center justify-center px-4 py-2 text-red-600 hover:text-red-900 hover:bg-red-50 rounded-md border border-red-200"
                             title={deleting === report.id ? 'Deleting...' : 'Delete Report'}
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>
                         </div>
-                      </td>
-                    </tr>
+                      </div>
+                    </div>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Mobile Card View */}
-          <div className="lg:hidden space-y-3">
-            {filteredReports.map((report) => (
-              <div key={report.id} className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-                <div className="flex items-start justify-between mb-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center mb-2">
-                      <Calendar className="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" />
-                      <span className="text-sm font-medium text-gray-900">
-                        {formatDate(report.report_date)}
-                      </span>
-                      {inventoryDifferences[report.id] && (
-                        <div className="ml-2 w-2 h-2 bg-red-500 rounded-full" title="Inventory differences detected"></div>
-                      )}
-                    </div>
-                    <div className="flex items-center mb-2">
-                      <MapPin className="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" />
-                      <span className="text-sm text-gray-600 truncate">
-                        {report.location?.name || 'Unknown Location'}
-                      </span>
-                    </div>
-                    <div className="flex items-center mb-2">
-                      <User className="h-4 w-4 text-gray-400 mr-2 flex-shrink-0" />
-                      <span className="text-sm text-gray-600 truncate">
-                        {report.staff_name || 'Unknown Staff'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="text-sm text-gray-600">Net Sales:</div>
-                      <div className="text-sm font-semibold text-gray-900">
-                        {formatNetSales(report)}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="text-sm text-gray-600">Discrepancy:</div>
-                      <div className={`text-sm font-semibold ${formatDiscrepancy(report).color}`}>
-                        {formatDiscrepancy(report).text}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="ml-3 flex flex-col items-end">
-                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(report.status)}`}>
-                      {report.status.toUpperCase()}
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between pt-3 border-t border-gray-200">
-                  <button
-                    onClick={() => setSelectedReport(report)}
-                    className="flex items-center justify-center px-4 py-2 text-blue-600 hover:text-blue-900 hover:bg-blue-50 rounded-md border border-blue-200"
-                    title="View Report"
-                  >
-                    <Eye className="h-4 w-4 mr-2" />
-                    View Report
-                  </button>
-                  <div className="flex items-center space-x-2">
-                    {(report.status === 'submitted' || report.status === 'reviewed') && (
-                      <button
-                        onClick={() => revertToDraft(report.id)}
-                        disabled={reverting === report.id}
-                        className="flex items-center justify-center px-4 py-2 text-orange-600 hover:text-orange-900 hover:bg-orange-50 rounded-md border border-orange-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title={reverting === report.id ? 'Reverting...' : 'Revert to Draft'}
-                      >
-                        <RotateCcw className="h-4 w-4" />
-                      </button>
-                    )}
-                    <button
-                      onClick={() => deleteReport(report.id)}
-                      disabled={deleting === report.id}
-                      className="flex items-center justify-center px-4 py-2 text-red-600 hover:text-red-900 hover:bg-red-50 rounded-md border border-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title={deleting === report.id ? 'Deleting...' : 'Delete Report'}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
                 </div>
               </div>
             ))}

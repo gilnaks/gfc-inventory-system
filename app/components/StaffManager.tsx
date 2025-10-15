@@ -130,6 +130,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [dayStatus, setDayStatus] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
   const [originalDayStatus, setOriginalDayStatus] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
   const [absentStaff, setAbsentStaff] = useState<{[key: string]: {[key: string]: {[key: string]: boolean}}}>({}) // {locationId: {dayKey: {staffId: isAbsent}}}
+  const [hoveredStaffId, setHoveredStaffId] = useState<string | null>(null) // Track hovered staff for highlighting
   
   // New staff form
   const [newStaff, setNewStaff] = useState({
@@ -495,6 +496,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   }
 
   const openAnnouncementModal = async () => {
+    setAnnouncementForm({ title: '', message: '', type: 'general' })
     setIsAnnouncementModalOpen(true)
     await loadAnnouncementHistory()
   }
@@ -949,20 +951,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const [locationsResult, staffResult] = await Promise.all([
         supabase
           .from('locations')
-          .select(`
-            *,
-            brand:brands!locations_brand_id_fkey (
-              id,
-              name
-            )
-          `)
+          .select('id, name, brand_id, company_owned, brand:brands!locations_brand_id_fkey(id, name)')
           .eq('company_owned', true)
           .order('name'),
         
         supabase
           .from('staff_registrations')
           .select(`
-            *,
+            id,
+            full_name,
             staff_assignments (
               id,
               location_id,
@@ -985,27 +982,20 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       if (locationsResult.error) throw locationsResult.error
       if (staffResult.error) throw staffResult.error
 
-      console.log('🏢 Locations from DB:', locationsResult.data?.length || 0)
-      console.log('👥 Staff from DB:', staffResult.data?.length || 0)
-
       // Filter for company-owned locations only, excluding factory branches
-      const companyLocs = locationsResult.data?.filter(loc => 
+      const companyLocs = (locationsResult.data?.filter(loc => 
         !loc.name.toLowerCase().includes('factory')
-      ) || []
-
-      console.log('🏪 Company-owned locations (no factory):', companyLocs.length, companyLocs.map(l => l.name))
+      ) || []) as any as Location[]
 
       const companyLocationIds = new Set(companyLocs.map(loc => loc.id))
 
       // Filter staff assigned to company-owned locations only
-      const companyStaffList = staffResult.data?.filter(staff => 
-        staff.staff_assignments.some(assignment => 
+      const companyStaffList = (staffResult.data?.filter(staff => 
+        staff.staff_assignments.some((assignment: any) => 
           assignment.location?.company_owned && 
           companyLocationIds.has(assignment.location_id)
         )
-      ) || []
-
-      console.log('👔 Company staff (assigned to company locations):', companyStaffList.length, companyStaffList.map(s => s.full_name))
+      ) || []) as any as StaffWithAssignments[]
 
       setCompanyLocations(companyLocs)
       setCompanyStaff(companyStaffList)
@@ -1084,102 +1074,73 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const startDate = weekDates[0].toISOString().split('T')[0]
       const endDate = weekDates[6].toISOString().split('T')[0]
       
-      console.log('🗓️ Loading schedule for week:', { startDate, endDate })
-      
       const { data, error } = await supabase
         .from('staff_schedules')
-        .select(`
-          *,
-          location:locations!staff_schedules_location_id_fkey (
-            id,
-            name
-          ),
-          staff:staff_registrations!staff_schedules_staff_registration_id_fkey (
-            id,
-            full_name
-          )
-        `)
+        .select('staff_registration_id, location_id, schedule_date, hours, is_absent, day_type')
         .gte('schedule_date', startDate)
         .lte('schedule_date', endDate)
         .order('schedule_date')
       
-      console.log('📊 Raw schedule data from Supabase:', data)
-      console.log('❌ Schedule query error:', error)
-      
       if (error) throw error
       
-      // Convert database data to schedule format
+      // Convert database data to schedule format - optimized with single pass
       const newSchedule: {[key: string]: {[key: string]: string[]}} = {}
       const newStaffHours: {[key: string]: {[key: string]: {[key: string]: number}}} = {}
       const newDayStatus: {[key: string]: 'default' | 'regular-holiday' | 'special-holiday'} = {}
       const newAbsentStaff: {[key: string]: {[key: string]: {[key: string]: boolean}}} = {}
       
-      console.log('🔄 Processing', data?.length || 0, 'schedule records...')
-      
-      data?.forEach((item, index) => {
-        console.log(`📝 Processing record ${index + 1}:`, {
-          staff: item.staff?.full_name,
-          location: item.location?.name,
-          date: item.schedule_date,
-          hours: item.hours,
-          isAbsent: item.is_absent,
-          dayType: item.day_type
-        })
+      // Process all records in a single optimized loop
+      data?.forEach((item) => {
         const dayKey = getScheduleKey(new Date(item.schedule_date))
+        const locId = item.location_id
+        const staffId = item.staff_registration_id
         
-        if (item.location_id) {
-          if (!newSchedule[item.location_id]) {
-            newSchedule[item.location_id] = {}
+        if (locId) {
+          // Initialize nested objects only when needed
+          if (!newSchedule[locId]) {
+            newSchedule[locId] = {}
+            newStaffHours[locId] = {}
+            newAbsentStaff[locId] = {}
           }
-          if (!newSchedule[item.location_id][dayKey]) {
-            newSchedule[item.location_id][dayKey] = []
+          if (!newSchedule[locId][dayKey]) {
+            newSchedule[locId][dayKey] = []
+            newStaffHours[locId][dayKey] = {}
+            newAbsentStaff[locId][dayKey] = {}
           }
-          if (!newSchedule[item.location_id][dayKey].includes(item.staff_registration_id)) {
-            newSchedule[item.location_id][dayKey].push(item.staff_registration_id)
+          
+          // Add staff to schedule if not already included
+          if (!newSchedule[locId][dayKey].includes(staffId)) {
+            newSchedule[locId][dayKey].push(staffId)
           }
 
-          // Load hours data
-          if (!newStaffHours[item.location_id]) {
-            newStaffHours[item.location_id] = {}
-          }
-          if (!newStaffHours[item.location_id][dayKey]) {
-            newStaffHours[item.location_id][dayKey] = {}
-          }
-          newStaffHours[item.location_id][dayKey][item.staff_registration_id] = item.hours || 11
+          // Set hours and absence data
+          newStaffHours[locId][dayKey][staffId] = item.hours || 11
+          newAbsentStaff[locId][dayKey][staffId] = item.is_absent || false
           
-          // Load absence data
-          if (!newAbsentStaff[item.location_id]) {
-            newAbsentStaff[item.location_id] = {}
-          }
-          if (!newAbsentStaff[item.location_id][dayKey]) {
-            newAbsentStaff[item.location_id][dayKey] = {}
-          }
-          newAbsentStaff[item.location_id][dayKey][item.staff_registration_id] = item.is_absent || false
-          
-          // Load day status (use the first occurrence for each day)
+          // Set day status (use the first occurrence for each day)
           if (!newDayStatus[dayKey] && item.day_type) {
             newDayStatus[dayKey] = item.day_type as 'default' | 'regular-holiday' | 'special-holiday'
           }
         }
       })
       
-      console.log('✅ Final processed data:')
-      console.log('  - Schedule:', newSchedule)
-      console.log('  - Staff Hours:', newStaffHours)
-      console.log('  - Day Status:', newDayStatus)
-      console.log('  - Absent Staff:', newAbsentStaff)
+      // Efficient deep copy using structured clone or fallback to JSON
+      const deepCopy = (obj: any) => {
+        if (typeof structuredClone !== 'undefined') {
+          return structuredClone(obj)
+        }
+        return JSON.parse(JSON.stringify(obj))
+      }
       
       setSchedule(newSchedule)
-      setOriginalSchedule(JSON.parse(JSON.stringify(newSchedule))) // Deep copy for comparison
+      setOriginalSchedule(deepCopy(newSchedule))
       setStaffHours(newStaffHours)
-      setOriginalStaffHours(JSON.parse(JSON.stringify(newStaffHours))) // Deep copy for comparison
+      setOriginalStaffHours(deepCopy(newStaffHours))
       setDayStatus(newDayStatus)
-      setOriginalDayStatus(JSON.parse(JSON.stringify(newDayStatus))) // Deep copy for comparison
+      setOriginalDayStatus(deepCopy(newDayStatus))
       setAbsentStaff(newAbsentStaff)
-      
-      console.log('💾 State updated successfully!')
     } catch (error) {
-      console.error('❌ Error loading existing schedule:', error)
+      console.error('Error loading existing schedule:', error)
       setError('Failed to load existing schedule')
     }
   }
@@ -1943,7 +1904,14 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                  }
                  
                  // Render grouped staff
-                 return Object.entries(groupedStaff).map(([locationName, staffList]) => (
+                 return Object.entries(groupedStaff)
+                   .sort(([locationA], [locationB]) => {
+                     // Sort Unassigned to the bottom, then alphabetically
+                     if (locationA === 'Unassigned') return 1
+                     if (locationB === 'Unassigned') return -1
+                     return locationA.localeCompare(locationB)
+                   })
+                   .map(([locationName, staffList]) => (
                   <React.Fragment key={locationName}>
                     {/* Location Group Header */}
                     <tr className="bg-gray-100">
@@ -1956,7 +1924,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       </td>
                     </tr>
                     {/* Staff Members in this location */}
-                    {staffList.map((staffMember) => (
+                    {staffList
+                      .sort((a, b) => a.full_name.localeCompare(b.full_name))
+                      .map((staffMember) => (
                 <tr key={staffMember.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
@@ -2490,7 +2460,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   </button>
                 </div>
                 <button
-                  onClick={() => setIsScheduleModalOpen(false)}
+                  onClick={() => {
+                    setIsScheduleModalOpen(false)
+                    setHoveredStaffId(null)
+                  }}
                   className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-all duration-200"
                 >
                   <X className="h-5 w-5" />
@@ -2544,7 +2517,17 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         </td>
                       </tr>
                     ) : (
-                      companyLocations.map((location) => (
+                      companyLocations
+                        .sort((a, b) => {
+                          // Sort by brand name first, then by location name
+                          const brandA = a.brand?.name || ''
+                          const brandB = b.brand?.name || ''
+                          if (brandA !== brandB) {
+                            return brandA.localeCompare(brandB)
+                          }
+                          return a.name.localeCompare(b.name)
+                        })
+                        .map((location) => (
                         <tr key={location.id} className={`hover:bg-gray-50 transition-colors ${getStoreColor(location)}`}>
                           <td className={`px-6 py-4 text-sm font-medium text-gray-900 border-r border-gray-200 w-64 min-w-64 ${getStoreColor(location)}`}>
                             <div className="flex items-center space-x-3">
@@ -2562,8 +2545,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                             const currentStaffId = schedule[location.id]?.[dayKey] || ''
                             const isTodayDate = isToday(date)
                             return (
-                              <td key={dayIndex} className={`px-2 py-3 text-center border-r border-gray-200 last:border-r-0 w-36 ${getStoreColor(location)} ${isTodayDate ? 'border-l-2 border-r-2 border-blue-300' : ''}`}>
-                                <div className="space-y-2">
+                              <td key={dayIndex} className={`px-2 py-3 text-center align-top border-r border-gray-200 last:border-r-0 w-36 ${getStoreColor(location)} ${isTodayDate ? 'border-l-2 border-r-2 border-blue-300' : ''}`}>
+                                <div className="flex flex-col gap-2">
                                   {/* Staff Dropdown */}
                                   <select 
                                     className="w-full text-xs border-0 bg-gray-100 hover:bg-gray-200 focus:bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 rounded px-2 py-1 transition-all duration-200 shadow-sm"
@@ -2596,20 +2579,53 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                   </select>
                                   
                                   {/* Scheduled Staff List */}
-                                  <div className="space-y-2">
+                                  <div className="flex flex-col gap-2">
                                     {getScheduledStaffForBranchAndDate(location.id, dayKey).map((staff) => {
                                       if (!staff) return null
                                       
                                       const staffHours = getStaffHours(location.id, dayKey, staff.id)
                                       const isAbsent = isStaffAbsent(location.id, dayKey, staff.id)
                                       const colorClasses = getStaffColorClasses(dayKey)
+                                      const isHovered = hoveredStaffId === staff.id
+                                      
+                                      // Get darker pastel color for hover state
+                                      const getDarkerPastelColor = () => {
+                                        if (isAbsent) return 'bg-red-500'
+                                        const dayStatusType = getDayStatus(dayKey)
+                                        switch (dayStatusType) {
+                                          case 'regular-holiday':
+                                            return 'bg-orange-500'
+                                          case 'special-holiday':
+                                            return 'bg-violet-500'
+                                          default:
+                                            return 'bg-blue-500'
+                                        }
+                                      }
+                                      
+                                      // Get border color based on day type
+                                      const getBorderColor = () => {
+                                        if (isAbsent) return 'border-red-300'
+                                        const dayStatusType = getDayStatus(dayKey)
+                                        switch (dayStatusType) {
+                                          case 'regular-holiday':
+                                            return 'border-orange-300'
+                                          case 'special-holiday':
+                                            return 'border-violet-300'
+                                          default:
+                                            return 'border-blue-300'
+                                        }
+                                      }
                                       
                                       return (
                                         <div 
                                           key={staff.id}
-                                          className={`group relative text-xs px-2 py-1 rounded-lg transition-all duration-200 max-w-full overflow-hidden ${
-                                            isAbsent 
-                                              ? 'bg-red-200 hover:bg-red-300 text-red-900 border border-red-300' 
+                                          onMouseEnter={() => setHoveredStaffId(staff.id)}
+                                          onMouseLeave={() => setHoveredStaffId(null)}
+                                          className={`group relative text-xs px-2 py-1 rounded-lg transition-all duration-200 max-w-full overflow-hidden border ${
+                                            isHovered
+                                              ? `${getDarkerPastelColor()} ${getBorderColor()} text-white`
+                                              : isAbsent 
+                                              ? 'bg-red-200 hover:bg-red-300 text-red-900 border-red-300' 
                                               : colorClasses.container
                                           }`}
                                         >
@@ -2618,14 +2634,14 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                             <button
                                               onClick={() => removeStaffFromSchedule(staff.id, dayKey, location.id)}
                                               disabled={saving}
-                                              className={`opacity-0 group-hover:opacity-100 ${isAbsent ? 'text-red-700 hover:text-red-900 hover:bg-red-400' : colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center text-xs font-bold transition-all duration-200 hover:scale-110`}
+                                              className={`opacity-0 group-hover:opacity-100 ${isHovered ? 'text-white hover:bg-white/20' : isAbsent ? 'text-red-700 hover:text-red-900 hover:bg-red-400' : colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center text-xs font-bold transition-all duration-200 hover:scale-110`}
                                               title="Remove from schedule"
                                             >
                                               ×
                                             </button>
                                           </div>
                                           <div className="flex items-center space-x-1">
-                                            <label className={`text-xs font-medium ${isAbsent ? 'text-red-800' : colorClasses.label}`}>Hours:</label>
+                                            <label className={`text-xs font-medium ${isHovered ? 'text-white' : isAbsent ? 'text-red-800' : colorClasses.label}`}>Hours:</label>
                                             <input
                                               type="number"
                                               min="0"
@@ -2640,7 +2656,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                             <button
                                               onClick={() => toggleStaffAbsence(location.id, dayKey, staff.id)}
                                               disabled={saving}
-                                              className={`${isAbsent ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${isAbsent ? 'text-red-600 hover:text-red-900 hover:bg-red-400' : colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center transition-all duration-200 hover:scale-110`}
+                                              className={`${isAbsent ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${isHovered ? 'text-white hover:bg-white/20' : isAbsent ? 'text-red-600 hover:text-red-900 hover:bg-red-400' : colorClasses.button} rounded-full w-4 h-4 flex items-center justify-center transition-all duration-200 hover:scale-110`}
                                               title={isAbsent ? 'Unmark absence (click to restore)' : 'Mark as absent (sets hours to 0)'}
                                             >
                                               <CalendarX className="h-3 w-3" />
@@ -2683,7 +2699,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               {/* Action Buttons */}
               <div className="flex space-x-3">
                 <button
-                  onClick={() => setIsScheduleModalOpen(false)}
+                  onClick={() => {
+                    setIsScheduleModalOpen(false)
+                    setHoveredStaffId(null)
+                  }}
                   className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 font-medium"
                 >
                   Cancel
