@@ -59,6 +59,8 @@ interface PayrollData {
   refunds: number
   netPay: number
   averageWeeklySales?: number
+  averageMonthlySales?: number
+  dailySalesBreakdown?: Array<{date: string, sales: number}>
 }
 
 interface PayrollSummary {
@@ -294,51 +296,117 @@ export function PayrollManager() {
     }
   }
 
-  const fetchStaffAverageWeeklySales = async (staffIds: string[]) => {
+  const fetchStaffAverageWeeklySales = async (staffIds: string[], weekStartDate: string, weekEndDate: string) => {
     try {
-      // Get the last 4 weeks of data for average calculation
+      // Get the last 4 weeks of data for 4-week average calculation
       const fourWeeksAgo = new Date()
       fourWeeksAgo.setDate(fourWeeksAgo.getDate() - 28)
       const fourWeeksAgoStr = fourWeeksAgo.toISOString().split('T')[0]
       
-      // Fetch DSIR reports for these staff members in the last 4 weeks
-      const { data: dsirReports, error } = await supabase
+      // Get the last 30 days for monthly average calculation
+      const thirtyDaysAgo = new Date()
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+      const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().split('T')[0]
+      
+      // Fetch DSIR reports for these staff members in the last 4 weeks (for 4-week average)
+      const { data: dsirReports4Week, error: error4Week } = await supabase
         .from('dsir_reports')
-        .select('staff_registration_id, net_sales, report_date')
+        .select('staff_registration_id, gross_sales, report_date')
         .in('staff_registration_id', staffIds)
         .gte('report_date', fourWeeksAgoStr)
-        .eq('status', 'submitted') // Only count submitted reports
+        .eq('status', 'submitted')
       
-      if (error) {
-        console.error('Error fetching DSIR reports for sales:', error)
-        return {}
+      if (error4Week) {
+        console.error('Error fetching DSIR reports for 4-week average:', error4Week)
       }
       
-      // Group by staff and calculate average weekly sales
-      const salesByStaff: {[staffId: string]: number[]} = {}
+      // Fetch DSIR reports for the last 30 days (for monthly average)
+      const { data: dsirReportsMonthly, error: errorMonthly } = await supabase
+        .from('dsir_reports')
+        .select('staff_registration_id, gross_sales, report_date')
+        .in('staff_registration_id', staffIds)
+        .gte('report_date', thirtyDaysAgoStr)
+        .eq('status', 'submitted')
       
-      dsirReports?.forEach(report => {
-        if (!salesByStaff[report.staff_registration_id]) {
-          salesByStaff[report.staff_registration_id] = []
+      if (errorMonthly) {
+        console.error('Error fetching DSIR reports for monthly average:', errorMonthly)
+      }
+      
+      // Fetch DSIR reports for the filtered week only (for breakdown and current week average)
+      const { data: dsirReportsWeek, error: errorWeek } = await supabase
+        .from('dsir_reports')
+        .select('staff_registration_id, gross_sales, report_date')
+        .in('staff_registration_id', staffIds)
+        .gte('report_date', weekStartDate)
+        .lte('report_date', weekEndDate)
+        .eq('status', 'submitted')
+        .order('report_date', { ascending: false })
+      
+      if (errorWeek) {
+        console.error('Error fetching DSIR reports for week:', errorWeek)
+      }
+      
+      // Group by staff for weekly breakdown (filtered week only)
+      const weeklyBreakdownByStaff: {[staffId: string]: Array<{date: string, sales: number}>} = {}
+      
+      dsirReportsWeek?.forEach(report => {
+        if (!weeklyBreakdownByStaff[report.staff_registration_id]) {
+          weeklyBreakdownByStaff[report.staff_registration_id] = []
         }
-        salesByStaff[report.staff_registration_id].push(report.net_sales || 0)
+        weeklyBreakdownByStaff[report.staff_registration_id].push({
+          date: report.report_date,
+          sales: report.gross_sales || 0
+        })
       })
       
-      // Calculate average for each staff
-      const averageSalesMap: {[staffId: string]: number} = {}
-      Object.entries(salesByStaff).forEach(([staffId, sales]) => {
-        if (sales.length > 0) {
-          const totalSales = sales.reduce((sum, sale) => sum + sale, 0)
-          // Calculate weekly average (total sales / number of weeks)
-          const weeks = Math.ceil(sales.length / 7) || 1
-          averageSalesMap[staffId] = totalSales / weeks
+      // Group by staff for 4-week average
+      const salesByStaff4Week: {[staffId: string]: number[]} = {}
+      dsirReports4Week?.forEach(report => {
+        if (!salesByStaff4Week[report.staff_registration_id]) {
+          salesByStaff4Week[report.staff_registration_id] = []
+        }
+        salesByStaff4Week[report.staff_registration_id].push(report.gross_sales || 0)
+      })
+      
+      // Group by staff for monthly average
+      const salesByStaffMonthly: {[staffId: string]: number[]} = {}
+      dsirReportsMonthly?.forEach(report => {
+        if (!salesByStaffMonthly[report.staff_registration_id]) {
+          salesByStaffMonthly[report.staff_registration_id] = []
+        }
+        salesByStaffMonthly[report.staff_registration_id].push(report.gross_sales || 0)
+      })
+      
+      // Calculate averages for each staff
+      const averageWeeklySalesMap: {[staffId: string]: number} = {}
+      const averageMonthlySalesMap: {[staffId: string]: number} = {}
+      
+      // Calculate weekly average from the current week's breakdown (days worked)
+      Object.entries(weeklyBreakdownByStaff).forEach(([staffId, dailySales]) => {
+        if (dailySales.length > 0) {
+          const totalWeekSales = dailySales.reduce((sum, day) => sum + day.sales, 0)
+          // Weekly average = total sales divided by number of days worked
+          averageWeeklySalesMap[staffId] = totalWeekSales / dailySales.length
         }
       })
       
-      return averageSalesMap
+      // Calculate monthly average from the last 4 weeks of data
+      Object.entries(salesByStaff4Week).forEach(([staffId, salesData]) => {
+        if (salesData.length > 0) {
+          const totalSales = salesData.reduce((sum, sale) => sum + sale, 0)
+          // Monthly average = total sales divided by actual number of days worked in the month
+          averageMonthlySalesMap[staffId] = totalSales / salesData.length
+        }
+      })
+      
+      return { 
+        weeklyAverages: averageWeeklySalesMap, 
+        monthlyAverages: averageMonthlySalesMap,
+        breakdowns: weeklyBreakdownByStaff 
+      }
     } catch (error) {
       console.error('Error calculating staff average sales:', error)
-      return {}
+      return { weeklyAverages: {}, monthlyAverages: {}, breakdowns: {} }
     }
   }
 
@@ -656,8 +724,8 @@ export function PayrollManager() {
     const weekly: { [week: string]: PayrollData[] } = {}
     const custom: PayrollData[] = []
 
-    // Fetch average weekly sales for all staff
-    const staffSalesMap = await fetchStaffAverageWeeklySales(staffData.map(s => s.id))
+    // Fetch average weekly and monthly sales for all staff (with breakdown for the filtered week)
+    const staffSalesData = await fetchStaffAverageWeeklySales(staffData.map(s => s.id), startDate, endDate)
 
     // Group schedule data by staff
     const staffGroups: { [staffId: string]: any[] } = {}
@@ -676,8 +744,10 @@ export function PayrollManager() {
 
       const payrollEntry = calculateStaffPayroll(staff, staffSchedules, dayStatusMap)
       
-      // Add average weekly sales
-      payrollEntry.averageWeeklySales = staffSalesMap[staffId] || 0
+      // Add average weekly sales, monthly sales, and daily breakdown
+      payrollEntry.averageWeeklySales = staffSalesData.weeklyAverages[staffId] || 0
+      payrollEntry.averageMonthlySales = staffSalesData.monthlyAverages[staffId] || 0
+      payrollEntry.dailySalesBreakdown = staffSalesData.breakdowns[staffId] || []
 
       custom.push(payrollEntry)
 
@@ -2497,15 +2567,33 @@ export function PayrollManager() {
                      onClick={() => generatePayslip(entry)}
                      title="Click to print payslip"
                    >
-                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                       <div className="font-medium text-gray-900">{entry.staffName}</div>
-                       <div className="text-xs text-gray-600 font-medium">₱{entry.hourlyRate.toFixed(2)}/hr</div>
-                       {entry.averageWeeklySales !== undefined && entry.averageWeeklySales > 0 && (
-                         <div className="text-xs text-blue-600 font-medium mt-0.5">
-                           Avg Weekly Sales: ₱{entry.averageWeeklySales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                         </div>
-                       )}
-                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      <div className="font-medium text-gray-900">{entry.staffName}</div>
+                      <div className="text-xs text-gray-600 font-medium">₱{entry.hourlyRate.toFixed(2)}/hr</div>
+                      {entry.dailySalesBreakdown && entry.dailySalesBreakdown.length > 0 && (
+                        <div className="mt-1 text-xs">
+                          <div className="text-gray-500 font-semibold mb-0.5">Daily Sales (This Week):</div>
+                          <div className="space-y-0.5 max-h-20 overflow-y-auto">
+                            {entry.dailySalesBreakdown.map((daySale, idx) => (
+                              <div key={idx} className="flex justify-between text-gray-600">
+                                <span>{new Date(daySale.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}:</span>
+                                <span className="font-medium">₱{daySale.sales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {entry.averageWeeklySales !== undefined && entry.averageWeeklySales > 0 && (
+                        <div className="text-xs text-blue-600 font-medium mt-1 pt-1 border-t border-gray-200">
+                          Avg Sales This Week: ₱{entry.averageWeeklySales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        </div>
+                      )}
+                      {entry.averageMonthlySales !== undefined && entry.averageMonthlySales > 0 && (
+                        <div className="text-xs text-green-600 font-medium mt-0.5">
+                          Avg Sales This Month: ₱{entry.averageMonthlySales.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                        </div>
+                      )}
+                    </td>
                      <td className="px-6 py-4 text-sm text-gray-900">
                        <div className="space-y-3">
                          {Object.entries(entry.locationGroups).map(([locationName, days]) => (
