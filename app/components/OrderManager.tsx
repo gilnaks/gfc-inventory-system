@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
 import { ShoppingCart, Package, CheckCircle, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
@@ -217,14 +217,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
           return
         }
 
-        // Update product quantities: subtract from both initial_stock and released (items are now delivered/sold)
-        for (const detail of orderDetails || []) {
-          // First get current quantities
-          const { data: productData, error: fetchError } = await supabase
+        // Batch fetch all product data
+        const productIds = orderDetails?.map(d => d.product_id).filter(Boolean) || []
+        if (productIds.length > 0) {
+          const { data: productsData, error: fetchError } = await supabase
             .from('products')
-            .select('initial_stock, released')
-            .eq('id', detail.product_id)
-            .single()
+            .select('id, initial_stock, released')
+            .in('id', productIds)
 
           if (fetchError) {
             console.error('Error fetching product data:', fetchError)
@@ -232,23 +231,31 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             return
           }
 
-          // For fulfilled orders, subtract from both initial_stock and released (items are delivered)
-          const newInitialStock = Math.max(0, (productData?.initial_stock || 0) - detail.quantity)
-          const newReleased = Math.max(0, (productData?.released || 0) - detail.quantity)
+          // Create a map for quick lookup
+          const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-          const { error: updateError } = await supabase
-            .from('products')
-            .update({
-              initial_stock: newInitialStock,
-              released: newReleased,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', detail.product_id)
+          // Batch update all products using RPC or individual updates
+          for (const detail of orderDetails || []) {
+            const productData = productsMap.get(detail.product_id)
+            if (!productData) continue
 
-          if (updateError) {
-            console.error('Error updating product quantities:', updateError)
-            alert('Failed to update product quantities')
-            return
+            const newInitialStock = Math.max(0, (productData.initial_stock || 0) - detail.quantity)
+            const newReleased = Math.max(0, (productData.released || 0) - detail.quantity)
+
+            const { error: updateError } = await supabase
+              .from('products')
+              .update({
+                initial_stock: newInitialStock,
+                released: newReleased,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', detail.product_id)
+
+            if (updateError) {
+              console.error('Error updating product quantities:', updateError)
+              alert('Failed to update product quantities')
+              return
+            }
           }
         }
       }
@@ -267,48 +274,49 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
           return
         }
 
-        // Update product quantities: move from reserved to released
-        for (const detail of orderDetails || []) {
-          // Skip if product_id is null or undefined
-          if (!detail.product_id) {
-            console.warn('Skipping order detail with missing product_id:', detail)
-            continue
-          }
-
-          // First get current quantities
-          const { data: productData, error: fetchError } = await supabase
+        // Batch fetch all product data
+        const productIds = orderDetails?.map(d => d.product_id).filter(Boolean) || []
+        if (productIds.length > 0) {
+          const { data: productsData, error: fetchError } = await supabase
             .from('products')
-            .select('reserved, released')
-            .eq('id', detail.product_id)
-            .single()
+            .select('id, reserved, released')
+            .in('id', productIds)
 
           if (fetchError) {
-            console.error('Error fetching product data for product_id:', detail.product_id, fetchError)
+            console.error('Error fetching product data:', fetchError)
             // Continue with other products instead of failing completely
-            continue
-          }
+          } else {
+            // Create a map for quick lookup
+            const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-          if (!productData) {
-            console.warn('Product not found for product_id:', detail.product_id)
-            continue
-          }
+            // Batch update all products
+            for (const detail of orderDetails || []) {
+              if (!detail.product_id) continue
 
-          const newReserved = Math.max(0, (productData?.reserved || 0) - detail.quantity)
-          const newReleased = (productData?.released || 0) + detail.quantity
+              const productData = productsMap.get(detail.product_id)
+              if (!productData) {
+                console.warn('Product not found for product_id:', detail.product_id)
+                continue
+              }
 
-          const { error: updateError } = await supabase
-            .from('products')
-            .update({
-              reserved: newReserved,
-              released: newReleased,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', detail.product_id)
+              const newReserved = Math.max(0, (productData.reserved || 0) - detail.quantity)
+              const newReleased = (productData.released || 0) + detail.quantity
 
-          if (updateError) {
-            console.error('Error updating product quantities:', updateError)
-            alert('Failed to update product quantities')
-            return
+              const { error: updateError } = await supabase
+                .from('products')
+                .update({
+                  reserved: newReserved,
+                  released: newReleased,
+                  updated_at: new Date().toISOString()
+                })
+                .eq('id', detail.product_id)
+
+              if (updateError) {
+                console.error('Error updating product quantities:', updateError)
+                alert('Failed to update product quantities')
+                return
+              }
+            }
           }
         }
       }
@@ -334,64 +342,64 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
           return
         }
 
-        // Update product quantities: remove from reserved and released (depending on order status)
-        for (const detail of orderDetails || []) {
-          // Skip if product_id is null or undefined
-          if (!detail.product_id) {
-            console.warn('Skipping order detail with missing product_id:', detail)
-            continue
-          }
-
-          // First get current quantities
-          const { data: productData, error: fetchError } = await supabase
+        // Batch fetch all product data
+        const productIds = orderDetails?.map(d => d.product_id).filter(Boolean) || []
+        if (productIds.length > 0) {
+          const { data: productsData, error: fetchError } = await supabase
             .from('products')
-            .select('reserved, released')
-            .eq('id', detail.product_id)
-            .single()
+            .select('id, reserved, released')
+            .in('id', productIds)
 
           if (fetchError) {
-            console.error('Error fetching product data for product_id:', detail.product_id, fetchError)
+            console.error('Error fetching product data:', fetchError)
             // Continue with other products instead of failing completely
-            continue
-          }
-
-          if (!productData) {
-            console.warn('Product not found for product_id:', detail.product_id)
-            continue
-          }
-
-          // Determine what to return based on current state
-          // If there are released quantities, return those; otherwise return reserved
-          const currentReleased = productData?.released || 0
-          const currentReserved = productData?.reserved || 0
-          
-          let updateData: any = { updated_at: new Date().toISOString() }
-          
-          if (currentReleased >= detail.quantity) {
-            // If there are enough released quantities, return those
-            updateData.released = Math.max(0, currentReleased - detail.quantity)
-          } else if (currentReserved >= detail.quantity) {
-            // If there are enough reserved quantities, return those
-            updateData.reserved = Math.max(0, currentReserved - detail.quantity)
           } else {
-            // Handle partial quantities in both reserved and released
-            const remainingToReturn = detail.quantity
-            let releasedToReturn = Math.min(remainingToReturn, currentReleased)
-            let reservedToReturn = remainingToReturn - releasedToReturn
-            
-            updateData.released = Math.max(0, currentReleased - releasedToReturn)
-            updateData.reserved = Math.max(0, currentReserved - reservedToReturn)
-          }
+            // Create a map for quick lookup
+            const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-          const { error: updateError } = await supabase
-            .from('products')
-            .update(updateData)
-            .eq('id', detail.product_id)
+            // Batch update all products
+            for (const detail of orderDetails || []) {
+              if (!detail.product_id) continue
 
-          if (updateError) {
-            console.error('Error updating product quantities:', updateError)
-            alert('Failed to update product quantities')
-            return
+              const productData = productsMap.get(detail.product_id)
+              if (!productData) {
+                console.warn('Product not found for product_id:', detail.product_id)
+                continue
+              }
+
+              // Determine what to return based on current state
+              const currentReleased = productData.released || 0
+              const currentReserved = productData.reserved || 0
+              
+              let updateData: any = { updated_at: new Date().toISOString() }
+              
+              if (currentReleased >= detail.quantity) {
+                // If there are enough released quantities, return those
+                updateData.released = Math.max(0, currentReleased - detail.quantity)
+              } else if (currentReserved >= detail.quantity) {
+                // If there are enough reserved quantities, return those
+                updateData.reserved = Math.max(0, currentReserved - detail.quantity)
+              } else {
+                // Handle partial quantities in both reserved and released
+                const remainingToReturn = detail.quantity
+                let releasedToReturn = Math.min(remainingToReturn, currentReleased)
+                let reservedToReturn = remainingToReturn - releasedToReturn
+                
+                updateData.released = Math.max(0, currentReleased - releasedToReturn)
+                updateData.reserved = Math.max(0, currentReserved - reservedToReturn)
+              }
+
+              const { error: updateError } = await supabase
+                .from('products')
+                .update(updateData)
+                .eq('id', detail.product_id)
+
+              if (updateError) {
+                console.error('Error updating product quantities:', updateError)
+                alert('Failed to update product quantities')
+                return
+              }
+            }
           }
         }
 
@@ -790,7 +798,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   }
 
 
-  const getCategoryTotals = (order: CustomerOrder) => {
+  const getCategoryTotals = useCallback((order: CustomerOrder) => {
     if (!order.order_details) return []
     
     const categoryMap = new Map()
@@ -815,9 +823,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     })
     
     return Array.from(categoryMap.values())
-  }
+  }, [])
 
-  const getTotalAmount = (order: CustomerOrder) => {
+  const getTotalAmount = useCallback((order: CustomerOrder) => {
     const subtotal = order.order_details.reduce((total, detail) => {
       return total + (detail.unit_price * detail.quantity)
     }, 0)
@@ -831,28 +839,41 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     }
 
     return total
-  }
+  }, [])
 
-  // Helper functions for categorization and pagination
-  const getOrdersByStatus = (status: string) => {
-    return orders.filter(order => order.status === status)
-  }
+  // Memoized helper functions for categorization and pagination
+  const ordersByStatus = useMemo(() => {
+    return {
+      pending: orders.filter(order => order.status === 'pending'),
+      approved: orders.filter(order => order.status === 'approved'),
+      'in-transit': orders.filter(order => order.status === 'in-transit'),
+      verified: orders.filter(order => order.status === 'verified'),
+      fulfilled: orders.filter(order => order.status === 'fulfilled'),
+      paid: orders.filter(order => order.status === 'paid'),
+      complete: orders.filter(order => order.status === 'complete'),
+      cancelled: orders.filter(order => order.status === 'cancelled')
+    }
+  }, [orders])
 
-  const getPaginatedOrders = (status: string, page: number) => {
+  const getOrdersByStatus = useCallback((status: string) => {
+    return ordersByStatus[status as keyof typeof ordersByStatus] || []
+  }, [ordersByStatus])
+
+  const getPaginatedOrders = useCallback((status: string, page: number) => {
     const statusOrders = getOrdersByStatus(status)
     // Use 5 items per page for complete and cancelled orders, 10 for others
     const pageSize = (status === 'complete' || status === 'cancelled') ? 5 : itemsPerPage
     const startIndex = (page - 1) * pageSize
     const endIndex = startIndex + pageSize
     return statusOrders.slice(startIndex, endIndex)
-  }
+  }, [getOrdersByStatus, itemsPerPage])
 
-  const getTotalPages = (status: string) => {
+  const getTotalPages = useCallback((status: string) => {
     const statusOrders = getOrdersByStatus(status)
     // Use 5 items per page for complete and cancelled orders, 10 for others
     const pageSize = (status === 'complete' || status === 'cancelled') ? 5 : itemsPerPage
     return Math.ceil(statusOrders.length / pageSize)
-  }
+  }, [getOrdersByStatus, itemsPerPage])
 
   // Reusable table component for orders
   const OrderTable = ({ orders, showPagination = false, currentPage = 1, onPageChange = () => {} }: {
@@ -2136,9 +2157,47 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
       {/* Orders by Status */}
       {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          <span className="ml-3 text-gray-600">Loading orders...</span>
+        <div className="space-y-8">
+          {/* Skeleton for each order status section */}
+          {['Pending', 'Approved', 'In-Transit', 'Verified'].map((status, idx) => (
+            <div key={idx}>
+              {/* Section header skeleton */}
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center">
+                  <div className="h-5 w-5 bg-gray-200 rounded mr-2 animate-pulse"></div>
+                  <div className="h-6 bg-gray-200 rounded w-48 animate-pulse"></div>
+                </div>
+              </div>
+              
+              {/* Table skeleton */}
+              <div className="bg-white rounded-lg border shadow-sm overflow-hidden">
+                <div>
+                  <table className="w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        {[...Array(7)].map((_, i) => (
+                          <th key={i} className="px-6 py-3 text-left">
+                            <div className="h-4 bg-gray-200 rounded w-20 animate-pulse"></div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {[...Array(2)].map((_, rowIdx) => (
+                        <tr key={rowIdx}>
+                          {[...Array(7)].map((_, cellIdx) => (
+                            <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
+                              <div className="h-4 bg-gray-200 rounded w-24 animate-pulse"></div>
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       ) : (
         <div className="space-y-8">

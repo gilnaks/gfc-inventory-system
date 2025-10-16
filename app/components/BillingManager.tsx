@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { CreditCard, Check, Eye, Download, X, Printer, Building2, Building, Store } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
@@ -88,9 +88,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
 
   useEffect(() => {
     if (selectedBrand) {
-      fetchPaidOrders()
-      fetchReleasedOrders()
-      fetchTotalReceivable()
+      fetchPaidOrders() // Now fetches all data in one call
       setCompletedOrdersPage(1) // Reset pagination when filter changes
     }
   }, [selectedBrand, timeFilter])
@@ -114,9 +112,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
           
           // Refresh billing data when orders are updated
           if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT' || payload.eventType === 'DELETE') {
-            fetchPaidOrders()
-            fetchReleasedOrders()
-            fetchTotalReceivable()
+            fetchPaidOrders() // Now fetches all data in one call
           }
         }
       )
@@ -188,8 +184,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     try {
       const { start, end } = getDateRange()
       
-      // Fetch paid orders
-      const { data: paidData, error: paidError } = await supabase
+      // Batch fetch all orders with a single query using .in()
+      const { data: allOrders, error } = await supabase
         .from('customer_orders')
         .select(`
           *,
@@ -201,45 +197,39 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
           )
         `)
         .eq('brand_id', selectedBrand.id)
-        .eq('status', 'paid')
-        .gte('created_at', start)
-        .lte('created_at', end)
+        .in('status', ['paid', 'complete', 'fulfilled'])
         .order('created_at', { ascending: false })
       
-      if (paidError) {
-        console.error('Error fetching paid orders:', paidError)
+      if (error) {
+        console.error('Error fetching orders:', error)
         return
       }
       
-      // Fetch completed orders
-      const { data: completedData, error: completedError } = await supabase
-        .from('customer_orders')
-        .select(`
-          *,
-          location:locations(*, brand:brands(*)),
-          brand:brands(*),
-          order_details(
-            *,
-            products:products(id, name, sku, unit, category)
-          )
-        `)
-        .eq('brand_id', selectedBrand.id)
-        .eq('status', 'complete')
-        .gte('created_at', start)
-        .lte('created_at', end)
-        .order('created_at', { ascending: false })
-      
-      if (completedError) {
-        console.error('Error fetching completed orders:', completedError)
-        return
-      }
-      
-      if (paidData) {
+      if (allOrders) {
+        // Filter paid orders with date range
+        const paidData = allOrders.filter(order => 
+          order.status === 'paid' && 
+          order.created_at >= start && 
+          order.created_at <= end
+        )
+        
+        // Filter completed orders with date range
+        const completedData = allOrders.filter(order => 
+          order.status === 'complete' && 
+          order.created_at >= start && 
+          order.created_at <= end
+        )
+        
+        // Filter fulfilled orders (no date range)
+        const fulfilledData = allOrders.filter(order => order.status === 'fulfilled')
+        
         setPaidOrders(paidData)
-      }
-      
-      if (completedData) {
         setCompletedOrders(completedData)
+        setFulfilledOrders(fulfilledData)
+        
+        // Calculate receivable from fulfilled orders
+        const receivable = fulfilledData.reduce((total, order) => total + (order.total_amount || 0), 0)
+        setTotalReceivable(receivable)
       }
     } catch (error) {
       console.error('Error fetching orders:', error)
@@ -249,53 +239,13 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
   }
 
   const fetchReleasedOrders = async () => {
-    if (!selectedBrand) return
-    
-    try {
-      const { data, error } = await supabase
-        .from('customer_orders')
-        .select(`
-          *,
-          location:locations(*, brand:brands(*)),
-          brand:brands(*),
-          order_details(
-            *,
-            products:products(id, name, sku, unit, category)
-          )
-        `)
-        .eq('brand_id', selectedBrand.id)
-        .eq('status', 'fulfilled')
-        .order('created_at', { ascending: false })
-      
-      if (error) throw error
-      
-      if (data) {
-        setFulfilledOrders(data)
-      }
-    } catch (error) {
-      console.error('Error fetching fulfilled orders:', error)
-    }
+    // This function is no longer needed as data is fetched in fetchPaidOrders
+    // Kept for backwards compatibility
   }
 
   const fetchTotalReceivable = async () => {
-    if (!selectedBrand) return
-    
-    try {
-      const { data, error } = await supabase
-        .from('customer_orders')
-        .select('total_amount, location:locations(company_owned)')
-        .eq('brand_id', selectedBrand.id)
-        .eq('status', 'fulfilled')
-      
-      if (error) throw error
-      
-      if (data) {
-        const receivable = data.reduce((total, order) => total + (order.total_amount || 0), 0)
-        setTotalReceivable(receivable)
-      }
-    } catch (error) {
-      console.error('Error fetching receivables:', error)
-    }
+    // This function is no longer needed as data is fetched in fetchPaidOrders
+    // Kept for backwards compatibility
   }
 
   const handleMarkComplete = async (orderId: string) => {
@@ -367,7 +317,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     return { total: totalPans, hasImage }
   }
 
-  const getCategoryTotals = (order: PaidOrder) => {
+  const getCategoryTotals = useCallback((order: PaidOrder) => {
     if (!order.order_details) return []
     
     const categoryMap = new Map()
@@ -395,11 +345,11 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     })
     
     return Array.from(categoryMap.values())
-  }
+  }, [])
 
-  const getTotalAmount = (order: PaidOrder) => {
+  const getTotalAmount = useCallback((order: PaidOrder) => {
     return order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
-  }
+  }, [])
 
   // Pagination logic for completed orders
   const getCompletedOrdersForPage = () => {
@@ -424,26 +374,25 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     return order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
   }
 
-  const calculateTotalRevenue = () => {
-    const paidTotal = paidOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
-    const completedTotal = completedOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
-    return paidTotal + completedTotal
-  }
-
-  const calculateTotalPaid = () => {
+  // Memoized revenue calculations
+  const calculateTotalPaid = useMemo(() => {
     return paidOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
-  }
+  }, [paidOrders])
 
-  const calculateTotalCompleted = () => {
+  const calculateTotalCompleted = useMemo(() => {
     return completedOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
-  }
+  }, [completedOrders])
+
+  const calculateTotalRevenue = useMemo(() => {
+    return calculateTotalPaid + calculateTotalCompleted
+  }, [calculateTotalPaid, calculateTotalCompleted])
 
   // Helper functions for MyChoice company-owned separation
   const isMyChoiceCompanyOwned = (order: PaidOrder) => {
     return order.brand?.name?.toLowerCase().includes('mychoice') && order.location?.company_owned === true
   }
 
-  const calculateMyChoiceCompanyOwnedRevenue = () => {
+  const calculateMyChoiceCompanyOwnedRevenue = useMemo(() => {
     const paidMyChoice = paidOrders
       .filter(order => isMyChoiceCompanyOwned(order))
       .reduce((total, order) => total + (order.total_amount || 0), 0)
@@ -451,9 +400,9 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       .filter(order => isMyChoiceCompanyOwned(order))
       .reduce((total, order) => total + (order.total_amount || 0), 0)
     return paidMyChoice + completedMyChoice
-  }
+  }, [paidOrders, completedOrders])
 
-  const calculateFranchiseRevenue = () => {
+  const calculateFranchiseRevenue = useMemo(() => {
     const paidFranchise = paidOrders
       .filter(order => !isMyChoiceCompanyOwned(order))
       .reduce((total, order) => total + (order.total_amount || 0), 0)
@@ -461,19 +410,19 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       .filter(order => !isMyChoiceCompanyOwned(order))
       .reduce((total, order) => total + (order.total_amount || 0), 0)
     return paidFranchise + completedFranchise
-  }
+  }, [paidOrders, completedOrders])
 
-  const getMyChoiceCompanyOwnedOrders = () => {
+  const getMyChoiceCompanyOwnedOrders = useMemo(() => {
     const paidMyChoice = paidOrders.filter(order => isMyChoiceCompanyOwned(order))
     const completedMyChoice = completedOrders.filter(order => isMyChoiceCompanyOwned(order))
     return [...paidMyChoice, ...completedMyChoice]
-  }
+  }, [paidOrders, completedOrders])
 
-  const getFranchiseOrders = () => {
+  const getFranchiseOrders = useMemo(() => {
     const paidFranchise = paidOrders.filter(order => !isMyChoiceCompanyOwned(order))
     const completedFranchise = completedOrders.filter(order => !isMyChoiceCompanyOwned(order))
     return [...paidFranchise, ...completedFranchise]
-  }
+  }, [paidOrders, completedOrders])
 
   const calculateMyChoiceCompanyOwnedPaid = () => {
     return paidOrders
@@ -907,21 +856,70 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       </div>
 
       {/* Summary */}
-      <div className="bg-white rounded-lg shadow-sm border p-6">
-        <div className="flex justify-between items-center mb-4">
-          <h4 className="text-lg font-medium">Summary</h4>
+      {loading ? (
+        <div className="bg-white rounded-lg shadow-sm border p-6">
+          <div className="flex justify-between items-center mb-4">
+            <div className="h-6 bg-gray-200 rounded w-32 animate-pulse"></div>
+          </div>
+          
+          {/* Summary cards skeleton */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            {[...Array(4)].map((_, idx) => (
+              <div key={idx} className="bg-gray-50 p-4 rounded-lg">
+                <div className="h-4 bg-gray-200 rounded w-24 mb-2 animate-pulse"></div>
+                <div className="h-8 bg-gray-200 rounded w-32 mb-2 animate-pulse"></div>
+                <div className="h-3 bg-gray-200 rounded w-20 animate-pulse"></div>
+              </div>
+            ))}
+          </div>
+          
+          {/* Table skeleton */}
+          <div className="bg-white rounded-lg shadow-sm border overflow-hidden mt-6">
+            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+              <div className="h-6 bg-gray-200 rounded w-48 animate-pulse"></div>
+            </div>
+            <div>
+              <table className="w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    {[...Array(7)].map((_, i) => (
+                      <th key={i} className="px-6 py-3 text-left">
+                        <div className="h-4 bg-gray-200 rounded w-20 animate-pulse"></div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {[...Array(3)].map((_, rowIdx) => (
+                    <tr key={rowIdx}>
+                      {[...Array(7)].map((_, cellIdx) => (
+                        <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
+                          <div className="h-4 bg-gray-200 rounded w-24 animate-pulse"></div>
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-        
-        {/* MyChoice Company-Owned Summary */}
-        {selectedBrand?.name?.toLowerCase().includes('mychoice') && (
+      ) : (
+        <div className="bg-white rounded-lg shadow-sm border p-6">
+          <div className="flex justify-between items-center mb-4">
+            <h4 className="text-lg font-medium">Summary</h4>
+          </div>
+          
+          {/* MyChoice Company-Owned Summary */}
+          {selectedBrand?.name?.toLowerCase().includes('mychoice') && (
           <div className="mb-6">
             {/* Company Owned Section */}
             <div className="mb-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-green-50 p-4 rounded-lg">
                   <p className="text-sm text-green-600 font-medium">Total Company Owned Revenue</p>
-                  <p className="text-2xl font-bold text-green-900">₱{calculateMyChoiceCompanyOwnedRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                  <p className="text-xs text-green-700 mt-1">{getMyChoiceCompanyOwnedOrders().length} company orders</p>
+                  <p className="text-2xl font-bold text-green-900">₱{calculateMyChoiceCompanyOwnedRevenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-green-700 mt-1">{getMyChoiceCompanyOwnedOrders.length} company orders</p>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-lg">
                   <p className="text-sm text-blue-600 font-medium">Total Paid</p>
@@ -941,8 +939,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-green-50 p-4 rounded-lg">
                   <p className="text-sm text-green-600 font-medium">Total Franchise Revenue</p>
-                  <p className="text-2xl font-bold text-green-900">₱{calculateFranchiseRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                  <p className="text-xs text-green-700 mt-1">{getFranchiseOrders().length} franchise orders</p>
+                  <p className="text-2xl font-bold text-green-900">₱{calculateFranchiseRevenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                  <p className="text-xs text-green-700 mt-1">{getFranchiseOrders.length} franchise orders</p>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-lg">
                   <p className="text-sm text-blue-600 font-medium">Total Paid</p>
@@ -964,17 +962,17 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-green-50 p-4 rounded-lg">
               <p className="text-sm text-green-600 font-medium">Total Revenue</p>
-              <p className="text-2xl font-bold text-green-900">₱{calculateTotalRevenue().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-2xl font-bold text-green-900">₱{calculateTotalRevenue.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
               <p className="text-xs text-green-700 mt-1">{paidOrders.length + completedOrders.length} total orders</p>
             </div>
             <div className="bg-purple-50 p-4 rounded-lg">
               <p className="text-sm text-purple-600 font-medium">Paid Orders</p>
-              <p className="text-2xl font-bold text-purple-900">₱{calculateTotalPaid().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-2xl font-bold text-purple-900">₱{calculateTotalPaid.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
               <p className="text-xs text-purple-700 mt-1">{paidOrders.length} paid orders</p>
             </div>
             <div className="bg-indigo-50 p-4 rounded-lg">
               <p className="text-sm text-indigo-600 font-medium">Completed Orders</p>
-              <p className="text-2xl font-bold text-indigo-900">₱{calculateTotalCompleted().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+              <p className="text-2xl font-bold text-indigo-900">₱{calculateTotalCompleted.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
               <p className="text-xs text-indigo-700 mt-1">{completedOrders.length} completed orders</p>
             </div>
             <div className="bg-orange-50 p-4 rounded-lg">
@@ -984,7 +982,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
             </div>
           </div>
         )}
-      </div>
+        </div>
+      )}
 
       {/* Fulfilled Orders (Unpaid) */}
       {fulfilledOrders.length > 0 && (
@@ -1419,8 +1418,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               </div>
             </div>
           </div>
-        )}
-      </div>
+          )}
+        </div>
 
       {fulfilledOrders.length === 0 && paidOrders.length === 0 && completedOrders.length === 0 && !loading && (
         <div className="bg-white rounded-lg shadow-sm border p-12 text-center">

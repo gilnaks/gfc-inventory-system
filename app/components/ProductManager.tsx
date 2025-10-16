@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Product, Brand } from '../../lib/supabase'
 import { Plus, Edit, Trash2, Save, X, CheckCircle } from 'lucide-react'
 import { getPhilippinesDate } from '../../lib/timezone'
@@ -28,6 +28,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   const [categories, setCategories] = useState<string[]>([])
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false)
   const [fetchTimeout, setFetchTimeout] = useState<NodeJS.Timeout | null>(null)
+  const [updateTimeout, setUpdateTimeout] = useState<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
     if (selectedBrand) {
@@ -48,6 +49,9 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     return () => {
       if (fetchTimeout) {
         clearTimeout(fetchTimeout)
+      }
+      if (updateTimeout) {
+        clearTimeout(updateTimeout)
       }
     }
   }, [selectedBrand])
@@ -122,36 +126,40 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     }
   }
 
-  const generateNextSKU = async (brandId: string) => {
+  const generateNextSKU = useCallback(async (brandId: string) => {
     if (!selectedBrand) return ''
 
     try {
-      // Fetch all products for this brand to find the highest SKU number
+      // Use a more efficient query to get the highest SKU number
+      const prefix = getBrandPrefix(selectedBrand.slug)
+      
+      // Query only SKUs that start with our prefix, ordered by SKU descending
       const { data, error } = await supabase
         .from('products')
         .select('sku')
         .eq('brand_id', brandId)
         .not('sku', 'is', null)
+        .like('sku', `${prefix}%`)
+        .order('sku', { ascending: false })
+        .limit(1) // Only get the highest one
 
       if (error) {
         console.error('Error fetching products for SKU generation:', error)
-        return getBrandPrefix(selectedBrand.slug) + '001'
+        return prefix + '001'
       }
 
-      const prefix = getBrandPrefix(selectedBrand.slug)
       let maxNumber = 0
 
-      // Find the highest number in existing SKUs
+      // Find the highest number in the returned SKU
       if (data && data.length > 0) {
-        data.forEach(product => {
-          if (product.sku && product.sku.startsWith(prefix)) {
-            const numberPart = product.sku.substring(prefix.length)
-            const number = parseInt(numberPart)
-            if (!isNaN(number) && number > maxNumber) {
-              maxNumber = number
-            }
+        const sku = data[0].sku
+        if (sku && sku.startsWith(prefix)) {
+          const numberPart = sku.substring(prefix.length)
+          const number = parseInt(numberPart)
+          if (!isNaN(number)) {
+            maxNumber = number
           }
-        })
+        }
       }
 
       // Generate next SKU
@@ -161,12 +169,13 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
       console.error('Error generating SKU:', error)
       return getBrandPrefix(selectedBrand.slug) + '001'
     }
-  }
+  }, [selectedBrand])
 
   const fetchProducts = async () => {
     if (!selectedBrand) return
     
     setLoading(true)
+    
     try {
       console.log('Fetching products for brand:', selectedBrand.name)
       
@@ -220,7 +229,8 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     }
   }
 
-  const groupProductsByCategory = (products: Product[]) => {
+  // Memoized grouped products calculation
+  const groupedProducts = useMemo(() => {
     const grouped = products.reduce((acc, product) => {
       const category = product.category || 'Uncategorized'
       if (!acc[category]) {
@@ -241,7 +251,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
       category,
       products: grouped[category]
     }))
-  }
+  }, [products])
 
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -284,40 +294,60 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     }
   }
 
-  const handleUpdateProduct = async (product: Product) => {
-    try {
-      const { data, error } = await supabase
-        .from('products')
-        .update({
-          name: product.name,
-          sku: product.sku,
-          category: product.category,
-          unit: product.unit,
-          price: product.price,
-          initial_stock: product.initial_stock,
-          production: product.production,
-          released: product.released,
-          reserved: product.reserved
-        })
-        .eq('id', product.id)
-        .select()
-
-      if (error) {
-        console.error('Error updating product:', error)
-        alert('Error updating product: ' + error.message)
-        return
-      }
-
-      if (data) {
-        // Manually refetch products to get updated computed values from inventory_summary view
-        await fetchProducts()
-        setEditingProduct(null)
-      }
-    } catch (error) {
-      console.error('Error updating product:', error)
-      alert('Error updating product')
+  const handleUpdateProduct = useCallback(async (product: Product) => {
+    // Clear any existing timeout
+    if (updateTimeout) {
+      clearTimeout(updateTimeout)
     }
-  }
+    
+    // Debounce the update to prevent excessive API calls
+    const timeout = setTimeout(async () => {
+      try {
+        const { data, error } = await supabase
+          .from('products')
+          .update({
+            name: product.name,
+            sku: product.sku,
+            category: product.category,
+            unit: product.unit,
+            price: product.price,
+            initial_stock: product.initial_stock,
+            production: product.production,
+            released: product.released,
+            reserved: product.reserved
+          })
+          .eq('id', product.id)
+          .select()
+
+        if (error) {
+          console.error('Error updating product:', error)
+          alert('Error updating product: ' + error.message)
+          return
+        }
+
+        if (data) {
+          // Update local state immediately for better UX
+          setProducts(prev => prev.map(p => 
+            p.id === product.id 
+              ? {
+                  ...p,
+                  ...product,
+                  product_name: product.name,
+                  final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
+                  available_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0) - (product.reserved || 0)
+                }
+              : p
+          ))
+          setEditingProduct(null)
+        }
+      } catch (error) {
+        console.error('Error updating product:', error)
+        alert('Error updating product')
+      }
+    }, 500) // 500ms debounce
+    
+    setUpdateTimeout(timeout)
+  }, [updateTimeout])
 
   const handleDeleteProduct = async (productId: string) => {
     if (!confirm('Are you sure you want to delete this product?')) return
@@ -660,9 +690,44 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
 
       {/* Products List */}
       {loading ? (
-        <div className="flex items-center justify-center py-8">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          <span className="ml-3 text-gray-600">Loading products...</span>
+        <div className="space-y-6">
+          {/* Skeleton for each category */}
+          {[...Array(2)].map((_, categoryIndex) => (
+            <div key={categoryIndex} className="bg-white rounded-lg border shadow-sm overflow-hidden">
+              {/* Category header skeleton */}
+              <div className="bg-gray-50 px-6 py-3 border-b">
+                <div className="animate-pulse">
+                  <div className="h-6 bg-gray-200 rounded w-48"></div>
+                </div>
+              </div>
+              
+              {/* Table skeleton */}
+              <div>
+                <table className="w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      {[...Array(11)].map((_, i) => (
+                        <th key={i} className="px-6 py-3 text-left">
+                          <div className="h-4 bg-gray-200 rounded w-16 animate-pulse"></div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {[...Array(3)].map((_, rowIndex) => (
+                      <tr key={rowIndex}>
+                        {[...Array(11)].map((_, cellIndex) => (
+                          <td key={cellIndex} className="px-6 py-2 whitespace-nowrap">
+                            <div className="h-4 bg-gray-200 rounded w-20 animate-pulse"></div>
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
         </div>
       ) : products.length === 0 ? (
         <div className="text-center py-8 text-gray-500">
@@ -671,7 +736,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
         </div>
       ) : (
         <div className="space-y-6">
-          {groupProductsByCategory(products).map(({ category, products: categoryProducts }) => (
+          {groupedProducts.map(({ category, products: categoryProducts }) => (
             <div key={category} className="bg-white rounded-lg border shadow-sm overflow-hidden hover:shadow-md transition-shadow duration-200 ease-in-out">
               <div className="bg-gray-50 px-6 py-3 border-b hover:bg-gray-100 transition-colors duration-200 ease-in-out">
                 <h3 className="text-lg font-medium text-gray-900">

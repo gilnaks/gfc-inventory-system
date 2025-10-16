@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Calendar, Clock, Truck, Package, Plus, X, Edit, Trash2, ChevronLeft, ChevronRight, Sun, Moon, ArrowUpDown, ArrowDown, ArrowUp } from 'lucide-react'
 import { formatPhilippinesDateTime, toPhilippinesDateString } from '../../lib/timezone'
@@ -189,7 +189,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     }
   }
 
-  const getAssignmentsForDate = (date: string, timeSlot: 'morning' | 'afternoon') => {
+  const getAssignmentsForDate = useCallback((date: string, timeSlot: 'morning' | 'afternoon') => {
     let filteredAssignments = assignments.filter(
       assignment => assignment.date === date && assignment.time_slot === timeSlot
     )
@@ -214,7 +214,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     })
 
     return filteredAssignments
-  }
+  }, [assignments, sortByDeliveryType, sortOrder])
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -232,7 +232,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
   }
 
   // Independent color mapping for calendar assignments
-  const getCalendarBrandColor = (brandId: string, brandName?: string) => {
+  const getCalendarBrandColor = useCallback((brandId: string, brandName?: string) => {
     // Custom brand color mapping - same base color for both time slots
     const brandColorMap: { [key: string]: { morning: string; afternoon: string } } = {
       'mychoice': {
@@ -285,10 +285,10 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
         afternoon: 'bg-gray-100 border-gray-400 border-l-4'
       }
     }
-  }
+  }, [])
 
   // Color for popup orders (uses current theme)
-  const getPopupBrandColor = () => {
+  const popupBrandColor = useMemo(() => {
     const currentTheme = theme || ''
     if (currentTheme === 'green') return {
       morning: 'bg-green-100 border-green-400',
@@ -314,9 +314,9 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
       morning: 'bg-gray-100 border-gray-400',
       afternoon: 'bg-slate-100 border-slate-400'
     }
-  }
+  }, [theme])
 
-  const getDaysInMonth = () => {
+  const daysInMonth = useMemo(() => {
     const year = currentDate.getFullYear()
     const month = currentDate.getMonth()
     const firstDay = new Date(year, month, 1)
@@ -337,7 +337,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     }
     
     return days
-  }
+  }, [currentDate])
 
   const navigateMonth = (direction: 'prev' | 'next') => {
     setCurrentDate(prev => {
@@ -439,16 +439,43 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
         </div>
 
         {/* Calendar Grid */}
-        <div className="grid grid-cols-7 gap-1">
-          {/* Day Headers */}
-          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
-            <div key={day} className="p-3 text-center text-sm font-medium text-gray-500 bg-gray-50 rounded-lg">
-              {day}
-            </div>
-          ))}
+        {loading ? (
+          <div className="grid grid-cols-7 gap-1">
+            {/* Day Headers */}
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+              <div key={day} className="p-3 text-center text-sm font-medium text-gray-500 bg-gray-50 rounded-lg">
+                {day}
+              </div>
+            ))}
+            
+            {/* Skeleton days */}
+            {[...Array(35)].map((_, idx) => (
+              <div key={idx} className="p-2 border rounded-lg min-h-[120px] bg-white border-gray-200">
+                <div className="h-4 bg-gray-200 rounded w-6 mb-2 animate-pulse"></div>
+                {/* Morning slot skeleton */}
+                <div className="mb-2">
+                  <div className="h-3 bg-gray-200 rounded w-16 mb-1 animate-pulse"></div>
+                  <div className="h-8 bg-gray-200 rounded animate-pulse"></div>
+                </div>
+                {/* Afternoon slot skeleton */}
+                <div>
+                  <div className="h-3 bg-gray-200 rounded w-16 mb-1 animate-pulse"></div>
+                  <div className="h-8 bg-gray-200 rounded animate-pulse"></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-7 gap-1">
+            {/* Day Headers */}
+            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+              <div key={day} className="p-3 text-center text-sm font-medium text-gray-500 bg-gray-50 rounded-lg">
+                {day}
+              </div>
+            ))}
 
-          {/* Calendar Days */}
-          {getDaysInMonth().map((date, index) => {
+            {/* Calendar Days */}
+            {daysInMonth.map((date, index) => {
             if (!date) {
               return <div key={index} className="p-3"></div>
             }
@@ -575,7 +602,8 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
               </div>
             )
           })}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* Order Selection Popup */}

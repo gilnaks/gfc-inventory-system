@@ -1,5 +1,5 @@
 'use client'
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
 import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X } from 'lucide-react'
@@ -64,6 +64,13 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [locationTypeFilter, setLocationTypeFilter] = useState<'all' | 'company' | 'franchise'>('all')
   const [dateFilter, setDateFilter] = useState('')
   
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [totalReports, setTotalReports] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const reportsPerPage = 20
+  
   // Edit Items Modal State
   const [isEditItemsModalOpen, setIsEditItemsModalOpen] = useState(false)
   const [predefinedItems, setPredefinedItems] = useState<any[]>([])
@@ -93,8 +100,15 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   }>({})
 
   useEffect(() => {
+    setCurrentPage(1) // Reset to first page when brand/location changes
     loadReports()
   }, [selectedBrand, selectedLocation])
+  
+  // Reset pagination when filters change
+  useEffect(() => {
+    setCurrentPage(1)
+    loadReports()
+  }, [searchTerm, statusFilter, locationTypeFilter, dateFilter])
   
   useEffect(() => {
     calculateMonthlySummary()
@@ -113,7 +127,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     }
   }, [isEditItemsModalOpen])
 
-  const calculateMonthlySummary = async () => {
+  const calculateMonthlySummary = useCallback(async () => {
     if (!selectedMonth) return
     
     // Parse the selected month (format: YYYY-MM)
@@ -196,30 +210,71 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     } catch (error) {
       console.error('Error calculating monthly summary:', error)
     }
-  }
+  }, [reports, selectedMonth, selectedLocation])
 
-  const loadReports = async () => {
-    setLoading(true)
+  const loadReports = async (page = 1, append = false) => {
+    if (page === 1) {
+      setLoading(true)
+    } else {
+      setLoadingMore(true)
+    }
+    
     try {
+      // Build the main query with all filters
       let query = supabase
         .from('dsir_reports')
         .select(`
           *,
           location:locations!inner(*),
           staff_registration:staff_registrations!inner(*)
-        `)
+        `, { count: 'exact' })
         .eq('location.brand_id', selectedBrand.id)
 
       if (selectedLocation) {
         query = query.eq('location_id', selectedLocation.id)
       }
 
-      const { data, error } = await query.order('report_date', { ascending: false }).order('created_at', { ascending: false })
+      // Apply filters
+      if (statusFilter !== 'all') {
+        query = query.eq('status', statusFilter)
+      }
+      
+      if (locationTypeFilter !== 'all') {
+        if (locationTypeFilter === 'company') {
+          query = query.eq('location.company_owned', true)
+        } else {
+          query = query.eq('location.company_owned', false)
+        }
+      }
+      
+      if (dateFilter) {
+        query = query.eq('report_date', dateFilter)
+      }
+
+      // Apply search filter
+      if (searchTerm) {
+        query = query.or(`staff_name.ilike.%${searchTerm}%,location.name.ilike.%${searchTerm}%,staff_registration.full_name.ilike.%${searchTerm}%`)
+      }
+
+      // Apply pagination
+      const { data, error, count } = await query
+        .order('report_date', { ascending: false })
+        .order('created_at', { ascending: false })
+        .range((page - 1) * reportsPerPage, page * reportsPerPage - 1)
 
       if (error) throw error
-      setReports(data || [])
+
+      // Set pagination info
+      setTotalReports(count || 0)
+      setTotalPages(Math.ceil((count || 0) / reportsPerPage))
       
-      // Check for inventory differences for each report
+      if (append) {
+        setReports(prev => [...prev, ...(data || [])])
+      } else {
+        setReports(data || [])
+      }
+      
+      // Check for inventory differences for loaded reports
       if (data && data.length > 0) {
         await checkInventoryDifferences(data)
       }
@@ -228,66 +283,112 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       setError('Failed to load DSIR reports')
     } finally {
       setLoading(false)
+      setLoadingMore(false)
+    }
+  }
+
+  const loadMoreReports = () => {
+    if (currentPage < totalPages && !loadingMore) {
+      const nextPage = currentPage + 1
+      setCurrentPage(nextPage)
+      loadReports(nextPage, true)
     }
   }
 
   const checkInventoryDifferences = async (reports: DSIRReport[]) => {
     const differences: {[reportId: string]: boolean} = {}
     
-    for (const report of reports) {
+    // Group reports by location and date for batch processing
+    const reportsByLocation = reports.reduce((acc, report) => {
+      if (!acc[report.location_id]) {
+        acc[report.location_id] = []
+      }
+      acc[report.location_id].push(report)
+      return acc
+    }, {} as {[locationId: string]: DSIRReport[]})
+
+    // Process each location's reports in batches
+    for (const [locationId, locationReports] of Object.entries(reportsByLocation)) {
       try {
-        // Calculate previous day date
-        const reportDate = new Date(report.report_date)
-        const previousDay = new Date(reportDate)
-        previousDay.setDate(previousDay.getDate() - 1)
-        const previousDayStr = previousDay.toISOString().split('T')[0]
-
-        // Find the previous day's DSIR report for the same location
-        const { data: previousReportData } = await supabase
-          .from('dsir_reports')
-          .select('id')
-          .eq('location_id', report.location_id)
-          .eq('report_date', previousDayStr)
-          .eq('status', 'submitted')
-          .order('created_at', { ascending: false })
-          .limit(1)
+        // Get all unique dates for this location
+        const uniqueDates = new Set(locationReports.map(r => r.report_date))
+        const dates = Array.from(uniqueDates).sort()
         
-        const previousReport = previousReportData?.[0] || null
+        // Batch fetch all previous reports for this location
+        const { data: previousReports } = await supabase
+          .from('dsir_reports')
+          .select('id, report_date, location_id')
+          .eq('location_id', locationId)
+          .eq('status', 'submitted')
+          .in('report_date', dates.map(date => {
+            const d = new Date(date)
+            d.setDate(d.getDate() - 1)
+            return d.toISOString().split('T')[0]
+          }))
+          .order('report_date', { ascending: false })
 
-        if (previousReport) {
-          // Load previous day's ending inventory and current day's beginning inventory
-          const [previousSales, currentSales, previousIceCream, currentIceCream, previousMaterials, currentMaterials] = await Promise.all([
-            supabase
-              .from('dsir_sales_inventory')
-              .select('item_name, ending_inventory')
-              .eq('dsir_report_id', previousReport.id),
-            supabase
-              .from('dsir_sales_inventory')
-              .select('item_name, beginning_inventory')
-              .eq('dsir_report_id', report.id),
-            supabase
-              .from('dsir_ice_cream_inventory')
-              .select('flavor, ending')
-              .eq('dsir_report_id', previousReport.id),
-            supabase
-              .from('dsir_ice_cream_inventory')
-              .select('flavor, beginning')
-              .eq('dsir_report_id', report.id),
-            supabase
-              .from('dsir_materials_inventory')
-              .select('material_name, ending')
-              .eq('dsir_report_id', previousReport.id),
-            supabase
-              .from('dsir_materials_inventory')
-              .select('material_name, beginning')
-              .eq('dsir_report_id', report.id)
-          ])
+        // Create a map of previous reports by date
+        const previousReportsMap = new Map()
+        previousReports?.forEach(prev => {
+          previousReportsMap.set(prev.report_date, prev.id)
+        })
 
-          // Check for differences in sales inventory
-          let hasDifference = false
+        // Get all report IDs we need to check
+        const currentReportIds = locationReports.map(r => r.id)
+        const previousReportIds = Array.from(previousReportsMap.values())
+
+        if (previousReportIds.length === 0) {
+          // No previous reports, mark all as no differences
+          locationReports.forEach(report => {
+            differences[report.id] = false
+          })
+          continue
+        }
+
+        // Batch fetch all inventory data in 3 queries instead of 6 per report
+        const [allSalesData, allIceCreamData, allMaterialsData] = await Promise.all([
+          supabase
+            .from('dsir_sales_inventory')
+            .select('dsir_report_id, item_name, beginning_inventory, ending_inventory')
+            .in('dsir_report_id', [...currentReportIds, ...previousReportIds]),
+          supabase
+            .from('dsir_ice_cream_inventory')
+            .select('dsir_report_id, flavor, beginning, ending')
+            .in('dsir_report_id', [...currentReportIds, ...previousReportIds]),
+          supabase
+            .from('dsir_materials_inventory')
+            .select('dsir_report_id, material_name, beginning, ending')
+            .in('dsir_report_id', [...currentReportIds, ...previousReportIds])
+        ])
+
+        // Process each report for this location
+        for (const report of locationReports) {
+          const reportDate = new Date(report.report_date)
+          const previousDay = new Date(reportDate)
+          previousDay.setDate(previousDay.getDate() - 1)
+          const previousDayStr = previousDay.toISOString().split('T')[0]
           
-          for (const currentItem of currentSales.data || []) {
-            const previousItem = previousSales.data?.find(p => p.item_name === currentItem.item_name)
+          const previousReportId = previousReportsMap.get(previousDayStr)
+          
+          if (!previousReportId) {
+            differences[report.id] = false
+            continue
+          }
+
+          // Filter data for current and previous reports
+          const currentSales = allSalesData.data?.filter(item => item.dsir_report_id === report.id) || []
+          const previousSales = allSalesData.data?.filter(item => item.dsir_report_id === previousReportId) || []
+          const currentIceCream = allIceCreamData.data?.filter(item => item.dsir_report_id === report.id) || []
+          const previousIceCream = allIceCreamData.data?.filter(item => item.dsir_report_id === previousReportId) || []
+          const currentMaterials = allMaterialsData.data?.filter(item => item.dsir_report_id === report.id) || []
+          const previousMaterials = allMaterialsData.data?.filter(item => item.dsir_report_id === previousReportId) || []
+
+          // Check for differences
+          let hasDifference = false
+
+          // Check sales inventory differences
+          for (const currentItem of currentSales) {
+            const previousItem = previousSales.find(p => p.item_name === currentItem.item_name)
             const previousEnding = previousItem?.ending_inventory || 0
             const currentBeginning = currentItem.beginning_inventory || 0
             
@@ -297,10 +398,10 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             }
           }
 
-          // Check for differences in ice cream inventory
+          // Check ice cream inventory differences
           if (!hasDifference) {
-            for (const currentItem of currentIceCream.data || []) {
-              const previousItem = previousIceCream.data?.find(p => p.flavor === currentItem.flavor)
+            for (const currentItem of currentIceCream) {
+              const previousItem = previousIceCream.find(p => p.flavor === currentItem.flavor)
               const previousEnding = previousItem?.ending || 0
               const currentBeginning = currentItem.beginning || 0
               
@@ -311,10 +412,10 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             }
           }
 
-          // Check for differences in materials inventory
+          // Check materials inventory differences
           if (!hasDifference) {
-            for (const currentItem of currentMaterials.data || []) {
-              const previousItem = previousMaterials.data?.find(p => p.material_name === currentItem.material_name)
+            for (const currentItem of currentMaterials) {
+              const previousItem = previousMaterials.find(p => p.material_name === currentItem.material_name)
               const previousEnding = previousItem?.ending || 0
               const currentBeginning = currentItem.beginning || 0
               
@@ -326,12 +427,13 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           }
 
           differences[report.id] = hasDifference
-        } else {
-          differences[report.id] = false
         }
       } catch (error) {
-        console.error(`Error checking differences for report ${report.id}:`, error)
-        differences[report.id] = false
+        console.error(`Error checking differences for location ${locationId}:`, error)
+        // Mark all reports for this location as no differences on error
+        locationReports.forEach(report => {
+          differences[report.id] = false
+        })
       }
     }
 
@@ -599,40 +701,25 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     return categoryNames[category] || category.charAt(0).toUpperCase() + category.slice(1)
   }
 
-  const filteredReports = reports.filter(report => {
-    const matchesSearch = 
-      report.staff_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      report.location?.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      report.staff_registration?.full_name?.toLowerCase().includes(searchTerm.toLowerCase())
-    
-    const matchesStatus = statusFilter === 'all' || report.status === statusFilter
-    
-    const matchesLocationType = locationTypeFilter === 'all' || 
-      (locationTypeFilter === 'company' && report.location?.company_owned) ||
-      (locationTypeFilter === 'franchise' && !report.location?.company_owned)
-    
-    const matchesDate = !dateFilter || report.report_date === dateFilter
-    
-    return matchesSearch && matchesStatus && matchesLocationType && matchesDate
-  }).sort((a, b) => {
-    // Sort by report_date first, then by created_at as fallback
-    const dateA = new Date(a.report_date || a.created_at)
-    const dateB = new Date(b.report_date || b.created_at)
-    return dateB.getTime() - dateA.getTime() // Most recent first
-  })
+  // Reports are already filtered server-side, so we can use them directly
+  const filteredReports = reports
 
-  // Group reports by date
-  const groupedReports = filteredReports.reduce((groups, report) => {
-    const date = report.report_date
-    if (!groups[date]) {
-      groups[date] = []
-    }
-    groups[date].push(report)
-    return groups
-  }, {} as { [date: string]: DSIRReport[] })
+  // Memoized grouped reports calculation
+  const groupedReports = useMemo(() => {
+    return filteredReports.reduce((groups, report) => {
+      const date = report.report_date
+      if (!groups[date]) {
+        groups[date] = []
+      }
+      groups[date].push(report)
+      return groups
+    }, {} as { [date: string]: DSIRReport[] })
+  }, [filteredReports])
 
-  // Sort dates in descending order
-  const sortedDates = Object.keys(groupedReports).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())
+  // Memoized sorted dates calculation
+  const sortedDates = useMemo(() => {
+    return Object.keys(groupedReports).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())
+  }, [groupedReports])
 
   const formatDateTime = (dateString: string) => {
     return new Date(dateString).toLocaleString('en-US', {
@@ -673,12 +760,112 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     )
   }
 
+  // Skeleton loading component
+  const SkeletonRow = () => (
+    <tr className="animate-pulse">
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-4 bg-gray-200 rounded w-20"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-4 bg-gray-200 rounded w-32"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-4 bg-gray-200 rounded w-24"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-6 bg-gray-200 rounded-full w-16"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-4 bg-gray-200 rounded w-20"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-4 bg-gray-200 rounded w-24"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap">
+        <div className="h-4 bg-gray-200 rounded w-28"></div>
+      </td>
+      <td className="px-6 py-4 whitespace-nowrap text-right">
+        <div className="flex space-x-2 justify-end">
+          <div className="h-8 w-8 bg-gray-200 rounded"></div>
+          <div className="h-8 w-8 bg-gray-200 rounded"></div>
+          <div className="h-8 w-8 bg-gray-200 rounded"></div>
+        </div>
+      </td>
+    </tr>
+  )
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading DSIR reports...</p>
+      <div className="space-y-6">
+        {/* Header Skeleton */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
+          <div className="animate-pulse">
+            <div className="h-6 bg-gray-200 rounded w-32 mb-2"></div>
+            <div className="h-4 bg-gray-200 rounded w-64"></div>
+          </div>
+          <div className="flex space-x-3">
+            <div className="h-10 bg-gray-200 rounded w-24"></div>
+            <div className="h-10 bg-gray-200 rounded w-20"></div>
+          </div>
+        </div>
+
+        {/* Monthly Summary Skeleton */}
+        <div className="bg-white rounded-lg shadow-sm border p-4">
+          <div className="animate-pulse">
+            <div className="h-5 bg-gray-200 rounded w-48 mb-3"></div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                  <div className="h-4 bg-gray-200 rounded w-24 mb-2"></div>
+                  <div className="space-y-1">
+                    {[...Array(5)].map((_, j) => (
+                      <div key={j} className="flex justify-between">
+                        <div className="h-3 bg-gray-200 rounded w-20"></div>
+                        <div className="h-3 bg-gray-200 rounded w-16"></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Filters Skeleton */}
+        <div className="flex flex-col lg:flex-row space-y-4 lg:space-y-0 lg:space-x-4 lg:items-center">
+          <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4 flex-1">
+            <div className="h-10 bg-gray-200 rounded w-80"></div>
+            <div className="h-10 bg-gray-200 rounded w-32"></div>
+            <div className="h-10 bg-gray-200 rounded w-24"></div>
+          </div>
+          <div className="flex items-center space-x-3">
+            {[...Array(3)].map((_, i) => (
+              <div key={i} className="flex items-center space-x-1">
+                <div className="h-4 w-4 bg-gray-200 rounded"></div>
+                <div className="h-4 bg-gray-200 rounded w-12"></div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Table Skeleton */}
+        <div className="bg-white shadow overflow-hidden sm:rounded-md">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  {[...Array(8)].map((_, i) => (
+                    <th key={i} className="px-6 py-3 text-left">
+                      <div className="h-4 bg-gray-200 rounded w-16"></div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {[...Array(5)].map((_, i) => <SkeletonRow key={i} />)}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     )
@@ -708,7 +895,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             </button>
           )}
           <button
-            onClick={loadReports}
+            onClick={() => loadReports()}
             className="flex items-center space-x-2 px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50"
           >
             <RefreshCw className="h-4 w-4" />
@@ -862,6 +1049,35 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             </div>
         </div>
       </div>
+
+      {/* Pagination Info */}
+      {!loading && totalReports > 0 && (
+        <div className="flex items-center justify-between text-sm text-gray-600 mb-4">
+          <div>
+            Showing {filteredReports.length} of {totalReports} reports
+            {totalPages > 1 && ` (Page ${currentPage} of ${totalPages})`}
+          </div>
+          {currentPage < totalPages && (
+            <button
+              onClick={loadMoreReports}
+              disabled={loadingMore}
+              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loadingMore ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                  <span>Loading...</span>
+                </>
+              ) : (
+                <>
+                  <span>Load More</span>
+                  <span className="text-xs">({totalReports - filteredReports.length} remaining)</span>
+                </>
+              )}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Reports List */}
       {filteredReports.length === 0 ? (

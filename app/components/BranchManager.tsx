@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { MapPin, Plus, Edit, Trash2, Save, X, FileText, Printer, Eye, Copy } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
@@ -92,8 +92,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
   useEffect(() => {
     if (selectedBrand) {
-      fetchLocations()
-      fetchBrands()
+      loadData()
       // Update newLocation brand_id when selectedBrand changes
       setNewLocation(prev => ({ ...prev, brand_id: selectedBrand.id }))
       
@@ -136,52 +135,42 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     }
   }, [selectedBrand, showOrderHistory, selectedLocation])
 
-  const fetchLocations = async () => {
+  const loadData = async () => {
     if (!selectedBrand) return
     
     setLoading(true)
     try {
-      const { data, error } = await supabase
-        .from('locations')
-        .select(`
-          *,
-          brand:brands(*)
-        `)
-        .eq('brand_id', selectedBrand.id)
-        .order('name')
+      // Fetch locations and brands in parallel
+      const [locationsResult, brandsResult] = await Promise.all([
+        supabase
+          .from('locations')
+          .select(`
+            *,
+            brand:brands(*)
+          `)
+          .eq('brand_id', selectedBrand.id)
+          .order('name'),
+        supabase
+          .from('brands')
+          .select('*')
+          .order('name')
+      ])
       
-      if (error) {
-        console.error('Error fetching locations:', error)
-        return
+      if (locationsResult.error) {
+        console.error('Error fetching locations:', locationsResult.error)
+      } else if (locationsResult.data) {
+        setLocations(locationsResult.data)
       }
       
-      if (data) {
-        setLocations(data)
+      if (brandsResult.error) {
+        console.error('Error fetching brands:', brandsResult.error)
+      } else if (brandsResult.data) {
+        setBrands(brandsResult.data)
       }
     } catch (error) {
-      console.error('Error fetching locations:', error)
+      console.error('Error loading data:', error)
     } finally {
       setLoading(false)
-    }
-  }
-
-  const fetchBrands = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('brands')
-        .select('*')
-        .order('name')
-      
-      if (error) {
-        console.error('Error fetching brands:', error)
-        return
-      }
-      
-      if (data) {
-        setBrands(data)
-      }
-    } catch (error) {
-      console.error('Error fetching brands:', error)
     }
   }
 
@@ -314,21 +303,21 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     await fetchLocationOrders(location.id)
   }
 
-  const calculateTotalRevenue = (orders: CustomerOrder[]) => {
+  const calculateTotalRevenue = useCallback((orders: CustomerOrder[]) => {
     return orders.reduce((total, order) => total + (order.total_amount || 0), 0)
-  }
+  }, [])
 
-  const calculateTotalPaid = (orders: CustomerOrder[]) => {
+  const calculateTotalPaid = useCallback((orders: CustomerOrder[]) => {
     return orders
       .filter(order => order.status === 'paid' || order.status === 'complete')
       .reduce((total, order) => total + (order.total_amount || 0), 0)
-  }
+  }, [])
 
-  const calculateTotalReceivable = (orders: CustomerOrder[]) => {
+  const calculateTotalReceivable = useCallback((orders: CustomerOrder[]) => {
     return orders
       .filter(order => order.status === 'fulfilled')
       .reduce((total, order) => total + (order.total_amount || 0), 0)
-  }
+  }, [])
 
   const copyToClipboard = async (text: string) => {
     try {
@@ -388,19 +377,19 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     )
   }
 
-  const getTotalItems = (order: CustomerOrder) => {
+  const getTotalItems = useCallback((order: CustomerOrder) => {
     return order.order_details.reduce((total, detail) => total + detail.quantity, 0)
-  }
+  }, [])
 
-  const getTotalAmount = (order: CustomerOrder) => {
+  const getTotalAmount = useCallback((order: CustomerOrder) => {
     return order.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0)
-  }
+  }, [])
 
-  const getSubtotalAmount = (order: CustomerOrder) => {
+  const getSubtotalAmount = useCallback((order: CustomerOrder) => {
     return order.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0)
-  }
+  }, [])
 
-  const getCategoryTotals = (order: CustomerOrder) => {
+  const getCategoryTotals = useCallback((order: CustomerOrder) => {
     const categoryMap = new Map<string, { category: string; totalQuantity: number; totalAmount: number }>()
     
     order.order_details.forEach(detail => {
@@ -414,7 +403,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     })
     
     return Array.from(categoryMap.values())
-  }
+  }, [])
 
   const handleViewDetails = (order: CustomerOrder) => {
     setSelectedOrder(order)
@@ -1483,8 +1472,31 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
       {/* Branches List */}
       {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
+          <div>
+            <table className="w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  {['Branch Name', 'Passkey', 'Franchisee', 'Contact', 'Type', 'Access Features', 'Remote Branch', 'Actions'].map((header, idx) => (
+                    <th key={idx} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      {header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {[...Array(5)].map((_, idx) => (
+                  <tr key={idx}>
+                    {[...Array(8)].map((_, cellIdx) => (
+                      <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
+                        <div className="h-6 bg-gray-200 rounded animate-pulse"></div>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <div className="bg-white rounded-lg shadow-sm border overflow-hidden">

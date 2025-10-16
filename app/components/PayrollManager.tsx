@@ -1,5 +1,5 @@
 'use client'
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Calculator, Clock, DollarSign, Calendar, TrendingUp, Users, Printer, ChevronLeft, ChevronRight, Minus, Save } from 'lucide-react'
 
@@ -112,6 +112,7 @@ export function PayrollManager() {
     refunds: string
   }}>({})
   const [savingDeductions, setSavingDeductions] = useState(false)
+  const [companyLocationIds, setCompanyLocationIds] = useState<string[]>([])
 
   useEffect(() => {
     // Only refresh data if calendar is closed or if it's not custom period
@@ -164,7 +165,7 @@ export function PayrollManager() {
   const loadStaffAndPayrollData = async () => {
     setLoading(true)
     try {
-      // Load company-owned locations first
+      // Load company-owned locations first and cache them
       const { data: companyLocations, error: locationError } = await supabase
         .from('locations')
         .select('id')
@@ -172,7 +173,8 @@ export function PayrollManager() {
 
       if (locationError) throw locationError
 
-      const companyLocationIds = companyLocations?.map(loc => loc.id) || []
+      const locationIds = companyLocations?.map(loc => loc.id) || []
+      setCompanyLocationIds(locationIds) // Cache for reuse
 
       // Load staff data
       const { data: staffData, error: staffError } = await supabase
@@ -186,7 +188,7 @@ export function PayrollManager() {
       const { data: assignmentsData, error: assignmentsError } = await supabase
         .from('staff_assignments')
         .select('id, staff_registration_id, location_id')
-        .in('location_id', companyLocationIds) // Only company-owned locations
+        .in('location_id', locationIds) // Only company-owned locations
 
       if (assignmentsError) throw assignmentsError
 
@@ -230,15 +232,8 @@ export function PayrollManager() {
       const endDate = getEndDate()
       const today = new Date().toISOString().split('T')[0]
 
-      // Get company-owned location IDs
-      const { data: companyLocations, error: locationError } = await supabase
-        .from('locations')
-        .select('id')
-        .eq('company_owned', true)
-
-      if (locationError) throw locationError
-
-      const companyLocationIds = companyLocations?.map(loc => loc.id) || []
+      // Use cached company location IDs
+      const locationIds = companyLocationIds.length > 0 ? companyLocationIds : []
 
       const { data: scheduleData, error: scheduleError } = await supabase
         .from('staff_schedules')
@@ -249,7 +244,7 @@ export function PayrollManager() {
         `)
         .gte('schedule_date', startDate)
         .lte('schedule_date', endDate)
-        .in('location_id', companyLocationIds) // Only company-owned locations
+        .in('location_id', locationIds) // Only company-owned locations
         .order('schedule_date', { ascending: true })
 
       if (scheduleError) {
@@ -417,15 +412,8 @@ export function PayrollManager() {
   const getScheduleDataForWeek = async (startDate: string, endDate: string) => {
     const today = new Date().toISOString().split('T')[0]
 
-    // Get company-owned location IDs
-    const { data: companyLocations, error: locationError } = await supabase
-      .from('locations')
-      .select('id')
-      .eq('company_owned', true)
-
-    if (locationError) throw locationError
-
-    const companyLocationIds = companyLocations?.map(loc => loc.id) || []
+    // Use cached company location IDs
+    const locationIds = companyLocationIds.length > 0 ? companyLocationIds : []
 
     const { data: scheduleData, error: scheduleError } = await supabase
       .from('staff_schedules')
@@ -436,7 +424,7 @@ export function PayrollManager() {
       `)
       .gte('schedule_date', startDate)
       .lte('schedule_date', endDate)
-      .in('location_id', companyLocationIds)
+      .in('location_id', locationIds)
       .order('schedule_date', { ascending: true })
 
     if (scheduleError) throw scheduleError
@@ -812,7 +800,7 @@ export function PayrollManager() {
     }
   }
 
-  const getTotalOvertimeHours = () => {
+  const getTotalOvertimeHours = useMemo(() => {
     switch (selectedPeriod) {
       case 'weekly':
         return Object.values(payrollData.weekly).flat().reduce((sum, entry) => sum + entry.overtimeHours, 0)
@@ -821,9 +809,9 @@ export function PayrollManager() {
       default:
         return 0
     }
-  }
+  }, [selectedPeriod, payrollData])
 
-  const getTotalDoublePayHours = () => {
+  const getTotalDoublePayHours = useMemo(() => {
     switch (selectedPeriod) {
       case 'weekly':
         return Object.values(payrollData.weekly).flat().reduce((sum, entry) => sum + entry.doublePayHours, 0)
@@ -832,9 +820,9 @@ export function PayrollManager() {
       default:
         return 0
     }
-  }
+  }, [selectedPeriod, payrollData])
 
-  const getTotalSpecialPayHours = () => {
+  const getTotalSpecialPayHours = useMemo(() => {
     switch (selectedPeriod) {
       case 'weekly':
         return Object.values(payrollData.weekly).flat().reduce((sum, entry) => sum + entry.specialPayHours, 0)
@@ -843,9 +831,9 @@ export function PayrollManager() {
       default:
         return 0
     }
-  }
+  }, [selectedPeriod, payrollData])
 
-  const getTotalRegularHours = () => {
+  const getTotalRegularHours = useMemo(() => {
     switch (selectedPeriod) {
       case 'weekly':
         return Object.values(payrollData.weekly).flat().reduce((sum, entry) => sum + entry.regularHours, 0)
@@ -854,9 +842,9 @@ export function PayrollManager() {
       default:
         return 0
     }
-  }
+  }, [selectedPeriod, payrollData])
 
-  const getPayrollEntries = () => {
+  const getPayrollEntries = useMemo(() => {
     let entries = []
     switch (selectedPeriod) {
       case 'weekly':
@@ -878,13 +866,13 @@ export function PayrollManager() {
     entries.sort((a, b) => b.netPay - a.netPay)
     
     return entries
-  }
+  }, [selectedPeriod, payrollData, selectedStaff])
 
-  const hasPayrollData = () => {
-    return getPayrollEntries().length > 0
-  }
+  const hasPayrollData = useMemo(() => {
+    return getPayrollEntries.length > 0
+  }, [getPayrollEntries])
 
-  const getTotalDeductions = () => {
+  const getTotalDeductions = useMemo(() => {
     switch (selectedPeriod) {
       case 'weekly':
         return Object.values(payrollData.weekly).flat().reduce((sum, entry) => sum + Object.values(entry.deductions).reduce((a, b) => a + b, 0), 0)
@@ -893,9 +881,9 @@ export function PayrollManager() {
       default:
         return 0
     }
-  }
+  }, [selectedPeriod, payrollData])
 
-  const getTotalNetPay = () => {
+  const getTotalNetPay = useMemo(() => {
     switch (selectedPeriod) {
       case 'weekly':
         return Object.values(payrollData.weekly).flat().reduce((sum, entry) => sum + entry.netPay, 0)
@@ -904,7 +892,7 @@ export function PayrollManager() {
       default:
         return 0
     }
-  }
+  }, [selectedPeriod, payrollData])
 
   const updateDeduction = (staffId: string, deductionType: keyof typeof deductions[string], value: number) => {
     setDeductions(prev => ({
@@ -1698,7 +1686,7 @@ export function PayrollManager() {
   }
 
   const printAllPayslips = () => {
-    const entries = getPayrollEntries()
+    const entries = getPayrollEntries
     if (entries.length === 0) return
 
     const currentDate = new Date()
@@ -2178,10 +2166,72 @@ export function PayrollManager() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading payroll data...</p>
+      <div className="space-y-6">
+        {/* Header Skeleton */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
+          <div>
+            <div className="h-8 bg-gray-200 rounded w-32 mb-2 animate-pulse"></div>
+            <div className="h-4 bg-gray-200 rounded w-64 animate-pulse"></div>
+          </div>
+        </div>
+        
+        {/* Period Selection Skeleton */}
+        <div className="bg-white rounded-lg shadow-sm border p-6">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
+            <div className="flex space-x-6">
+              <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
+              <div className="h-10 bg-gray-200 rounded w-48 animate-pulse"></div>
+            </div>
+            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
+          </div>
+        </div>
+        
+        {/* Summary Cards Skeleton */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[...Array(4)].map((_, idx) => (
+            <div key={idx} className="bg-white rounded-lg shadow-sm border p-6">
+              <div className="flex items-center">
+                <div className="p-2 bg-gray-200 rounded-lg animate-pulse">
+                  <div className="h-6 w-6"></div>
+                </div>
+                <div className="ml-4 flex-1">
+                  <div className="h-4 bg-gray-200 rounded w-20 mb-2 animate-pulse"></div>
+                  <div className="h-8 bg-gray-200 rounded w-16 animate-pulse"></div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        {/* Payroll Table Skeleton */}
+        <div className="bg-white rounded-lg shadow-sm border overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <div className="h-6 bg-gray-200 rounded w-48 animate-pulse"></div>
+          </div>
+          <div>
+            <table className="w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  {[...Array(8)].map((_, i) => (
+                    <th key={i} className="px-6 py-3 text-left">
+                      <div className="h-4 bg-gray-200 rounded w-20 animate-pulse"></div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {[...Array(5)].map((_, rowIdx) => (
+                  <tr key={rowIdx}>
+                    {[...Array(8)].map((_, cellIdx) => (
+                      <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
+                        <div className="h-6 bg-gray-200 rounded w-24 animate-pulse"></div>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     )
@@ -2449,7 +2499,7 @@ export function PayrollManager() {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-600">Regular Hours</p>
               <p className="text-2xl font-semibold text-gray-900">
-                {getTotalRegularHours().toFixed(1)}
+                {getTotalRegularHours.toFixed(1)}
               </p>
             </div>
           </div>
@@ -2463,7 +2513,7 @@ export function PayrollManager() {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-600">Double Pay (x2)</p>
               <p className="text-2xl font-semibold text-gray-900">
-                {getTotalDoublePayHours().toFixed(1)} hrs
+                {getTotalDoublePayHours.toFixed(1)} hrs
               </p>
             </div>
           </div>
@@ -2477,7 +2527,7 @@ export function PayrollManager() {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-600">Special Pay (1.3x)</p>
               <p className="text-2xl font-semibold text-gray-900">
-                {getTotalSpecialPayHours().toFixed(1)} hrs
+                {getTotalSpecialPayHours.toFixed(1)} hrs
               </p>
             </div>
           </div>
@@ -2491,7 +2541,7 @@ export function PayrollManager() {
             <div className="ml-4">
               <p className="text-sm font-medium text-gray-600">Net Pay</p>
               <p className="text-2xl font-semibold text-gray-900">
-                {formatCurrency(getTotalNetPay())}
+                {formatCurrency(getTotalNetPay)}
               </p>
             </div>
           </div>
@@ -2537,13 +2587,13 @@ export function PayrollManager() {
            </div>
          </div>
         
-        {!hasPayrollData() ? (
+        {!loading && !hasPayrollData ? (
           <div className="p-12 text-center">
             <Calculator className="h-12 w-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">No payroll data</h3>
             <p className="text-gray-600">No staff scheduled for the selected period.</p>
           </div>
-        ) : (
+        ) : !loading ? (
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
                <thead className="bg-gray-50">
@@ -2569,7 +2619,7 @@ export function PayrollManager() {
                  </tr>
                </thead>
                <tbody className="bg-white divide-y divide-gray-200">
-                 {getPayrollEntries().map((entry, index) => (
+                 {getPayrollEntries.map((entry, index) => (
                    <tr 
                      key={index} 
                      className="hover:bg-gray-50 cursor-pointer transition-colors duration-200 hover:shadow-md"
@@ -2798,6 +2848,11 @@ export function PayrollManager() {
                 ))}
               </tbody>
             </table>
+          </div>
+        ) : (
+          <div className="p-12 text-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-2"></div>
+            <p className="text-gray-600">Calculating payroll...</p>
           </div>
         )}
       </div>

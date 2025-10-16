@@ -1,5 +1,5 @@
 'use client'
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw, CalendarX, MessageSquare, Megaphone, Mail } from 'lucide-react'
 
@@ -152,7 +152,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     leave_balance: 10
   })
 
-  const getThemeColors = () => {
+  const colors = useMemo(() => {
     switch (theme) {
       case 'green':
         return {
@@ -187,9 +187,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
           danger: 'bg-red-600 hover:bg-red-700'
         }
     }
-  }
-
-  const colors = getThemeColors()
+  }, [theme])
 
   useEffect(() => {
     loadData()
@@ -1100,7 +1098,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     return todaySchedules[staffId] || null
   }
 
-  const getFilteredStaff = () => {
+  const filteredStaff = useMemo(() => {
     if (!showOnlyTodayStaff) return staff
     
     // Filter staff to show only those scheduled today
@@ -1108,7 +1106,18 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const todaySchedule = isStaffScheduledToday(staffMember.id)
       return todaySchedule !== null
     })
-  }
+  }, [staff, showOnlyTodayStaff, todaySchedules])
+
+  const groupedStaff = useMemo(() => {
+    return filteredStaff.reduce((groups, staffMember) => {
+      const primaryLocation = staffMember.staff_assignments[0]?.location?.name || 'Unassigned'
+      if (!groups[primaryLocation]) {
+        groups[primaryLocation] = []
+      }
+      groups[primaryLocation].push(staffMember)
+      return groups
+    }, {} as Record<string, typeof staff>)
+  }, [filteredStaff])
 
   const loadExistingSchedule = async () => {
     try {
@@ -1793,10 +1802,46 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading staff data...</p>
+      <div className="space-y-6">
+        {/* Header Skeleton */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
+          <div>
+            <div className="h-8 bg-gray-200 rounded w-48 mb-2 animate-pulse"></div>
+            <div className="h-4 bg-gray-200 rounded w-64 animate-pulse"></div>
+          </div>
+          <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-3">
+            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
+            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
+            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
+          </div>
+        </div>
+        
+        {/* Staff List Skeleton */}
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          <div>
+            <table className="w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  {['Staff Member', 'Contact', 'Assignments', 'Leave Balance / Warnings', 'Status', 'Actions'].map((header, idx) => (
+                    <th key={idx} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      {header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {[...Array(8)].map((_, idx) => (
+                  <tr key={idx}>
+                    {[...Array(6)].map((_, cellIdx) => (
+                      <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
+                        <div className="h-8 bg-gray-200 rounded animate-pulse"></div>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     )
@@ -1927,19 +1972,6 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
                {(() => {
-                 // Get filtered staff (all or today only)
-                 const filteredStaff = getFilteredStaff()
-                 
-                 // Group staff by their primary assignment location
-                 const groupedStaff = filteredStaff.reduce((groups, staffMember) => {
-                  const primaryLocation = staffMember.staff_assignments[0]?.location?.name || 'Unassigned'
-                  if (!groups[primaryLocation]) {
-                    groups[primaryLocation] = []
-                  }
-                  groups[primaryLocation].push(staffMember)
-                  return groups
-                }, {} as Record<string, typeof staff>)
-
                  // Show message if no staff found when filtering for today
                  if (showOnlyTodayStaff && filteredStaff.length === 0) {
                    return (
