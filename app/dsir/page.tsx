@@ -368,8 +368,8 @@ export default function DSIRPage() {
           )
         `)
         .eq('staff_registration_id', staffRegistrationId)
-        .gte('schedule_date', weekStart.toISOString().split('T')[0])
-        .lte('schedule_date', weekEnd.toISOString().split('T')[0])
+        .gte('schedule_date', formatDateLocal(weekStart))
+        .lte('schedule_date', formatDateLocal(weekEnd))
 
       if (error) throw error
 
@@ -623,13 +623,21 @@ export default function DSIRPage() {
     }).toUpperCase()
   }
 
+  // Helper function to format date in local timezone to YYYY-MM-DD
+  const formatDateLocal = (date: Date) => {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
   const getScheduleForDate = (date: Date) => {
-    const dateStr = date.toISOString().split('T')[0]
+    const dateStr = formatDateLocal(date)
     return staffSchedules.filter(schedule => schedule.schedule_date === dateStr)
   }
 
   const isLocationScheduledToday = (location: Location) => {
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
     return staffSchedules.some(schedule => 
       schedule.location_id === location.id && 
       schedule.schedule_date === today
@@ -637,7 +645,7 @@ export default function DSIRPage() {
   }
 
   const isStaffAbsentOnDate = (date: Date) => {
-    const dateStr = date.toISOString().split('T')[0]
+    const dateStr = formatDateLocal(date)
     return leaveRequests.some(request => 
       request.request_type === 'absence_admin' &&
       request.status === 'approved' &&
@@ -1261,8 +1269,23 @@ export default function DSIRPage() {
                   <p className="text-gray-600">No announcements or messages</p>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {announcements.map((announcement) => (
+                <div className="space-y-6">
+                  {(() => {
+                    const now = new Date()
+                    const startOfWeek = new Date(now)
+                    startOfWeek.setDate(now.getDate() - now.getDay()) // Start of this week (Sunday)
+                    startOfWeek.setHours(0, 0, 0, 0)
+                    
+                    const thisWeek = announcements.filter(a => new Date(a.created_at) >= startOfWeek)
+                    const older = announcements.filter(a => new Date(a.created_at) < startOfWeek)
+                    
+                    return (
+                      <>
+                        {thisWeek.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-3 uppercase tracking-wide">This Week</h4>
+                            <div className="space-y-3">
+                              {thisWeek.map((announcement) => (
                     <div 
                       key={announcement.id} 
                       className={`border rounded-lg p-4 ${
@@ -1270,6 +1293,8 @@ export default function DSIRPage() {
                           ? 'bg-red-50 border-red-300' 
                           : announcement.type === 'notice'
                           ? 'bg-blue-50 border-blue-300'
+                          : announcement.type === 'reminder'
+                          ? 'bg-orange-50 border-orange-300'
                           : 'bg-purple-50 border-purple-300'
                       }`}
                     >
@@ -1281,6 +1306,8 @@ export default function DSIRPage() {
                                 ? 'text-red-900' 
                                 : announcement.type === 'notice'
                                 ? 'text-blue-900'
+                                : announcement.type === 'reminder'
+                                ? 'text-orange-900'
                                 : 'text-purple-900'
                             }`}>
                               {announcement.title}
@@ -1290,10 +1317,14 @@ export default function DSIRPage() {
                                 ? 'bg-red-100 text-red-800 border border-red-400' 
                                 : announcement.type === 'notice'
                                 ? 'bg-blue-100 text-blue-800 border border-blue-400'
+                                : announcement.type === 'reminder'
+                                ? 'bg-orange-100 text-orange-800 border border-orange-400'
                                 : 'bg-purple-100 text-purple-800 border border-purple-400'
                             }`}>
                               {announcement.type === 'general' ? 'General Announcement' : 
-                               announcement.type === 'warning' ? 'Warning' : 'Notice'}
+                               announcement.type === 'warning' ? `Warning - ${staffInfo?.full_name}` : 
+                               announcement.type === 'reminder' ? 'Reminder' : 
+                               announcement.type === 'notice' ? `Notice - ${staffInfo?.full_name}` : 'Notice'}
                             </span>
                           </div>
                           <p className={`text-sm whitespace-pre-line ${
@@ -1301,6 +1332,8 @@ export default function DSIRPage() {
                               ? 'text-red-800' 
                               : announcement.type === 'notice'
                               ? 'text-blue-800'
+                              : announcement.type === 'reminder'
+                              ? 'text-orange-800'
                               : 'text-purple-800'
                           }`}>
                             {announcement.message}
@@ -1312,7 +1345,82 @@ export default function DSIRPage() {
                         </div>
                       </div>
                     </div>
-                  ))}
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {older.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-3 uppercase tracking-wide">Older</h4>
+                            <div className="space-y-3">
+                              {older.map((announcement) => (
+                                <div 
+                                  key={announcement.id} 
+                                  className={`border rounded-lg p-4 ${
+                                    announcement.type === 'warning' 
+                                      ? 'bg-red-50 border-red-300' 
+                                      : announcement.type === 'notice'
+                                      ? 'bg-blue-50 border-blue-300'
+                                      : announcement.type === 'reminder'
+                                      ? 'bg-orange-50 border-orange-300'
+                                      : 'bg-purple-50 border-purple-300'
+                                  }`}
+                                >
+                                  <div className="flex items-start justify-between mb-2">
+                                    <div className="flex-1">
+                                      <div className="flex items-center space-x-2 mb-2">
+                                        <h4 className={`text-md font-semibold ${
+                                          announcement.type === 'warning' 
+                                            ? 'text-red-900' 
+                                            : announcement.type === 'notice'
+                                            ? 'text-blue-900'
+                                            : announcement.type === 'reminder'
+                                            ? 'text-orange-900'
+                                            : 'text-purple-900'
+                                        }`}>
+                                          {announcement.title}
+                                        </h4>
+                                        <span className={`px-3 py-1 text-xs font-medium rounded-full ${
+                                          announcement.type === 'warning' 
+                                            ? 'bg-red-100 text-red-800 border border-red-400' 
+                                            : announcement.type === 'notice'
+                                            ? 'bg-blue-100 text-blue-800 border border-blue-400'
+                                            : announcement.type === 'reminder'
+                                            ? 'bg-orange-100 text-orange-800 border border-orange-400'
+                                            : 'bg-purple-100 text-purple-800 border border-purple-400'
+                                        }`}>
+                                          {announcement.type === 'general' ? 'General Announcement' : 
+                                           announcement.type === 'warning' ? `Warning - ${staffInfo?.full_name}` : 
+                                           announcement.type === 'reminder' ? 'Reminder' : 
+                                           announcement.type === 'notice' ? `Notice - ${staffInfo?.full_name}` : 'Notice'}
+                                        </span>
+                                      </div>
+                                      <p className={`text-sm whitespace-pre-line ${
+                                        announcement.type === 'warning' 
+                                          ? 'text-red-800' 
+                                          : announcement.type === 'notice'
+                                          ? 'text-blue-800'
+                                          : announcement.type === 'reminder'
+                                          ? 'text-orange-800'
+                                          : 'text-purple-800'
+                                      }`}>
+                                        {announcement.message}
+                                      </p>
+                                      <p className="text-xs text-gray-500 mt-2">
+                                        {new Date(announcement.created_at).toLocaleString()}
+                                        {announcement.created_by && ` • By ${announcement.created_by}`}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
               )}
             </div>
@@ -1799,8 +1907,23 @@ export default function DSIRPage() {
                   <p className="text-gray-600">No announcements or messages</p>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {announcements.map((announcement) => (
+                <div className="space-y-6">
+                  {(() => {
+                    const now = new Date()
+                    const startOfWeek = new Date(now)
+                    startOfWeek.setDate(now.getDate() - now.getDay()) // Start of this week (Sunday)
+                    startOfWeek.setHours(0, 0, 0, 0)
+                    
+                    const thisWeek = announcements.filter(a => new Date(a.created_at) >= startOfWeek)
+                    const older = announcements.filter(a => new Date(a.created_at) < startOfWeek)
+                    
+                    return (
+                      <>
+                        {thisWeek.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-3 uppercase tracking-wide">This Week</h4>
+                            <div className="space-y-3">
+                              {thisWeek.map((announcement) => (
                     <div 
                       key={announcement.id} 
                       className={`border rounded-lg p-4 ${
@@ -1808,6 +1931,8 @@ export default function DSIRPage() {
                           ? 'bg-red-50 border-red-300' 
                           : announcement.type === 'notice'
                           ? 'bg-blue-50 border-blue-300'
+                          : announcement.type === 'reminder'
+                          ? 'bg-orange-50 border-orange-300'
                           : 'bg-purple-50 border-purple-300'
                       }`}
                     >
@@ -1819,6 +1944,8 @@ export default function DSIRPage() {
                                 ? 'text-red-900' 
                                 : announcement.type === 'notice'
                                 ? 'text-blue-900'
+                                : announcement.type === 'reminder'
+                                ? 'text-orange-900'
                                 : 'text-purple-900'
                             }`}>
                               {announcement.title}
@@ -1828,10 +1955,14 @@ export default function DSIRPage() {
                                 ? 'bg-red-100 text-red-800 border border-red-400' 
                                 : announcement.type === 'notice'
                                 ? 'bg-blue-100 text-blue-800 border border-blue-400'
+                                : announcement.type === 'reminder'
+                                ? 'bg-orange-100 text-orange-800 border border-orange-400'
                                 : 'bg-purple-100 text-purple-800 border border-purple-400'
                             }`}>
                               {announcement.type === 'general' ? 'General Announcement' : 
-                               announcement.type === 'warning' ? 'Warning' : 'Notice'}
+                               announcement.type === 'warning' ? `Warning - ${staffInfo?.full_name}` : 
+                               announcement.type === 'reminder' ? 'Reminder' : 
+                               announcement.type === 'notice' ? `Notice - ${staffInfo?.full_name}` : 'Notice'}
                             </span>
                           </div>
                           <p className={`text-sm whitespace-pre-line ${
@@ -1839,6 +1970,8 @@ export default function DSIRPage() {
                               ? 'text-red-800' 
                               : announcement.type === 'notice'
                               ? 'text-blue-800'
+                              : announcement.type === 'reminder'
+                              ? 'text-orange-800'
                               : 'text-purple-800'
                           }`}>
                             {announcement.message}
@@ -1850,7 +1983,82 @@ export default function DSIRPage() {
                         </div>
                       </div>
                     </div>
-                  ))}
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {older.length > 0 && (
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-700 mb-3 uppercase tracking-wide">Older</h4>
+                            <div className="space-y-3">
+                              {older.map((announcement) => (
+                                <div 
+                                  key={announcement.id} 
+                                  className={`border rounded-lg p-4 ${
+                                    announcement.type === 'warning' 
+                                      ? 'bg-red-50 border-red-300' 
+                                      : announcement.type === 'notice'
+                                      ? 'bg-blue-50 border-blue-300'
+                                      : announcement.type === 'reminder'
+                                      ? 'bg-orange-50 border-orange-300'
+                                      : 'bg-purple-50 border-purple-300'
+                                  }`}
+                                >
+                                  <div className="flex items-start justify-between mb-2">
+                                    <div className="flex-1">
+                                      <div className="flex items-center space-x-2 mb-2">
+                                        <h4 className={`text-md font-semibold ${
+                                          announcement.type === 'warning' 
+                                            ? 'text-red-900' 
+                                            : announcement.type === 'notice'
+                                            ? 'text-blue-900'
+                                            : announcement.type === 'reminder'
+                                            ? 'text-orange-900'
+                                            : 'text-purple-900'
+                                        }`}>
+                                          {announcement.title}
+                                        </h4>
+                                        <span className={`px-3 py-1 text-xs font-medium rounded-full ${
+                                          announcement.type === 'warning' 
+                                            ? 'bg-red-100 text-red-800 border border-red-400' 
+                                            : announcement.type === 'notice'
+                                            ? 'bg-blue-100 text-blue-800 border border-blue-400'
+                                            : announcement.type === 'reminder'
+                                            ? 'bg-orange-100 text-orange-800 border border-orange-400'
+                                            : 'bg-purple-100 text-purple-800 border border-purple-400'
+                                        }`}>
+                                          {announcement.type === 'general' ? 'General Announcement' : 
+                                           announcement.type === 'warning' ? `Warning - ${staffInfo?.full_name}` : 
+                                           announcement.type === 'reminder' ? 'Reminder' : 
+                                           announcement.type === 'notice' ? `Notice - ${staffInfo?.full_name}` : 'Notice'}
+                                        </span>
+                                      </div>
+                                      <p className={`text-sm whitespace-pre-line ${
+                                        announcement.type === 'warning' 
+                                          ? 'text-red-800' 
+                                          : announcement.type === 'notice'
+                                          ? 'text-blue-800'
+                                          : announcement.type === 'reminder'
+                                          ? 'text-orange-800'
+                                          : 'text-purple-800'
+                                      }`}>
+                                        {announcement.message}
+                                      </p>
+                                      <p className="text-xs text-gray-500 mt-2">
+                                        {new Date(announcement.created_at).toLocaleString()}
+                                        {announcement.created_by && ` • By ${announcement.created_by}`}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
               )}
             </div>

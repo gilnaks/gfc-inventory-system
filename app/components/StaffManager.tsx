@@ -94,10 +94,19 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [announcementForm, setAnnouncementForm] = useState({
     title: '',
     message: '',
-    type: 'general' as 'general' | 'notice' | 'warning'
+    type: 'general' as 'general' | 'reminder'
+  })
+  const [messageForm, setMessageForm] = useState({
+    title: '',
+    message: '',
+    type: 'notice' as 'notice' | 'warning'
   })
   const [announcementHistory, setAnnouncementHistory] = useState<any[]>([])
   const [messageHistory, setMessageHistory] = useState<any[]>([])
+  const [loadingAnnouncementHistory, setLoadingAnnouncementHistory] = useState(false)
+  const [loadingMessageHistory, setLoadingMessageHistory] = useState(false)
+  const [announcementFieldErrors, setAnnouncementFieldErrors] = useState({ title: false, message: false })
+  const [messageFieldErrors, setMessageFieldErrors] = useState({ title: false, message: false })
   
   const [editForm, setEditForm] = useState({
     full_name: '',
@@ -131,6 +140,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [originalDayStatus, setOriginalDayStatus] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
   const [absentStaff, setAbsentStaff] = useState<{[key: string]: {[key: string]: {[key: string]: boolean}}}>({}) // {locationId: {dayKey: {staffId: isAbsent}}}
   const [hoveredStaffId, setHoveredStaffId] = useState<string | null>(null) // Track hovered staff for highlighting
+  const [scheduleJustSaved, setScheduleJustSaved] = useState(false) // Track if schedule was just saved
   
   // New staff form
   const [newStaff, setNewStaff] = useState({
@@ -194,6 +204,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     }
   }, [currentWeek, isScheduleModalOpen])
 
+  // Reset scheduleJustSaved flag when schedule changes
+  useEffect(() => {
+    if (scheduleJustSaved && hasScheduleChanges()) {
+      setScheduleJustSaved(false)
+    }
+  }, [schedule, staffHours, dayStatus, absentStaff])
 
   const loadData = async () => {
     setLoading(true)
@@ -430,12 +446,13 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   }
 
   const loadAnnouncementHistory = async () => {
+    setLoadingAnnouncementHistory(true)
     try {
       const { data, error } = await supabase
         .from('announcements')
         .select('*')
         .is('staff_registration_id', null)
-        .eq('type', 'general')
+        .in('type', ['general', 'reminder'])
         .order('created_at', { ascending: false })
         .limit(10)
 
@@ -443,10 +460,13 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       setAnnouncementHistory(data || [])
     } catch (error) {
       console.error('Error loading announcement history:', error)
+    } finally {
+      setLoadingAnnouncementHistory(false)
     }
   }
 
   const loadMessageHistory = async (staffId: string) => {
+    setLoadingMessageHistory(true)
     try {
       const { data, error } = await supabase
         .from('announcements')
@@ -459,12 +479,18 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       setMessageHistory(data || [])
     } catch (error) {
       console.error('Error loading message history:', error)
+    } finally {
+      setLoadingMessageHistory(false)
     }
   }
 
   const createAnnouncement = async () => {
-    if (!announcementForm.title.trim() || !announcementForm.message.trim()) {
-      setError('Please fill in all fields')
+    const titleEmpty = !announcementForm.title.trim()
+    const messageEmpty = !announcementForm.message.trim()
+    
+    if (titleEmpty || messageEmpty) {
+      setAnnouncementFieldErrors({ title: titleEmpty, message: messageEmpty })
+      setTimeout(() => setAnnouncementFieldErrors({ title: false, message: false }), 2000)
       return
     }
 
@@ -497,20 +523,28 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
   const openAnnouncementModal = async () => {
     setAnnouncementForm({ title: '', message: '', type: 'general' })
+    setAnnouncementHistory([]) // Clear previous history
     setIsAnnouncementModalOpen(true)
     await loadAnnouncementHistory()
   }
 
   const openMessageModal = async (staff: StaffWithAssignments) => {
     setSelectedStaffForMessage(staff)
-    setAnnouncementForm({ title: '', message: '', type: 'notice' })
+    setMessageForm({ title: '', message: '', type: 'notice' })
+    setMessageHistory([]) // Clear previous history
     setIsMessageModalOpen(true)
     await loadMessageHistory(staff.id)
   }
 
   const sendStaffMessage = async () => {
-    if (!announcementForm.title.trim() || !announcementForm.message.trim() || !selectedStaffForMessage) {
-      setError('Please fill in all fields')
+    if (!selectedStaffForMessage) return
+
+    const titleEmpty = !messageForm.title.trim()
+    const messageEmpty = !messageForm.message.trim()
+    
+    if (titleEmpty || messageEmpty) {
+      setMessageFieldErrors({ title: titleEmpty, message: messageEmpty })
+      setTimeout(() => setMessageFieldErrors({ title: false, message: false }), 2000)
       return
     }
 
@@ -519,9 +553,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const { error } = await supabase
         .from('announcements')
         .insert({
-          title: announcementForm.title.trim(),
-          message: announcementForm.message.trim(),
-          type: announcementForm.type,
+          title: messageForm.title.trim(),
+          message: messageForm.message.trim(),
+          type: messageForm.type,
           staff_registration_id: selectedStaffForMessage.id,
           created_by: 'Admin',
           is_active: true
@@ -529,9 +563,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
       if (error) throw error
 
-      setAnnouncementForm({ title: '', message: '', type: 'notice' })
+      setMessageForm({ title: '', message: '', type: 'notice' })
       await loadMessageHistory(selectedStaffForMessage.id) // Reload history
-      setSuccess(`${announcementForm.type === 'warning' ? 'Warning' : 'Notice'} sent to ${selectedStaffForMessage.full_name}!`)
+      setSuccess(`${messageForm.type === 'warning' ? 'Warning' : 'Notice'} sent to ${selectedStaffForMessage.full_name}!`)
       setTimeout(() => setSuccess(''), 3000)
     } catch (error) {
       console.error('Error sending message:', error)
@@ -1031,9 +1065,17 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     return date.toDateString() === today.toDateString()
   }
 
+  // Helper function to format date in local timezone to YYYY-MM-DD
+  const formatDateLocal = (date: Date) => {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
   const loadTodaySchedules = async () => {
     try {
-      const today = new Date().toISOString().split('T')[0]
+      const today = formatDateLocal(new Date())
       
       const { data, error } = await supabase
         .from('staff_schedules')
@@ -1071,8 +1113,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const loadExistingSchedule = async () => {
     try {
       const weekDates = getWeekDates(currentWeek)
-      const startDate = weekDates[0].toISOString().split('T')[0]
-      const endDate = weekDates[6].toISOString().split('T')[0]
+      const startDate = formatDateLocal(weekDates[0])
+      const endDate = formatDateLocal(weekDates[6])
       
       const { data, error } = await supabase
         .from('staff_schedules')
@@ -1148,6 +1190,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const openScheduleModal = async () => {
     console.log('🚀 Opening schedule modal...')
     setSuccess('') // Clear any previous success message
+    
+    // Set current week to today's week for default view
+    setCurrentWeek(new Date())
     
     // Open modal immediately for better UX
     setIsScheduleModalOpen(true)
@@ -1615,24 +1660,24 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     switch (status) {
       case 'regular-holiday':
         return {
-          container: 'bg-orange-200 hover:bg-orange-300 text-orange-900 border border-orange-300',
+          container: 'bg-orange-200 hover:bg-orange-300 text-orange-900',
           button: 'text-orange-700 hover:text-orange-900 hover:bg-orange-400',
           label: 'text-orange-800 font-semibold',
-          input: 'focus:ring-orange-500 border-orange-300'
+          input: 'focus:ring-orange-500'
         }
       case 'special-holiday':
         return {
-          container: 'bg-violet-200 hover:bg-violet-300 text-violet-900 border border-violet-300',
+          container: 'bg-violet-200 hover:bg-violet-300 text-violet-900',
           button: 'text-violet-700 hover:text-violet-900 hover:bg-violet-400',
           label: 'text-violet-800 font-semibold',
-          input: 'focus:ring-violet-500 border-violet-300'
+          input: 'focus:ring-violet-500'
         }
       default: // 'default'
         return {
-          container: 'bg-blue-200 hover:bg-blue-300 text-blue-900 border border-blue-300',
+          container: 'bg-blue-200 hover:bg-blue-300 text-blue-900',
           button: 'text-blue-700 hover:text-blue-900 hover:bg-blue-400',
           label: 'text-blue-800 font-semibold',
-          input: 'focus:ring-blue-500 border-blue-300'
+          input: 'focus:ring-blue-500'
         }
     }
   }
@@ -1666,7 +1711,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 const recordToSave = {
                   location_id: locationId,
                   staff_registration_id: staffId,
-                  schedule_date: scheduleDate.toISOString().split('T')[0],
+                  schedule_date: formatDateLocal(scheduleDate),
                   hours: isAbsent ? 0 : hours, // Ensure hours is 0 if absent
                   day_type: dayStatus,
                   is_absent: isAbsent
@@ -1683,8 +1728,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       console.log('📦 Total records to save:', scheduleData.length)
       
       // Clear existing schedules for this week first
-      const startDate = weekDates[0].toISOString().split('T')[0]
-      const endDate = weekDates[6].toISOString().split('T')[0]
+      const startDate = formatDateLocal(weekDates[0])
+      const endDate = formatDateLocal(weekDates[6])
       
       console.log('🗑️ Deleting existing schedules for week:', { startDate, endDate })
       
@@ -1726,6 +1771,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
        setOriginalStaffHours(JSON.parse(JSON.stringify(staffHours)))
        setOriginalDayStatus(JSON.parse(JSON.stringify(dayStatus)))
        
+       // Set schedule just saved flag
+       setScheduleJustSaved(true)
+       
+       // Reset the flag after 3 seconds
+       setTimeout(() => setScheduleJustSaved(false), 3000)
+       
        console.log('🔄 Refreshing today\'s schedules...')
        // Refresh today's schedules
        loadTodaySchedules()
@@ -1734,6 +1785,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
      } catch (error) {
       console.error('Error saving schedule:', error)
       setError('Failed to save schedule')
+      setScheduleJustSaved(false)
     } finally {
       setSaving(false)
     }
@@ -2476,8 +2528,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 <div className="min-h-0">
                 <table className="w-full table-fixed">
                   <thead>
-                    <tr className="bg-gray-50 border-b border-gray-200">
-                      <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 border-r border-gray-200 w-64 min-w-64">
+                    <tr className="bg-gray-50 border-b border-white">
+                      <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 border-r border-white w-64 min-w-64">
                         <div className="flex items-center space-x-2">
                           <Building2 className="h-4 w-4 text-gray-500" />
                           <span>STORES</span>
@@ -2489,17 +2541,41 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         const dayStatus = getDayStatus(dayKey)
                         const dayColorClasses = getStaffColorClasses(dayKey)
                         
+                        // Get darker ring color based on day status
+                        const getTodayRingColor = () => {
+                          switch (dayStatus) {
+                            case 'regular-holiday':
+                              return 'ring-orange-600'
+                            case 'special-holiday':
+                              return 'ring-violet-600'
+                            default:
+                              return 'ring-blue-600'
+                          }
+                        }
+                        
+                        // Get text color for today based on day status
+                        const getTodayTextColor = () => {
+                          switch (dayStatus) {
+                            case 'regular-holiday':
+                              return 'text-orange-900'
+                            case 'special-holiday':
+                              return 'text-violet-900'
+                            default:
+                              return 'text-blue-900'
+                          }
+                        }
+                        
                         return (
                           <th 
                             key={index} 
-                            className={`px-2 py-3 text-center border-r border-gray-200 last:border-r-0 cursor-pointer hover:opacity-80 transition-all duration-200 w-36 ${dayColorClasses.container} ${isTodayDate ? 'ring-4 ring-inset ring-blue-600' : ''}`}
+                            className={`px-2 py-3 text-center border-r border-white last:border-r-0 cursor-pointer hover:opacity-80 transition-all duration-200 w-36 ${dayColorClasses.container} ${isTodayDate ? `ring-4 ring-inset ${getTodayRingColor()}` : ''}`}
                             onClick={() => toggleDayHolidayStatus(dayKey)}
                             title={`Click to change day status: ${dayStatus === 'default' ? 'Default' : dayStatus === 'regular-holiday' ? 'Regular Holiday' : 'Special Holiday'}`}
                           >
-                            <div className={`text-lg font-bold ${isTodayDate ? 'text-blue-900' : dayColorClasses.label}`}>
+                            <div className={`text-lg font-bold ${isTodayDate ? getTodayTextColor() : dayColorClasses.label}`}>
                               {getDateNumber(date)}
                             </div>
-                            <div className={`text-sm font-semibold ${isTodayDate ? 'text-blue-900' : dayColorClasses.label}`}>
+                            <div className={`text-sm font-semibold ${isTodayDate ? getTodayTextColor() : dayColorClasses.label}`}>
                               {getDayName(date)}
                             </div>
                           </th>
@@ -2507,7 +2583,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       })}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+                  <tbody className="divide-y divide-white">
                     {companyLocations.length === 0 ? (
                       <tr>
                         <td colSpan={8} className="px-6 py-12 text-center text-gray-500">
@@ -2529,7 +2605,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         })
                         .map((location) => (
                         <tr key={location.id} className={`hover:bg-gray-50 transition-colors ${getStoreColor(location)}`}>
-                          <td className={`px-6 py-4 text-sm font-medium text-gray-900 border-r border-gray-200 w-64 min-w-64 ${getStoreColor(location)}`}>
+                          <td className={`px-6 py-4 text-sm font-medium text-gray-900 border-r border-white w-64 min-w-64 ${getStoreColor(location)}`}>
                             <div className="flex items-center space-x-3">
                               <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
                                 <Building2 className="h-4 w-4 text-blue-600" />
@@ -2544,12 +2620,26 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                             const dayKey = getScheduleKey(date)
                             const currentStaffId = schedule[location.id]?.[dayKey] || ''
                             const isTodayDate = isToday(date)
+                            const dayStatus = getDayStatus(dayKey)
+                            
+                            // Get darker border color for today based on day status
+                            const getTodayBorderColor = () => {
+                              switch (dayStatus) {
+                                case 'regular-holiday':
+                                  return 'border-orange-600'
+                                case 'special-holiday':
+                                  return 'border-violet-600'
+                                default:
+                                  return 'border-blue-600'
+                              }
+                            }
+                            
                             return (
-                              <td key={dayIndex} className={`px-2 py-3 text-center align-top border-r border-gray-200 last:border-r-0 w-36 ${getStoreColor(location)} ${isTodayDate ? 'border-l-2 border-r-2 border-blue-300' : ''}`}>
+                              <td key={dayIndex} className={`px-2 py-3 text-center align-top border-r border-white last:border-r-0 w-36 ${getStoreColor(location)}`}>
                                 <div className="flex flex-col gap-2">
                                   {/* Staff Dropdown */}
-                                  <select 
-                                    className="w-full text-xs border-0 bg-gray-100 hover:bg-gray-200 focus:bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 rounded px-2 py-1 transition-all duration-200 shadow-sm"
+                                   <select 
+                                     className="w-full text-xs border-0 bg-gray-100 hover:bg-gray-200 focus:bg-white focus:outline-none rounded px-2 py-1 transition-all duration-200 shadow-sm"
                                     value=""
                                     onChange={async (e) => {
                                       if (e.target.value) {
@@ -2621,11 +2711,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                           key={staff.id}
                                           onMouseEnter={() => setHoveredStaffId(staff.id)}
                                           onMouseLeave={() => setHoveredStaffId(null)}
-                                          className={`group relative text-xs px-2 py-1 rounded-lg transition-all duration-200 max-w-full overflow-hidden border ${
+                                          className={`group relative text-xs px-2 py-1 rounded-lg transition-all duration-200 max-w-full overflow-hidden ${
                                             isHovered
-                                              ? `${getDarkerPastelColor()} ${getBorderColor()} text-white`
+                                              ? `${getDarkerPastelColor()} text-white`
                                               : isAbsent 
-                                              ? 'bg-red-200 hover:bg-red-300 text-red-900 border-red-300' 
+                                              ? 'bg-red-200 hover:bg-red-300 text-red-900' 
                                               : colorClasses.container
                                           }`}
                                         >
@@ -2649,7 +2739,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                               step="0.5"
                                               value={isAbsent ? 0 : staffHours}
                                               onChange={(e) => updateStaffHours(location.id, dayKey, staff.id, parseFloat(e.target.value) || 0)}
-                                              className={`w-12 text-xs border-2 bg-white hover:bg-gray-50 focus:bg-white focus:ring-1 ${isAbsent ? 'border-red-300 focus:ring-red-500' : colorClasses.input} rounded px-1 py-0.5 text-center font-medium`}
+                                              className={`w-12 text-xs border-0 bg-white hover:bg-gray-50 focus:bg-white focus:outline-none ${isAbsent ? 'border-red-300 focus:ring-red-500' : ''} rounded px-1 py-0.5 text-center font-medium`}
                                               placeholder="11"
                                               disabled={saving || isAbsent}
                                             />
@@ -2710,13 +2800,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 <button
                   onClick={saveSchedule}
                   disabled={saving || !hasScheduleChanges()}
-                  className={`px-4 py-2 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium ${
-                    hasScheduleChanges() 
-                      ? 'bg-green-600 hover:bg-green-700' 
-                      : 'bg-gray-400 cursor-not-allowed'
+                  className={`px-4 py-2 text-white rounded-lg transition-all duration-200 font-medium ${
+                    saving || (!hasScheduleChanges() && !scheduleJustSaved)
+                      ? 'bg-gray-400 cursor-not-allowed opacity-60'
+                      : scheduleJustSaved
+                      ? 'bg-gray-400 cursor-not-allowed opacity-60'
+                      : 'bg-green-600 hover:bg-green-700 cursor-pointer'
                   }`}
                 >
-                  {saving ? 'Saving...' : 'Save Schedule'}
+                  {saving ? 'Saving...' : scheduleJustSaved ? 'Saved Changes' : 'Save Schedule'}
                 </button>
               </div>
             </div>
@@ -3026,7 +3118,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       {/* General Announcement Modal */}
       {isAnnouncementModalOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+          <div className="bg-white rounded-lg shadow-xl w-[1000px] h-[700px] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">General Announcements</h3>
               <button
@@ -3040,18 +3132,49 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
             
-            <div className="flex-1 overflow-y-auto">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6">
+            <div className="flex-1 overflow-hidden">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 h-full">
                 {/* Create New Announcement */}
-                <div className="space-y-4">
+                <div className="space-y-4 flex flex-col">
                   <h4 className="font-semibold text-gray-900">Create New Announcement</h4>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Type</label>
+                    <div className="flex items-center space-x-4">
+                      <label className="flex items-center space-x-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="announcementType"
+                          value="general"
+                          checked={announcementForm.type === 'general'}
+                          onChange={(e) => setAnnouncementForm({ ...announcementForm, type: e.target.value as 'general' | 'reminder' })}
+                          className="w-4 h-4 text-purple-600 focus:ring-purple-500"
+                        />
+                        <span className="text-sm text-gray-700">General</span>
+                      </label>
+                      <label className="flex items-center space-x-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="announcementType"
+                          value="reminder"
+                          checked={announcementForm.type === 'reminder'}
+                          onChange={(e) => setAnnouncementForm({ ...announcementForm, type: e.target.value as 'general' | 'reminder' })}
+                          className="w-4 h-4 text-purple-600 focus:ring-purple-500"
+                        />
+                        <span className="text-sm text-gray-700">Reminder</span>
+                      </label>
+                    </div>
+                  </div>
+                  
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Title</label>
                     <input
                       type="text"
                       value={announcementForm.title}
                       onChange={(e) => setAnnouncementForm({ ...announcementForm, title: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
+                        announcementFieldErrors.title ? 'border-red-500' : 'border-gray-300'
+                      }`}
                       placeholder="Enter announcement title"
                     />
                   </div>
@@ -3062,10 +3185,24 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                       value={announcementForm.message}
                       onChange={(e) => setAnnouncementForm({ ...announcementForm, message: e.target.value })}
                       rows={6}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
+                        announcementFieldErrors.message ? 'border-red-500' : 'border-gray-300'
+                      }`}
                       placeholder="Enter announcement message"
                     />
                   </div>
+
+                  <button
+                    onClick={createAnnouncement}
+                    disabled={saving}
+                    className={`w-full px-4 py-2 text-white rounded-md disabled:opacity-50 ${
+                      announcementForm.type === 'reminder' 
+                        ? 'bg-orange-600 hover:bg-orange-700' 
+                        : 'bg-purple-600 hover:bg-purple-700'
+                    }`}
+                  >
+                    {saving ? 'Creating...' : 'Create Announcement'}
+                  </button>
 
                   {error && (
                     <div className="text-red-600 text-sm">{error}</div>
@@ -3074,32 +3211,41 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   {success && (
                     <div className="text-green-600 text-sm">{success}</div>
                   )}
-
-                  <button
-                    onClick={createAnnouncement}
-                    disabled={saving}
-                    className="w-full px-4 py-2 text-white bg-purple-600 rounded-md hover:bg-purple-700 disabled:opacity-50"
-                  >
-                    {saving ? 'Creating...' : 'Create Announcement'}
-                  </button>
                 </div>
 
                 {/* Announcement History */}
-                <div className="space-y-4">
+                <div className="space-y-4 flex flex-col overflow-hidden">
                   <h4 className="font-semibold text-gray-900">Recent Announcements</h4>
-                  <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                    {announcementHistory.length === 0 ? (
+                  <div className="space-y-3 flex-1 overflow-y-auto">
+                    {loadingAnnouncementHistory ? (
+                      <div className="text-center py-8 text-gray-500">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-2"></div>
+                        <p className="text-sm">Loading announcements...</p>
+                      </div>
+                    ) : announcementHistory.length === 0 ? (
                       <div className="text-center py-8 text-gray-500">
                         <Megaphone className="h-12 w-12 text-gray-300 mx-auto mb-2" />
                         <p className="text-sm">No announcements yet</p>
                       </div>
                     ) : (
                       announcementHistory.map((announcement) => (
-                        <div key={announcement.id} className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                        <div key={announcement.id} className={`${
+                          announcement.type === 'reminder' 
+                            ? 'bg-orange-50 border border-orange-200' 
+                            : 'bg-purple-50 border border-purple-200'
+                        } rounded-lg p-3`}>
                           <div className="flex items-start justify-between mb-2">
-                            <h5 className="font-semibold text-purple-900 text-sm">{announcement.title}</h5>
+                            <h5 className={`font-semibold text-sm ${
+                              announcement.type === 'reminder' 
+                                ? 'text-orange-900' 
+                                : 'text-purple-900'
+                            }`}>{announcement.title}</h5>
                             <div className="flex items-center space-x-2">
-                              <span className="text-xs text-purple-600">
+                              <span className={`text-xs ${
+                                announcement.type === 'reminder' 
+                                  ? 'text-orange-600' 
+                                  : 'text-purple-600'
+                              }`}>
                                 {new Date(announcement.created_at).toLocaleDateString()}
                               </span>
                               <button
@@ -3112,7 +3258,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                               </button>
                             </div>
                           </div>
-                          <p className="text-sm text-purple-800 whitespace-pre-line">{announcement.message}</p>
+                          <p className={`text-sm whitespace-pre-line ${
+                            announcement.type === 'reminder' 
+                              ? 'text-orange-800' 
+                              : 'text-purple-800'
+                          }`}>{announcement.message}</p>
                         </div>
                       ))
                     )}
@@ -3139,7 +3289,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       {/* Staff Message Modal */}
       {isMessageModalOpen && selectedStaffForMessage && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+          <div className="bg-white rounded-lg shadow-xl w-[1000px] h-[700px] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Messages for {selectedStaffForMessage.full_name}</h3>
@@ -3149,7 +3299,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 onClick={() => {
                   setIsMessageModalOpen(false)
                   setSelectedStaffForMessage(null)
-                  setAnnouncementForm({ title: '', message: '', type: 'notice' })
+                  setMessageForm({ title: '', message: '', type: 'notice' })
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -3157,10 +3307,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
             
-            <div className="flex-1 overflow-y-auto">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6">
+            <div className="flex-1 overflow-hidden">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 h-full">
                 {/* Send New Message */}
-                <div className="space-y-4">
+                <div className="space-y-4 flex flex-col">
                   <h4 className="font-semibold text-gray-900">Send New Message</h4>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Message Type</label>
@@ -3169,8 +3319,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         <input
                           type="radio"
                           value="notice"
-                          checked={announcementForm.type === 'notice'}
-                          onChange={(e) => setAnnouncementForm({ ...announcementForm, type: e.target.value as 'notice' | 'warning' })}
+                          checked={messageForm.type === 'notice'}
+                          onChange={(e) => setMessageForm({ ...messageForm, type: e.target.value as 'notice' | 'warning' })}
                           className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
                         />
                         <span className="ml-2 text-sm text-gray-700">Notice</span>
@@ -3179,8 +3329,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         <input
                           type="radio"
                           value="warning"
-                          checked={announcementForm.type === 'warning'}
-                          onChange={(e) => setAnnouncementForm({ ...announcementForm, type: e.target.value as 'notice' | 'warning' })}
+                          checked={messageForm.type === 'warning'}
+                          onChange={(e) => setMessageForm({ ...messageForm, type: e.target.value as 'notice' | 'warning' })}
                           className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300"
                         />
                         <span className="ml-2 text-sm text-gray-700">Warning</span>
@@ -3192,9 +3342,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                     <label className="block text-sm font-medium text-gray-700 mb-2">Title</label>
                     <input
                       type="text"
-                      value={announcementForm.title}
-                      onChange={(e) => setAnnouncementForm({ ...announcementForm, title: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      value={messageForm.title}
+                      onChange={(e) => setMessageForm({ ...messageForm, title: e.target.value })}
+                      className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
+                        messageFieldErrors.title ? 'border-red-500' : 'border-gray-300'
+                      }`}
                       placeholder="Enter message title"
                     />
                   </div>
@@ -3202,13 +3354,27 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Message</label>
                     <textarea
-                      value={announcementForm.message}
-                      onChange={(e) => setAnnouncementForm({ ...announcementForm, message: e.target.value })}
+                      value={messageForm.message}
+                      onChange={(e) => setMessageForm({ ...messageForm, message: e.target.value })}
                       rows={6}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                      className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
+                        messageFieldErrors.message ? 'border-red-500' : 'border-gray-300'
+                      }`}
                       placeholder="Enter your message"
                     />
                   </div>
+
+                  <button
+                    onClick={sendStaffMessage}
+                    disabled={saving}
+                    className={`w-full px-4 py-2 text-white rounded-md disabled:opacity-50 ${
+                      messageForm.type === 'warning' 
+                        ? 'bg-red-600 hover:bg-red-700' 
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    {saving ? 'Sending...' : `Send ${messageForm.type === 'warning' ? 'Warning' : 'Notice'}`}
+                  </button>
 
                   {error && (
                     <div className="text-red-600 text-sm">{error}</div>
@@ -3217,25 +3383,18 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   {success && (
                     <div className="text-green-600 text-sm">{success}</div>
                   )}
-
-                  <button
-                    onClick={sendStaffMessage}
-                    disabled={saving}
-                    className={`w-full px-4 py-2 text-white rounded-md disabled:opacity-50 ${
-                      announcementForm.type === 'warning' 
-                        ? 'bg-red-600 hover:bg-red-700' 
-                        : 'bg-blue-600 hover:bg-blue-700'
-                    }`}
-                  >
-                    {saving ? 'Sending...' : `Send ${announcementForm.type === 'warning' ? 'Warning' : 'Notice'}`}
-                  </button>
                 </div>
 
                 {/* Message History */}
-                <div className="space-y-4">
+                <div className="space-y-4 flex flex-col overflow-hidden">
                   <h4 className="font-semibold text-gray-900">Message History</h4>
-                  <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                    {messageHistory.length === 0 ? (
+                  <div className="space-y-3 flex-1 overflow-y-auto">
+                    {loadingMessageHistory ? (
+                      <div className="text-center py-8 text-gray-500">
+                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                        <p className="text-sm">Loading messages...</p>
+                      </div>
+                    ) : messageHistory.length === 0 ? (
                       <div className="text-center py-8 text-gray-500">
                         <Mail className="h-12 w-12 text-gray-300 mx-auto mb-2" />
                         <p className="text-sm">No messages sent yet</p>
@@ -3259,7 +3418,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                   ? 'bg-red-100 text-red-800' 
                                   : 'bg-blue-100 text-blue-800'
                               }`}>
-                                {msg.type === 'warning' ? 'Warning' : 'Notice'}
+                                {msg.type === 'warning' ? 'Warning' : 'Notice'} - {selectedStaffForMessage.full_name}
                               </span>
                             </div>
                             <div className="flex items-center space-x-2">
@@ -3296,7 +3455,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 onClick={() => {
                   setIsMessageModalOpen(false)
                   setSelectedStaffForMessage(null)
-                  setAnnouncementForm({ title: '', message: '', type: 'notice' })
+                  setMessageForm({ title: '', message: '', type: 'notice' })
                 }}
                 className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
               >
