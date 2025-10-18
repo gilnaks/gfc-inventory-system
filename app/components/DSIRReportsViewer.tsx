@@ -914,7 +914,16 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       {/* Monthly Summary */}
       <div className="bg-white rounded-lg shadow-sm border p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-base font-semibold text-gray-900">Branch Monthly Summary</h2>
+          <div className="flex items-center space-x-4">
+            <h2 className="text-base font-semibold text-gray-900">Branch Monthly Summary</h2>
+            <div className="text-sm text-gray-600">
+              Total Net Sales: <span className="font-semibold text-green-600">
+                ₱{Object.values(monthlySummaryByLocation)
+                  .reduce((total, summary) => total + summary.netSales, 0)
+                  .toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              </span>
+            </div>
+          </div>
           <input
             type="month"
             value={selectedMonth}

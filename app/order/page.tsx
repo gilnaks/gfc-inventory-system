@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase, Brand, Product } from '../../lib/supabase'
 import { StaffAssignmentManager } from '../components/StaffAssignmentManager'
 import { DSIRReportsViewer } from '../components/DSIRReportsViewer'
@@ -62,6 +62,9 @@ export default function OrderPage() {
   const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
   const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
   const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<any>(null)
+  
+  // Track last submission time to prevent rapid duplicate submissions
+  const lastSubmissionTime = useRef<number>(0)
 
   // Redirect to home if redirected from DSIR or if location doesn't have feature access
   useEffect(() => {
@@ -582,22 +585,65 @@ export default function OrderPage() {
   }
 
   const handleSubmitOrder = async () => {
+    // Prevent multiple rapid clicks
+    if (loading) {
+      return
+    }
+
+    // Debounce: prevent submissions within 2 seconds of each other
+    const now = Date.now()
+    if (now - lastSubmissionTime.current < 2000) {
+      setError('Please wait a moment before submitting again.')
+      return
+    }
+    lastSubmissionTime.current = now
+
     if (!location || cartItems.length === 0) {
       setError('Please add items to your order.')
       return
     }
 
+    // Set loading immediately to prevent duplicate clicks
+    setLoading(true)
+    setError('')
+
     // Validate stock availability before submitting
     const stockErrors = await validateStockAvailability()
     if (stockErrors.length > 0) {
       setError(`Insufficient stock for the following items:\n${stockErrors.join('\n')}`)
-        return
-      }
-      
-    setLoading(true)
-        setError('')
+      setLoading(false)
+      return
+    }
 
     try {
+      // Check for duplicate orders within the last 30 seconds
+      const recentOrders = await supabase
+        .from('customer_orders')
+        .select('id, created_at, order_details(order_id, product_id, quantity)')
+        .eq('location_id', location.id)
+        .eq('status', 'pending')
+        .gte('created_at', new Date(Date.now() - 30000).toISOString()) // Last 30 seconds
+        .order('created_at', { ascending: false })
+
+      if (recentOrders.data && recentOrders.data.length > 0) {
+        // Check if any recent order has the same items and quantities
+        for (const recentOrder of recentOrders.data) {
+          const recentOrderDetails = recentOrder.order_details || []
+          if (recentOrderDetails.length === cartItems.length) {
+            const isDuplicate = cartItems.every(cartItem => 
+              recentOrderDetails.some((detail: any) => 
+                detail.product_id === cartItem.product_id && 
+                detail.quantity === cartItem.quantity
+              )
+            )
+            if (isDuplicate) {
+              setError('A similar order was just submitted. Please wait a moment before submitting again.')
+              setLoading(false)
+              return
+            }
+          }
+        }
+      }
 
       // Reserve inventory
       for (const item of cartItems) {
@@ -649,9 +695,21 @@ export default function OrderPage() {
       setShowCartModal(false)
     } catch (error) {
       console.error('Error submitting order:', error)
-      setError('Failed to submit order. Please try again.')
+      
+      // Provide more specific error messages
+      if (error instanceof Error) {
+        if (error.message.includes('duplicate') || error.message.includes('unique')) {
+          setError('This order appears to be a duplicate. Please check your recent orders.')
+        } else if (error.message.includes('stock') || error.message.includes('inventory')) {
+          setError('Stock levels have changed. Please refresh and try again.')
+        } else {
+          setError('Failed to submit order. Please try again.')
+        }
+      } else {
+        setError('Failed to submit order. Please try again.')
+      }
     } finally {
-        setLoading(false)
+      setLoading(false)
     }
   }
 
