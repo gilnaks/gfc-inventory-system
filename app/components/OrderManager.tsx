@@ -706,8 +706,6 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         return <CheckCircle className="h-4 w-4 text-blue-500" />
       case 'in-transit':
         return <Truck className="h-4 w-4 text-orange-500" />
-      case 'verified':
-        return <CheckCircle className="h-4 w-4 text-green-500" />
       case 'fulfilled':
         return <Package className="h-4 w-4 text-green-500" />
       case 'cancelled':
@@ -725,8 +723,6 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         return 'bg-blue-100 text-blue-800'
       case 'in-transit':
         return 'bg-orange-100 text-orange-800'
-      case 'verified':
-        return 'bg-green-100 text-green-800'
       case 'fulfilled':
         return 'bg-green-100 text-green-800'
       case 'paid':
@@ -847,7 +843,6 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       pending: orders.filter(order => order.status === 'pending'),
       approved: orders.filter(order => order.status === 'approved'),
       'in-transit': orders.filter(order => order.status === 'in-transit'),
-      verified: orders.filter(order => order.status === 'verified'),
       fulfilled: orders.filter(order => order.status === 'fulfilled'),
       paid: orders.filter(order => order.status === 'paid'),
       complete: orders.filter(order => order.status === 'complete'),
@@ -1089,7 +1084,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         </button>
                       )}
                       
-                      {order.status === 'verified' && (
+                      {order.status === 'in-transit' && (
                         <button
                           onClick={() => {
                             if (confirm('Are you sure you want to mark this order as fulfilled? This action will subtract items from both initial stock and released inventory and cannot be undone.')) {
@@ -1113,7 +1108,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         </button>
                       )}
                       
-                      {(order.status === 'pending' || order.status === 'approved' || order.status === 'in-transit' || order.status === 'verified') && (
+                      {(order.status === 'pending' || order.status === 'approved' || order.status === 'in-transit') && (
                         <button
                           onClick={() => {
                             if (confirm('Are you sure you want to cancel this order? This action will return reserved stock to available inventory and cannot be undone.')) {
@@ -2159,7 +2154,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       {loading ? (
         <div className="space-y-8">
           {/* Skeleton for each order status section */}
-          {['Pending', 'Approved', 'In-Transit', 'Verified'].map((status, idx) => (
+          {['Pending', 'Approved', 'In-Transit'].map((status, idx) => (
             <div key={idx}>
               {/* Section header skeleton */}
               <div className="flex items-center justify-between mb-4">
@@ -2232,17 +2227,6 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               </h4>
             </div>
             <OrderTable orders={getOrdersByStatus('in-transit')} />
-          </div>
-
-          {/* Verified Orders */}
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h4 className="text-lg font-semibold text-gray-900 flex items-center">
-                <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
-                Verified Orders ({getOrdersByStatus('verified').length})
-              </h4>
-            </div>
-            <OrderTable orders={getOrdersByStatus('verified')} />
           </div>
 
           {/* Fulfilled Orders */}

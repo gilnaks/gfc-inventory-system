@@ -56,7 +56,6 @@ export default function OrderPage() {
   const [showBranchSwitcher, setShowBranchSwitcher] = useState(false)
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   const [showBranchSwitcherModal, setShowBranchSwitcherModal] = useState(false)
-  const [verifiedItems, setVerifiedItems] = useState<Set<string>>(new Set())
   const [showReturnablePansModal, setShowReturnablePansModal] = useState(false)
   const [uploadingReturnablePans, setUploadingReturnablePans] = useState(false)
   const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
@@ -838,25 +837,8 @@ export default function OrderPage() {
   }
 
   const canStartNewOrder = () => {
-    // Only allow new orders if there's no active order (pending, approved, in-transit, verified, fulfilled, or paid)
-    return !pendingOrder || (pendingOrder.status !== 'pending' && pendingOrder.status !== 'approved' && pendingOrder.status !== 'in-transit' && pendingOrder.status !== 'verified' && pendingOrder.status !== 'fulfilled' && pendingOrder.status !== 'paid')
-  }
-
-  const areAllItemsVerified = () => {
-    if (!pendingOrder?.order_details) return false
-    return pendingOrder.order_details.every((detail: any) => verifiedItems.has(detail.id))
-  }
-
-  const toggleItemVerification = (itemId: string) => {
-    setVerifiedItems(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(itemId)) {
-        newSet.delete(itemId)
-      } else {
-        newSet.add(itemId)
-      }
-      return newSet
-    })
+    // Only allow new orders if there's no active order (pending, approved, in-transit, fulfilled, or paid)
+    return !pendingOrder || (pendingOrder.status !== 'pending' && pendingOrder.status !== 'approved' && pendingOrder.status !== 'in-transit' && pendingOrder.status !== 'fulfilled' && pendingOrder.status !== 'paid')
   }
 
   const startNewOrder = () => {
@@ -989,44 +971,6 @@ export default function OrderPage() {
     } finally {
       setUploadingPhoto(false)
       setUploadingOrderId(null)
-    }
-  }
-
-  const handleVerifyItems = async () => {
-    if (!pendingOrder) return
-
-    setLoading(true)
-    setError('')
-
-    try {
-      // Update order status to 'verified'
-      const { error: updateError } = await supabase
-        .from('customer_orders')
-        .update({ 
-          status: 'verified',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', pendingOrder.id)
-      
-      if (updateError) throw updateError
-      
-      setSuccess('Items verified successfully! Order status updated to Verified.')
-      
-      // Clear verified items state
-      setVerifiedItems(new Set())
-      
-      // Refresh orders
-      if (location) {
-        await Promise.all([
-          checkPendingOrders(location.id),
-          fetchPastOrders(location.id)
-        ])
-      }
-    } catch (error) {
-      console.error('Error verifying items:', error)
-      setError('Failed to verify items. Please try again.')
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -1821,8 +1765,6 @@ export default function OrderPage() {
                         <Check className="h-5 w-5 text-green-400" />
                       ) : pendingOrder.status === 'in-transit' ? (
                         <div className="h-5 w-5 rounded-full bg-orange-400"></div>
-                      ) : pendingOrder.status === 'verified' ? (
-                        <Check className="h-5 w-5 text-green-400" />
                       ) : pendingOrder.status === 'fulfilled' ? (
                         <div className="h-5 w-5 rounded-full bg-orange-400"></div>
                       ) : pendingOrder.status === 'paid' ? (
@@ -1835,14 +1777,12 @@ export default function OrderPage() {
                       <h3 className={`text-lg font-medium ${
                         pendingOrder.status === 'approved' ? 'text-green-800' 
                         : pendingOrder.status === 'in-transit' ? 'text-orange-800'
-                        : pendingOrder.status === 'verified' ? 'text-green-800'
                         : pendingOrder.status === 'fulfilled' ? 'text-orange-800'
                         : pendingOrder.status === 'paid' ? 'text-blue-800'
                         : 'text-yellow-800'
                     }`}>
                         {pendingOrder.status === 'approved' ? 'Order Approved' 
                          : pendingOrder.status === 'in-transit' ? 'Order In-Transit'
-                         : pendingOrder.status === 'verified' ? 'Order Verified'
                          : pendingOrder.status === 'fulfilled' ? 'Order Released'
                          : pendingOrder.status === 'paid' ? 'Payment Received'
                          : 'Pending Order'}
@@ -1850,7 +1790,6 @@ export default function OrderPage() {
                       <p className={`text-sm ${
                         pendingOrder.status === 'approved' ? 'text-green-700' 
                         : pendingOrder.status === 'in-transit' ? 'text-orange-700'
-                        : pendingOrder.status === 'verified' ? 'text-green-700'
                         : pendingOrder.status === 'fulfilled' ? 'text-orange-700'
                         : pendingOrder.status === 'paid' ? 'text-blue-700'
                         : 'text-yellow-700'
@@ -1899,14 +1838,6 @@ export default function OrderPage() {
                   {pendingOrder.order_details?.map((detail: any) => (
                     <div key={detail.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
                       <div className="flex items-center space-x-3">
-                        {pendingOrder.status === 'in-transit' && (
-                          <input
-                            type="checkbox"
-                            checked={verifiedItems.has(detail.id)}
-                            onChange={() => toggleItemVerification(detail.id)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
-                          />
-                        )}
                         <div>
                           <p className="font-medium text-gray-900">{detail.products.name}</p>
                           <p className="text-sm text-gray-600">₱{detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} per {detail.products.unit}</p>
@@ -2080,37 +2011,8 @@ export default function OrderPage() {
                   )}
                   {pendingOrder.status === 'in-transit' && (
                     <div className="text-center w-full">
-                      <p className="text-sm text-gray-600 mb-2">
-                        Your order is on its way. Please verify that the delivered items match your order when they arrive.
-                      </p>
-                      <p className="text-xs text-gray-500 mb-4">
-                        {verifiedItems.size} of {pendingOrder.order_details?.length || 0} items verified
-                      </p>
-                      <button
-                        onClick={handleVerifyItems}
-                        disabled={loading || !areAllItemsVerified()}
-                        className={`flex items-center space-x-2 px-6 py-3 text-white rounded-lg transition-colors mx-auto ${
-                          loading || !areAllItemsVerified()
-                            ? 'bg-gray-400 cursor-not-allowed'
-                            : currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                              currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                              currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
-                              'bg-blue-600 hover:bg-blue-700'
-                        }`}
-                      >
-                        {loading ? (
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                        ) : (
-                          <Check className="h-4 w-4" />
-                        )}
-                        <span>{loading ? 'Verifying...' : 'Verify Items'}</span>
-                      </button>
-                    </div>
-                  )}
-                  {pendingOrder.status === 'verified' && (
-                    <div className="text-center w-full">
                       <p className="text-sm text-gray-600 mb-4">
-                        Items have been verified. Your order is ready for release.
+                        Your order is on its way and will be delivered soon.
                       </p>
                     </div>
                   )}
