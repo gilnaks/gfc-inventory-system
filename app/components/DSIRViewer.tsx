@@ -97,9 +97,28 @@ interface DSIRViewerProps {
   onReportSubmitted?: () => void
   showEditButton?: boolean
   showDiscrepancyColumns?: boolean
+  showSalesDiscrepancyColumns?: boolean
+  showIceCreamDiscrepancyColumns?: boolean
+  showMaterialsDiscrepancyColumns?: boolean
 }
 
-export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportSubmitted, showEditButton = false, showDiscrepancyColumns = false }: DSIRViewerProps) {
+export function DSIRViewer({ 
+  report, 
+  onReportUpdate, 
+  currentStaffName, 
+  onReportSubmitted, 
+  showEditButton = false, 
+  showDiscrepancyColumns = false,
+  showSalesDiscrepancyColumns,
+  showIceCreamDiscrepancyColumns,
+  showMaterialsDiscrepancyColumns
+}: DSIRViewerProps) {
+  // Determine which discrepancy columns to show
+  // If specific props are provided, use them; otherwise fall back to the general showDiscrepancyColumns
+  const showSalesDiff = showSalesDiscrepancyColumns !== undefined ? showSalesDiscrepancyColumns : showDiscrepancyColumns
+  const showIceCreamDiff = showIceCreamDiscrepancyColumns !== undefined ? showIceCreamDiscrepancyColumns : showDiscrepancyColumns
+  const showMaterialsDiff = showMaterialsDiscrepancyColumns !== undefined ? showMaterialsDiscrepancyColumns : showDiscrepancyColumns
+
   const [loading, setLoading] = useState(true)
   const [salesInventory, setSalesInventory] = useState<SalesInventoryItem[]>([])
   const [iceCreamInventory, setIceCreamInventory] = useState<IceCreamInventoryItem[]>([])
@@ -2400,7 +2419,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                   <tr className="border-b border-black">
                     <th className="border-r border-black px-1 py-1 text-left font-semibold sticky left-0 bg-gray-50 z-10 w-24 break-words">ITEM</th>
                     <th className="border-r border-black px-1 py-1 text-center font-semibold w-12">BEG INV</th>
-                    {showDiscrepancyColumns && (
+                    {showSalesDiff && (
                       <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">DIFF</th>
                     )}
                     <th className="border-r border-black px-1 py-1 text-center font-semibold w-12">ARRIVAL</th>
@@ -2458,7 +2477,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               </div>
                           )}
                         </td>
-                        {showDiscrepancyColumns && (
+                        {showSalesDiff && (
                           <td className="border-r border-black px-1 py-1 text-center w-10">
                             <div className="text-xs">
                               {(() => {
@@ -2660,7 +2679,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                   <tr className="border-b border-black">
                     <th className="border-r border-black px-1 py-1 text-left font-semibold sticky left-0 bg-gray-50 z-10 w-28 break-words">FLAVOR</th>
                     <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">BEG</th>
-                    {showDiscrepancyColumns && (
+                    {showIceCreamDiff && (
                       <th className="border-r border-black px-1 py-1 text-center font-semibold w-8">DIFF</th>
                     )}
                     <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">(+)</th>
@@ -2713,7 +2732,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               </div>
                           )}
                         </td>
-                        {showDiscrepancyColumns && (
+                        {showIceCreamDiff && (
                           <td className="border-r border-black px-1 py-1 text-center w-8">
                             <div className="text-xs">
                               {(() => {
@@ -2843,7 +2862,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                   <tr className="border-b border-black">
                     <th className="border-r border-black px-1 py-1 text-left font-semibold sticky left-0 bg-gray-50 z-10 w-32 break-words">ITEM</th>
                     <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">BEG</th>
-                    {showDiscrepancyColumns && (
+                    {showMaterialsDiff && (
                       <th className="border-r border-black px-1 py-1 text-center font-semibold w-8">DIFF</th>
                     )}
                     <th className="border-r border-black px-1 py-1 text-center font-semibold w-10">(+)</th>
@@ -2896,7 +2915,7 @@ export function DSIRViewer({ report, onReportUpdate, currentStaffName, onReportS
                               </div>
                           )}
                         </td>
-                        {showDiscrepancyColumns && (
+                        {showMaterialsDiff && (
                           <td className="border-r border-black px-1 py-1 text-center w-8">
                             <div className="text-xs">
                               {(() => {

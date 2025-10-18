@@ -412,19 +412,19 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             }
           }
 
-          // Check materials inventory differences
-          if (!hasDifference) {
-            for (const currentItem of currentMaterials) {
-              const previousItem = previousMaterials.find(p => p.material_name === currentItem.material_name)
-              const previousEnding = previousItem?.ending || 0
-              const currentBeginning = currentItem.beginning || 0
-              
-              if (currentBeginning !== previousEnding) {
-                hasDifference = true
-                break
-              }
-            }
-          }
+          // Check materials inventory differences - DISABLED since DIFF column is hidden for materials
+          // if (!hasDifference) {
+          //   for (const currentItem of currentMaterials) {
+          //     const previousItem = previousMaterials.find(p => p.material_name === currentItem.material_name)
+          //     const previousEnding = previousItem?.ending || 0
+          //     const currentBeginning = currentItem.beginning || 0
+          //     
+          //     if (currentBeginning !== previousEnding) {
+          //       hasDifference = true
+          //       break
+          //     }
+          //   }
+          // }
 
           differences[report.id] = hasDifference
         }
@@ -755,7 +755,14 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           </div>
         </div>
         
-        <DSIRViewer report={selectedReport} showEditButton={true} showDiscrepancyColumns={true} />
+        <DSIRViewer 
+          report={selectedReport} 
+          showEditButton={true} 
+          showDiscrepancyColumns={true}
+          showSalesDiscrepancyColumns={true}
+          showIceCreamDiscrepancyColumns={true}
+          showMaterialsDiscrepancyColumns={false}
+        />
       </div>
     )
   }
