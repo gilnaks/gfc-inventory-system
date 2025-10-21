@@ -2817,7 +2817,7 @@ export default function OrderPage() {
                             Your order includes <strong>{getCartReturnablePansCount()} returnable pans</strong>. Please attach a photo before submitting.
                           </p>
                           <p className="text-xs text-amber-700 mb-3">
-                            <strong>Instructions:</strong> Apply a masking tape indicating the branch name, date, and number of pans
+                            <strong>Instructions:</strong> Arrange all returnable pans in a side view for easy counting. Apply a masking tape indicating the branch name, date, and number of pans
                           </p>
                           
                           {/* Image Preview */}
@@ -3176,7 +3176,7 @@ export default function OrderPage() {
                 {/* Instructions */}
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                     <p className="text-sm text-blue-800">
-                      <strong>Instructions:</strong> Arrange all returnable pans in a side view for easy counting. Tape all pans together and include a paper with branch name, date, and total number of pans. Image should match required quantity below.
+                      <strong>Instructions:</strong> Arrange all returnable pans in a side view for easy counting. Apply a masking tape indicating the branch name, date, and number of pans
                     </p>
                 </div>
 
