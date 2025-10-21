@@ -61,6 +61,8 @@ export default function OrderPage() {
   const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
   const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
   const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<any>(null)
+  const [cartReturnablePansImage, setCartReturnablePansImage] = useState<File | null>(null)
+  const [cartReturnablePansPreview, setCartReturnablePansPreview] = useState<string | null>(null)
   
   // Track last submission time to prevent rapid duplicate submissions
   const lastSubmissionTime = useRef<number>(0)
@@ -253,6 +255,8 @@ export default function OrderPage() {
     setSuccess('')
     setInitialLoading(false)
     setRedirectedFromDSIR(false)
+    setCartReturnablePansImage(null)
+    setCartReturnablePansPreview(null)
     localStorage.removeItem('order_authenticated')
     localStorage.removeItem('order_location')
     localStorage.removeItem('order_cart_draft')
@@ -687,8 +691,41 @@ export default function OrderPage() {
 
       if (detailsError) throw detailsError
 
+      // Upload returnable pans image if exists
+      if (cartReturnablePansImage && getCartReturnablePansCount() > 0) {
+        try {
+          const fileExt = cartReturnablePansImage.name.split('.').pop()
+          const fileName = `${orderData[0].id}-${Date.now()}.${fileExt}`
+          
+          const { data: uploadData, error: uploadError } = await supabase.storage
+            .from('returnable_pans')
+            .upload(fileName, cartReturnablePansImage)
+          
+          if (uploadError) throw uploadError
+          
+          // Get public URL
+          const { data: urlData } = supabase.storage
+            .from('returnable_pans')
+            .getPublicUrl(fileName)
+          
+          // Update order with returnable pans image URL
+          const { error: updateError } = await supabase
+            .from('customer_orders')
+            .update({ returnable_pans_image_url: urlData.publicUrl })
+            .eq('id', orderData[0].id)
+          
+          if (updateError) throw updateError
+        } catch (uploadErr) {
+          console.error('Error uploading returnable pans image:', uploadErr)
+          // Don't fail the order if upload fails, but warn the user
+          setError('Order submitted but returnable pans image upload failed. Please re-upload from pending orders.')
+        }
+      }
+
       setSuccess('Order submitted successfully!')
       setCartItems([])
+      setCartReturnablePansImage(null)
+      setCartReturnablePansPreview(null)
       await checkPendingOrders(location.id)
       setCurrentView('home')
       setShowCartModal(false)
@@ -812,6 +849,8 @@ export default function OrderPage() {
 
       setSuccess('Order updated successfully!')
       setCartItems([])
+      setCartReturnablePansImage(null)
+      setCartReturnablePansPreview(null)
       await checkPendingOrders(location!.id)
       setCurrentView('home')
       setShowCartModal(false)
@@ -876,6 +915,35 @@ export default function OrderPage() {
     })
     
     return returnablePansProducts
+  }
+
+  // Check if cart has returnable pans items
+  const getCartReturnablePansItems = () => {
+    if (!cartItems || !location?.brand) return []
+    
+    const brandSlug = location.brand.slug.toLowerCase()
+    const returnablePansItems = cartItems.filter((item: CartItem) => {
+      const productCategory = item.product?.category?.toLowerCase() || ''
+      
+      switch (brandSlug) {
+        case 'gelatofilipino':
+          return productCategory === 'gelato'
+        case 'mychoice':
+          return productCategory === 'ice cream'
+        case 'mang-sorbetes':
+          return productCategory === 'sorbetes'
+        default:
+          return false
+      }
+    })
+    
+    return returnablePansItems
+  }
+
+  // Get total returnable pans count in cart
+  const getCartReturnablePansCount = () => {
+    const items = getCartReturnablePansItems()
+    return items.reduce((total, item) => total + item.quantity, 0)
   }
 
   // Upload returnable pans image
@@ -2735,6 +2803,74 @@ export default function OrderPage() {
                   </div>
                 </div>
 
+                {/* Returnable Pans Upload Section */}
+                {getCartReturnablePansCount() > 0 && (
+                  <div className="mb-3 sm:mb-4">
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                      <div className="flex items-start space-x-2 mb-2">
+                        <IceCream className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-sm font-medium text-amber-900 mb-1">
+                            Returnable Pans Required
+                          </h4>
+                          <p className="text-xs text-amber-800 mb-2">
+                            Your order includes <strong>{getCartReturnablePansCount()} returnable pans</strong>. Please attach a photo before submitting.
+                          </p>
+                          <p className="text-xs text-amber-700 mb-3">
+                            <strong>Instructions:</strong> Apply a masking tape indicating the branch name, date, and number of pans
+                          </p>
+                          
+                          {/* Image Preview */}
+                          {cartReturnablePansPreview && (
+                            <div className="mb-3 relative">
+                              <img
+                                src={cartReturnablePansPreview}
+                                alt="Returnable pans preview"
+                                className="w-full h-24 object-cover rounded border border-amber-300"
+                              />
+                              <button
+                                onClick={() => {
+                                  setCartReturnablePansImage(null)
+                                  setCartReturnablePansPreview(null)
+                                }}
+                                className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded-full hover:bg-red-600"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
+                          
+                          {/* Upload Button */}
+                          <input
+                            type="file"
+                            id="cart-returnable-pans-upload"
+                            accept="image/*"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0]
+                              if (file) {
+                                setCartReturnablePansImage(file)
+                                const reader = new FileReader()
+                                reader.onloadend = () => {
+                                  setCartReturnablePansPreview(reader.result as string)
+                                }
+                                reader.readAsDataURL(file)
+                              }
+                            }}
+                            className="hidden"
+                          />
+                          <label
+                            htmlFor="cart-returnable-pans-upload"
+                            className="flex items-center justify-center space-x-2 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm rounded cursor-pointer transition-colors"
+                          >
+                            <Upload className="h-4 w-4 text-white" />
+                            <span className="text-white">{cartReturnablePansImage ? 'Change Image' : 'Upload Image'}</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Subtotal and Total */}
                 <div className="space-y-2 mb-3 sm:mb-4">
                   <div className="flex justify-between items-center">
@@ -2799,6 +2935,8 @@ export default function OrderPage() {
                       <button
                         onClick={() => {
                           setCartItems([])
+                          setCartReturnablePansImage(null)
+                          setCartReturnablePansPreview(null)
                           setCurrentView('home')
                           setShowCartModal(false)
                         }}
@@ -2808,23 +2946,30 @@ export default function OrderPage() {
                       </button>
                     </>
                   ) : (
-                <button
-                  onClick={handleSubmitOrder}
-                      disabled={loading || cartItems.length === 0}
-                      className={`w-full flex items-center justify-center space-x-1 sm:space-x-2 px-3 sm:px-4 py-2 sm:py-3 text-white rounded-lg disabled:opacity-50 transition-colors text-sm sm:text-base ${
-                    currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                    currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                    currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
-                    'bg-blue-600 hover:bg-blue-700'
-                  }`}
-                >
-                  {loading ? (
-                        <div className="animate-spin rounded-full h-4 w-4 sm:h-5 sm:w-5 border-b-2 border-white flex-shrink-0"></div>
-                      ) : (
-                        <ShoppingCart className="h-4 w-4 sm:h-5 sm:w-5 flex-shrink-0" />
-                      )}
-                      <span className="truncate">{loading ? 'Submitting...' : 'Submit Order'}</span>
-                </button>
+                <>
+                  <button
+                    onClick={handleSubmitOrder}
+                    disabled={loading || cartItems.length === 0 || (getCartReturnablePansCount() > 0 && !cartReturnablePansImage)}
+                    className={`w-full flex items-center justify-center space-x-1 sm:space-x-2 px-3 sm:px-4 py-2 sm:py-3 text-white rounded-lg disabled:opacity-50 transition-colors text-sm sm:text-base ${
+                      currentTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                      currentTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                      currentTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                      'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    {loading ? (
+                      <div className="animate-spin rounded-full h-4 w-4 sm:h-5 sm:w-5 border-b-2 border-white flex-shrink-0"></div>
+                    ) : (
+                      <ShoppingCart className="h-4 w-4 sm:h-5 sm:w-5 flex-shrink-0" />
+                    )}
+                    <span className="truncate">{loading ? 'Submitting...' : 'Submit Order'}</span>
+                  </button>
+                  {getCartReturnablePansCount() > 0 && !cartReturnablePansImage && (
+                    <p className="text-xs text-amber-700 text-center mt-2">
+                      Please upload returnable pans image to submit order
+                    </p>
+                  )}
+                </>
                   )}
                 </div>
               </div>
