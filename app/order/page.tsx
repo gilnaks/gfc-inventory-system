@@ -3246,12 +3246,12 @@ export default function OrderPage() {
                     {uploadingReturnablePans ? (
                       <>
                         <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                        <span>Uploading...</span>
+                        <span className="text-white">Uploading...</span>
                       </>
                     ) : (
                       <>
-                        <Upload className="h-4 w-4" />
-                        <span>
+                        <Upload className="h-4 w-4 text-white" />
+                        <span className="text-white">
                           {pendingOrder.returnable_pans_image_url ? 'Replace Image' : 'Upload Image'}
                         </span>
                       </>
