@@ -160,7 +160,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     }
   }
 
-  const handleUpdateAssignmentStatus = async (assignmentId: string, newStatus: string) => {
+  const handleUpdateAssignmentStatus = async (assignmentId: string, newStatus: 'scheduled' | 'in_transit' | 'delivered' | 'cancelled') => {
     // Optimistic UI update - update status immediately
     const previousAssignments = assignments
     setAssignments(prev => prev.map(a => 

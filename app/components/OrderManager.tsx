@@ -177,7 +177,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     }
   }
 
-  const updateOrderStatus = async (orderId: string, newStatus: string) => {
+  const updateOrderStatus = async (orderId: string, newStatus: 'pending' | 'approved' | 'in-transit' | 'verified' | 'fulfilled' | 'paid' | 'complete' | 'cancelled') => {
     // Prevent double execution
     if (updatingOrder === orderId) {
       console.log('Order update already in progress for:', orderId)
