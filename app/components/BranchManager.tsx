@@ -319,21 +319,17 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
       .reduce((total, order) => total + (order.total_amount || 0), 0)
   }, [])
 
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      // You could add a toast notification here if desired
-      console.log('Passkey copied to clipboard:', text)
-    } catch (err) {
-      console.error('Failed to copy passkey:', err)
-      // Fallback for older browsers
-      const textArea = document.createElement('textarea')
-      textArea.value = text
-      document.body.appendChild(textArea)
-      textArea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textArea)
-    }
+  const copyToClipboard = (e: React.MouseEvent, text: string) => {
+    navigator.clipboard.writeText(text)
+    // Show visual feedback
+    const button = e.currentTarget as HTMLButtonElement
+    const originalHTML = button.innerHTML
+    button.innerHTML = '<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
+    button.classList.add('text-green-600')
+    setTimeout(() => {
+      button.innerHTML = originalHTML
+      button.classList.remove('text-green-600')
+    }, 1500)
   }
 
   const getReturnablePans = (order: CustomerOrder | null) => {
@@ -1558,13 +1554,8 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         <div className="flex items-center space-x-2">
                           <span className="font-mono">{location.passkey}</span>
                           <button
-                            onClick={() => copyToClipboard(location.passkey)}
-                            className={`p-1 rounded hover:bg-gray-100 transition-colors ${
-                              theme === 'green' ? 'text-green-600 hover:text-green-700' :
-                              theme === 'red' ? 'text-red-600 hover:text-red-700' :
-                              theme === 'yellow' ? 'text-yellow-600 hover:text-yellow-700' :
-                              'text-blue-600 hover:text-blue-700'
-                            }`}
+                            onClick={(e) => copyToClipboard(e, location.passkey)}
+                            className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
                             title="Copy passkey"
                           >
                             <Copy className="h-4 w-4" />

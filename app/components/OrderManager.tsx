@@ -186,6 +186,15 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     
     setUpdatingOrder(orderId)
     
+    // Optimistic UI update - update the order in state immediately
+    setOrders(prevOrders => 
+      prevOrders.map(order => 
+        order.id === orderId 
+          ? { ...order, status: newStatus, updated_at: new Date().toISOString() }
+          : order
+      )
+    )
+    
     try {
       // Get the order to check if location is company-owned
       const { data: orderData, error: orderError } = await supabase
@@ -200,6 +209,8 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       if (orderError) {
         console.error('Error fetching order:', orderError)
         alert('Failed to fetch order data')
+        // Revert optimistic update on error
+        fetchOrders()
         return
       }
 
@@ -234,10 +245,10 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
           // Create a map for quick lookup
           const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-          // Batch update all products using RPC or individual updates
-          for (const detail of orderDetails || []) {
+          // Batch update all products in parallel
+          const updatePromises = (orderDetails || []).map(async (detail) => {
             const productData = productsMap.get(detail.product_id)
-            if (!productData) continue
+            if (!productData) return
 
             const newInitialStock = Math.max(0, (productData.initial_stock || 0) - detail.quantity)
             const newReleased = Math.max(0, (productData.released || 0) - detail.quantity)
@@ -253,9 +264,16 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
             if (updateError) {
               console.error('Error updating product quantities:', updateError)
-              alert('Failed to update product quantities')
-              return
+              throw new Error('Failed to update product quantities')
             }
+          })
+
+          const results = await Promise.allSettled(updatePromises)
+          const failed = results.filter(r => r.status === 'rejected')
+          if (failed.length > 0) {
+            alert('Failed to update some product quantities')
+            fetchOrders() // Revert optimistic update
+            return
           }
         }
       }
@@ -289,14 +307,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             // Create a map for quick lookup
             const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-            // Batch update all products
-            for (const detail of orderDetails || []) {
-              if (!detail.product_id) continue
+            // Batch update all products in parallel
+            const updatePromises = (orderDetails || []).map(async (detail) => {
+              if (!detail.product_id) return
 
               const productData = productsMap.get(detail.product_id)
               if (!productData) {
                 console.warn('Product not found for product_id:', detail.product_id)
-                continue
+                return
               }
 
               const newReserved = Math.max(0, (productData.reserved || 0) - detail.quantity)
@@ -313,9 +331,16 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
               if (updateError) {
                 console.error('Error updating product quantities:', updateError)
-                alert('Failed to update product quantities')
-                return
+                throw new Error('Failed to update product quantities')
               }
+            })
+
+            const results = await Promise.allSettled(updatePromises)
+            const failed = results.filter(r => r.status === 'rejected')
+            if (failed.length > 0) {
+              alert('Failed to update some product quantities')
+              fetchOrders() // Revert optimistic update
+              return
             }
           }
         }
@@ -357,14 +382,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             // Create a map for quick lookup
             const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-            // Batch update all products
-            for (const detail of orderDetails || []) {
-              if (!detail.product_id) continue
+            // Batch update all products in parallel
+            const updatePromises = (orderDetails || []).map(async (detail) => {
+              if (!detail.product_id) return
 
               const productData = productsMap.get(detail.product_id)
               if (!productData) {
                 console.warn('Product not found for product_id:', detail.product_id)
-                continue
+                return
               }
 
               // Determine what to return based on current state
@@ -396,9 +421,16 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
               if (updateError) {
                 console.error('Error updating product quantities:', updateError)
-                alert('Failed to update product quantities')
-                return
+                throw new Error('Failed to update product quantities')
               }
+            })
+
+            const results = await Promise.allSettled(updatePromises)
+            const failed = results.filter(r => r.status === 'rejected')
+            if (failed.length > 0) {
+              alert('Failed to update some product quantities')
+              fetchOrders() // Revert optimistic update
+              return
             }
           }
         }
@@ -425,17 +457,20 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       if (error) {
         console.error('Error updating order status:', error)
         alert('Failed to update order status')
+        // Revert optimistic update on error
+        fetchOrders()
         return
       }
 
-      // Refresh orders and trigger product refresh
-      fetchOrders()
+      // Trigger product refresh (no need to refetch orders - already updated optimistically)
       if (onOrderUpdate) {
         onOrderUpdate()
       }
     } catch (error) {
       console.error('Error updating order status:', error)
       alert('Failed to update order status')
+      // Revert optimistic update on error
+      fetchOrders()
     } finally {
       setUpdatingOrder(null)
     }
@@ -444,6 +479,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const handleDeleteOrder = async (orderId: string) => {
     try {
       setUpdatingOrder(orderId)
+
+      // Optimistic UI update - remove order from state immediately
+      setOrders(prevOrders => prevOrders.filter(order => order.id !== orderId))
 
       // First get the order to check its status and details
       const { data: orderData, error: orderError } = await supabase
@@ -461,52 +499,65 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       if (orderError) {
         console.error('Error fetching order:', orderError)
         alert('Failed to fetch order data')
+        fetchOrders() // Revert optimistic update
         return
       }
 
       // If the order is fulfilled, add the released quantities back to initial stock
       if (orderData.status === 'fulfilled' && orderData.order_details) {
-        for (const detail of orderData.order_details) {
-          // Skip if product_id is null or undefined
-          if (!detail.product_id) {
-            console.warn('Skipping order detail with missing product_id:', detail)
-            continue
-          }
-
-          // Get current product quantities
-          const { data: productData, error: fetchError } = await supabase
+        // Batch fetch all products first
+        const productIds = orderData.order_details
+          .map(d => d.product_id)
+          .filter(Boolean)
+        
+        if (productIds.length > 0) {
+          const { data: productsData, error: fetchError } = await supabase
             .from('products')
-            .select('initial_stock, released')
-            .eq('id', detail.product_id)
-            .single()
+            .select('id, initial_stock, released')
+            .in('id', productIds)
 
           if (fetchError) {
-            console.error('Error fetching product data for product_id:', detail.product_id, fetchError)
-            // Continue with other products instead of failing completely
-            continue
+            console.error('Error fetching products:', fetchError)
+            alert('Failed to fetch product data')
+            fetchOrders() // Revert optimistic update
+            return
           }
 
-          if (!productData) {
-            console.warn('Product not found for product_id:', detail.product_id)
-            continue
-          }
+          const productsMap = new Map(productsData?.map(p => [p.id, p]))
 
-          // Add released quantity back to initial stock and subtract from released
-          const newInitialStock = (productData?.initial_stock || 0) + detail.quantity
-          const newReleased = Math.max(0, (productData?.released || 0) - detail.quantity)
+          // Update all products in parallel
+          const updatePromises = orderData.order_details.map(async (detail) => {
+            if (!detail.product_id) return
 
-          const { error: updateError } = await supabase
-            .from('products')
-            .update({
-              initial_stock: newInitialStock,
-              released: newReleased,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', detail.product_id)
+            const productData = productsMap.get(detail.product_id)
+            if (!productData) {
+              console.warn('Product not found for product_id:', detail.product_id)
+              return
+            }
 
-          if (updateError) {
-            console.error('Error updating product quantities:', updateError)
-            alert('Failed to update product quantities')
+            const newInitialStock = (productData.initial_stock || 0) + detail.quantity
+            const newReleased = Math.max(0, (productData.released || 0) - detail.quantity)
+
+            const { error: updateError } = await supabase
+              .from('products')
+              .update({
+                initial_stock: newInitialStock,
+                released: newReleased,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', detail.product_id)
+
+            if (updateError) {
+              console.error('Error updating product quantities:', updateError)
+              throw new Error('Failed to update product quantities')
+            }
+          })
+
+          const results = await Promise.allSettled(updatePromises)
+          const failed = results.filter(r => r.status === 'rejected')
+          if (failed.length > 0) {
+            alert('Failed to update some product quantities')
+            fetchOrders() // Revert optimistic update
             return
           }
         }
@@ -566,17 +617,18 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       if (error) {
         console.error('Error deleting order:', error)
         alert('Failed to delete order')
+        fetchOrders() // Revert optimistic update
         return
       }
 
-      // Refresh orders and trigger product refresh
-      fetchOrders()
+      // Trigger product refresh (no need to refetch orders - already removed optimistically)
       if (onOrderUpdate) {
         onOrderUpdate()
       }
     } catch (error) {
       console.error('Error deleting order:', error)
       alert('Failed to delete order')
+      fetchOrders() // Revert optimistic update
     } finally {
       setUpdatingOrder(null)
     }
@@ -585,6 +637,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const handleDeleteCompleteOrder = async (orderId: string) => {
     try {
       setUpdatingOrder(orderId)
+
+      // Optimistic UI update - remove order from state immediately
+      setOrders(prevOrders => prevOrders.filter(order => order.id !== orderId))
 
       // First get the order to check for related data
       const { data: orderData, error: orderError } = await supabase
@@ -602,6 +657,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       if (orderError) {
         console.error('Error fetching order:', orderError)
         alert('Failed to fetch order data')
+        fetchOrders() // Revert optimistic update
         return
       }
 
@@ -680,11 +736,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       if (error) {
         console.error('Error deleting order:', error)
         alert('Failed to delete order')
+        fetchOrders() // Revert optimistic update
         return
       }
 
-      // Refresh orders and trigger product refresh
-      fetchOrders()
+      // Trigger product refresh (no need to refetch orders - already removed optimistically)
       if (onOrderUpdate) {
         onOrderUpdate()
       }
@@ -693,6 +749,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     } catch (error) {
       console.error('Error deleting complete order:', error)
       alert('Failed to delete complete order')
+      fetchOrders() // Revert optimistic update
     } finally {
       setUpdatingOrder(null)
     }
@@ -2854,7 +2911,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               <img
                 src={selectedReturnablePansImage}
                 alt="Returnable pans"
-                className="max-h-[70vh] w-auto rounded-lg border"
+                className="max-h-[70vh] w-auto rounded-lg border transition-transform duration-300 ease-in-out hover:scale-[2] cursor-zoom-in"
               />
             </div>
           </div>

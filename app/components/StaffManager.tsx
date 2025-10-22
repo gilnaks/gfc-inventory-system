@@ -1,7 +1,7 @@
 'use client'
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw, CalendarX, MessageSquare, Megaphone, Mail } from 'lucide-react'
+import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw, CalendarX, MessageSquare, Megaphone, Mail, Copy } from 'lucide-react'
 
 
 interface StaffRegistration {
@@ -2026,6 +2026,24 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         <div className="text-sm text-gray-500 flex items-center space-x-1">
                           <Hash className="h-3 w-3" />
                           <span>{staffMember.staff_code}</span>
+                          <button
+                            onClick={(e) => {
+                              navigator.clipboard.writeText(staffMember.staff_code)
+                              // Show a temporary success message
+                              const button = e.currentTarget
+                              const originalHTML = button.innerHTML
+                              button.innerHTML = '<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
+                              button.classList.add('text-green-600')
+                              setTimeout(() => {
+                                button.innerHTML = originalHTML
+                                button.classList.remove('text-green-600')
+                              }, 1500)
+                            }}
+                            className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+                            title="Copy staff code"
+                          >
+                            <Copy className="h-3 w-3" />
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -2886,7 +2904,26 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   </div>
                   <div>
                     <span className="font-medium text-gray-700">Staff Code:</span>
-                    <p className="text-gray-900">{selectedLeaveRequest.staff_registrations.staff_code}</p>
+                    <div className="flex items-center space-x-2">
+                      <p className="text-gray-900">{selectedLeaveRequest.staff_registrations.staff_code}</p>
+                      <button
+                        onClick={(e) => {
+                          navigator.clipboard.writeText(selectedLeaveRequest.staff_registrations.staff_code)
+                          const button = e.currentTarget
+                          const originalHTML = button.innerHTML
+                          button.innerHTML = '<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
+                          button.classList.add('text-green-600')
+                          setTimeout(() => {
+                            button.innerHTML = originalHTML
+                            button.classList.remove('text-green-600')
+                          }, 1500)
+                        }}
+                        className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+                        title="Copy staff code"
+                      >
+                        <Copy className="h-3 w-3" />
+                      </button>
+                    </div>
                   </div>
                   <div>
                     <span className="font-medium text-gray-700">Branch:</span>
@@ -3020,9 +3057,28 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
             <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Leave Request History</h3>
-                <p className="text-sm text-gray-600 mt-1">
-                  {selectedStaffForHistory.full_name} • {selectedStaffForHistory.staff_code}
-                </p>
+                <div className="flex items-center space-x-2 mt-1">
+                  <p className="text-sm text-gray-600">
+                    {selectedStaffForHistory.full_name} • {selectedStaffForHistory.staff_code}
+                  </p>
+                  <button
+                    onClick={(e) => {
+                      navigator.clipboard.writeText(selectedStaffForHistory.staff_code)
+                      const button = e.currentTarget
+                      const originalHTML = button.innerHTML
+                      button.innerHTML = '<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
+                      button.classList.add('text-green-600')
+                      setTimeout(() => {
+                        button.innerHTML = originalHTML
+                        button.classList.remove('text-green-600')
+                      }, 1500)
+                    }}
+                    className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+                    title="Copy staff code"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
               <button
                 onClick={() => {
@@ -3325,7 +3381,26 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <div>
                 <h3 className="text-lg font-semibold text-gray-900">Messages for {selectedStaffForMessage.full_name}</h3>
-                <p className="text-sm text-gray-600 mt-1">Staff Code: {selectedStaffForMessage.staff_code}</p>
+                <div className="flex items-center space-x-2 mt-1">
+                  <p className="text-sm text-gray-600">Staff Code: {selectedStaffForMessage.staff_code}</p>
+                  <button
+                    onClick={(e) => {
+                      navigator.clipboard.writeText(selectedStaffForMessage.staff_code)
+                      const button = e.currentTarget
+                      const originalHTML = button.innerHTML
+                      button.innerHTML = '<svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
+                      button.classList.add('text-green-600')
+                      setTimeout(() => {
+                        button.innerHTML = originalHTML
+                        button.classList.remove('text-green-600')
+                      }, 1500)
+                    }}
+                    className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+                    title="Copy staff code"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
               <button
                 onClick={() => {

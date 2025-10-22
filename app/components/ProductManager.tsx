@@ -282,9 +282,17 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
         return
       }
 
-      if (data) {
-        // Manually refetch products to get the new product with computed values from inventory_summary view
-        await fetchProducts()
+      if (data && data[0]) {
+        // Optimistic UI update - add the new product to state immediately
+        const newProductData = data[0]
+        const computedProduct = {
+          ...newProductData,
+          product_id: newProductData.id,
+          product_name: newProductData.name,
+          final_stock: (newProductData.initial_stock || 0) + (newProductData.production || 0) - (newProductData.released || 0),
+          available_stock: (newProductData.initial_stock || 0) + (newProductData.production || 0) - (newProductData.released || 0) - (newProductData.reserved || 0)
+        }
+        setProducts(prev => [...prev, computedProduct])
         setNewProduct({ name: '', sku: '', category: '', unit: 'pcs', price: 0, initial_stock: 0, production: 0, released: 0, reserved: 0 })
         setShowAddForm(false)
       }
@@ -352,6 +360,10 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   const handleDeleteProduct = async (productId: string) => {
     if (!confirm('Are you sure you want to delete this product?')) return
 
+    // Optimistic UI update - remove product immediately
+    const previousProducts = products
+    setProducts(products.filter(p => (p.product_id || p.id) !== productId))
+
     try {
       const { error } = await supabase
         .from('products')
@@ -361,23 +373,17 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
       if (error) {
         console.error('Error deleting product:', error)
         alert('Error deleting product: ' + error.message)
+        // Revert optimistic update on error
+        setProducts(previousProducts)
         return
       }
 
       console.log('Product deleted successfully')
-      
-      // Immediately update the local state for instant UI feedback
-      setProducts(products.filter(p => (p.product_id || p.id) !== productId))
-      
-      // Also refetch to ensure we have the latest data from the database
-      // This handles any edge cases where the local filter might miss something
-      setTimeout(async () => {
-        console.log('Refetching products to ensure consistency')
-        await fetchProducts()
-      }, 500)
     } catch (error) {
       console.error('Error deleting product:', error)
       alert('Error deleting product')
+      // Revert optimistic update on error
+      setProducts(previousProducts)
     }
   }
 
@@ -432,8 +438,21 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
         return
       }
 
-      // Update each product: add production to initial stock and reset production
-      for (const product of allProducts) {
+      // Optimistic UI update - update all products immediately
+      const previousProducts = products
+      setProducts(prevProducts => prevProducts.map(p => {
+        const newInitialStock = (p.initial_stock || 0) + (p.production || 0)
+        return {
+          ...p,
+          initial_stock: newInitialStock,
+          production: 0,
+          final_stock: newInitialStock - (p.released || 0),
+          available_stock: newInitialStock - (p.released || 0) - (p.reserved || 0)
+        }
+      }))
+
+      // Update all products in parallel
+      const updatePromises = allProducts.map(async (product) => {
         const newInitialStock = (product.initial_stock || 0) + (product.production || 0)
         
         const { error: updateError } = await supabase
@@ -447,15 +466,21 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
 
         if (updateError) {
           console.error(`Error updating product ${product.name}:`, updateError)
-          alert(`Error updating product ${product.name}`)
-          return
+          throw new Error(`Failed to update product ${product.name}`)
         }
+      })
+
+      const results = await Promise.allSettled(updatePromises)
+      const failed = results.filter(r => r.status === 'rejected')
+      
+      if (failed.length > 0) {
+        alert(`Failed to update ${failed.length} product(s). Stock finalization incomplete.`)
+        // Revert optimistic update on error
+        setProducts(previousProducts)
+        return
       }
 
       alert('Stock finalized successfully! Production has been added to initial stock.')
-      
-      // Refresh the products list
-      await fetchProducts()
       
     } catch (error) {
       console.error('Error finalizing stock:', error)

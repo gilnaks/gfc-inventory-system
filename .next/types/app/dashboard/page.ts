@@ -1,8 +1,8 @@
-// File: C:\Users\John\Desktop\gfc\inventory-system\app\order\page.tsx
-import * as entry from '../../../../app/order/page.js'
+// File: C:\Users\John\Desktop\gfc\inventory-system\app\dashboard\page.tsx
+import * as entry from '../../../../app/dashboard/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 
-type TEntry = typeof import('../../../../app/order/page.js')
+type TEntry = typeof import('../../../../app/dashboard/page.js')
 
 // Check that the entry is a valid entry
 checkFields<Diff<{

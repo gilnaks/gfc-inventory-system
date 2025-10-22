@@ -218,15 +218,20 @@ export function PayrollManager() {
       })).filter(staff => staff.staff_assignments.length > 0) || [] // Only staff with company-owned assignments
 
       setStaff(staffWithAssignments)
+      // Don't set loading to false here - let loadPayrollData handle it
+      // But if there's no staff, we need to set loading to false
+      if (staffWithAssignments.length === 0) {
+        setLoading(false)
+      }
     } catch (error) {
       console.error('Error loading staff and payroll data:', error)
       setError('Failed to load payroll data')
-    } finally {
-      setLoading(false)
+      setLoading(false) // Only set loading to false on error
     }
   }
 
   const loadPayrollData = async (staffData: StaffWithAssignments[]) => {
+    setLoading(true)
     try {
       const startDate = getStartDate()
       const endDate = getEndDate()
@@ -288,6 +293,8 @@ export function PayrollManager() {
           custom: 0
         }
       })
+    } finally {
+      setLoading(false)
     }
   }
 

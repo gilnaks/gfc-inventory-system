@@ -137,21 +137,36 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
           status: 'scheduled',
           notes: null
         })
-        .select()
+        .select(`
+          *,
+          order:customer_orders(
+            *,
+            location:locations(name),
+            brand:brands(name)
+          )
+        `)
 
       if (error) {
         console.error('Error creating assignment:', error)
         return
       }
 
-      // Refresh assignments
-      await fetchAssignments()
+      // Optimistic UI update - add the new assignment to state immediately
+      if (data && data[0]) {
+        setAssignments(prev => [...prev, data[0]])
+      }
     } catch (error) {
       console.error('Error creating assignment:', error)
     }
   }
 
   const handleUpdateAssignmentStatus = async (assignmentId: string, newStatus: string) => {
+    // Optimistic UI update - update status immediately
+    const previousAssignments = assignments
+    setAssignments(prev => prev.map(a => 
+      a.id === assignmentId ? { ...a, status: newStatus } : a
+    ))
+
     try {
       const { error } = await supabase
         .from('logistics_assignments')
@@ -160,17 +175,23 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
 
       if (error) {
         console.error('Error updating assignment:', error)
+        // Revert optimistic update on error
+        setAssignments(previousAssignments)
         return
       }
-
-      await fetchAssignments()
     } catch (error) {
       console.error('Error updating assignment:', error)
+      // Revert optimistic update on error
+      setAssignments(previousAssignments)
     }
   }
 
   const handleDeleteAssignment = async (assignmentId: string) => {
     if (!confirm('Are you sure you want to delete this assignment?')) return
+
+    // Optimistic UI update - remove assignment immediately
+    const previousAssignments = assignments
+    setAssignments(prev => prev.filter(a => a.id !== assignmentId))
 
     try {
       const { error } = await supabase
@@ -180,12 +201,14 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
 
       if (error) {
         console.error('Error deleting assignment:', error)
+        // Revert optimistic update on error
+        setAssignments(previousAssignments)
         return
       }
-
-      await fetchAssignments()
     } catch (error) {
       console.error('Error deleting assignment:', error)
+      // Revert optimistic update on error
+      setAssignments(previousAssignments)
     }
   }
 
@@ -356,8 +379,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
     setSelectedTimeSlot(timeSlot)
     setPopupPosition({ x: event.clientX, y: event.clientY })
     setShowOrderPopup(true)
-    // Refresh assignments after showing popup (non-blocking)
-    fetchAssignments()
+    // No need to refresh assignments here - they're already loaded and this causes flickering
   }
 
   const formatDate = (date: Date) => {

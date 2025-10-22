@@ -2056,14 +2056,14 @@ export default function OrderPage() {
                           {uploadingPhoto && uploadingOrderId === pendingOrder.id ? (
                             <>
                               <div className="animate-spin rounded-full h-4 w-4 sm:h-5 w-5 border-b-2 border-white"></div>
-                              <span className="text-sm sm:text-base">Uploading...</span>
+                              <span className="text-sm sm:text-base text-white">Uploading...</span>
                             </>
                           ) : (
                             <>
-                              <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <svg className="h-4 w-4 sm:h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                               </svg>
-                              <span className="text-sm sm:text-base">Upload Deposit Slip</span>
+                              <span className="text-sm sm:text-base text-white">Upload Deposit Slip</span>
                             </>
                           )}
                         </label>
@@ -2135,14 +2135,14 @@ export default function OrderPage() {
                           {uploadingPhoto && uploadingOrderId === pendingOrder.id ? (
                             <>
                               <div className="animate-spin rounded-full h-4 w-4 sm:h-5 w-5 border-b-2 border-white"></div>
-                              <span className="text-sm sm:text-base">Uploading...</span>
+                              <span className="text-sm sm:text-base text-white">Uploading...</span>
                             </>
                           ) : (
                             <>
-                              <svg className="h-4 w-4 sm:h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <svg className="h-4 w-4 sm:h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                               </svg>
-                              <span className="text-sm sm:text-base">Re-upload Deposit Slip</span>
+                              <span className="text-sm sm:text-base text-white">Re-upload Deposit Slip</span>
                             </>
                           )}
                         </label>
@@ -2204,13 +2204,16 @@ export default function OrderPage() {
                               disabled={uploadingPhoto && uploadingOrderId === order.id}
                             />
                             {uploadingPhoto && uploadingOrderId === order.id ? (
-                              <div className="animate-spin rounded-full h-4 w-4 sm:h-5 sm:w-5 border-b-2 border-white"></div>
+                              <>
+                                <div className="animate-spin rounded-full h-4 w-4 sm:h-5 sm:w-5 border-b-2 border-white"></div>
+                                <span className="text-sm font-medium text-white">Uploading...</span>
+                              </>
                             ) : (
                               <>
-                                <svg className="h-4 w-4 sm:h-5 sm:w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <svg className="h-4 w-4 sm:h-5 sm:w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                                 </svg>
-                                <span className="text-sm font-medium">Upload Deposit Slip</span>
+                                <span className="text-sm font-medium text-white">Upload Deposit Slip</span>
                               </>
                             )}
                           </label>
