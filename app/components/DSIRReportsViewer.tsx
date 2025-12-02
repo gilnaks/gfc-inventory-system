@@ -1644,7 +1644,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       {/* Create DSIR Report Modal */}
       {isCreateReportModalOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-1/2 lg:w-1/3 max-w-md shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Create DSIR</h3>
               <button

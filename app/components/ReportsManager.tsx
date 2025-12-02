@@ -18,7 +18,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
   const [dateRange, setDateRange] = useState({ start: '', end: '' })
   const [reportData, setReportData] = useState<any>(null)
   const [error, setError] = useState('')
-  
+
   // Brand selection - use local state, initialize from prop
   const [selectedBrand, setSelectedBrand] = useState<Brand | null>(propSelectedBrand || null)
   
@@ -53,10 +53,17 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     startDate.setDate(startDate.getDate() - 7)
     const start = startDate.toISOString().split('T')[0]
     setDateRange({ start, end })
+    setDateRangePreset('7days')
     loadFilterOptions()
     // Clear report data when brand changes
     setReportData(null)
     setError('')
+    // Reset all filters when brand changes
+    setSelectedBranch('')
+    setSelectedCategory('')
+    setSelectedStaff('')
+    setSelectedLocation('')
+    setSelectedCompanyOwned('')
   }, [selectedBrand])
 
   useEffect(() => {
@@ -85,7 +92,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
         startDate.setDate(startDate.getDate() - 7)
         break
       case '30days':
-        startDate.setDate(startDate.getDate() - 30)
+    startDate.setDate(startDate.getDate() - 30)
         break
       case '365days':
         startDate.setDate(startDate.getDate() - 365)
@@ -219,6 +226,13 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     let filteredOrders = orders || []
     if (selectedBranch) {
       filteredOrders = filteredOrders.filter(order => order.location?.id === selectedBranch)
+    }
+
+    // Filter by company owned if selected
+    if (selectedCompanyOwned === 'true') {
+      filteredOrders = filteredOrders.filter(order => order.location?.company_owned === true)
+    } else if (selectedCompanyOwned === 'false') {
+      filteredOrders = filteredOrders.filter(order => order.location?.company_owned === false)
     }
 
     const totalSales = filteredOrders.reduce((sum, order) => sum + (order.total_amount || 0), 0)
@@ -893,7 +907,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-gray-900">Reports</h1>
-        <p className="text-sm text-gray-600">Generate comprehensive reports from your data</p>
+        <p className="text-sm text-gray-600">View sales, product, staff, and branch performance reports</p>
       </div>
 
       {/* Report Selection */}
@@ -1045,19 +1059,33 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
 
           {/* Sales Report Filters */}
           {reportType === 'sales' && (
-            <div className="flex-shrink-0 min-w-[150px]">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Branch</label>
-              <select
-                value={selectedBranch}
-                onChange={(e) => setSelectedBranch(e.target.value)}
-                className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              >
-                <option value="">All Branches</option>
-                {branches.map(branch => (
-                  <option key={branch.id} value={branch.id}>{branch.name}</option>
-                ))}
-              </select>
-        </div>
+            <>
+              <div className="flex-shrink-0 min-w-[150px]">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Branch</label>
+                <select
+                  value={selectedBranch}
+                  onChange={(e) => setSelectedBranch(e.target.value)}
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">All Branches</option>
+                  {branches.map(branch => (
+                    <option key={branch.id} value={branch.id}>{branch.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-shrink-0 min-w-[150px]">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Ownership</label>
+                <select
+                  value={selectedCompanyOwned}
+                  onChange={(e) => setSelectedCompanyOwned(e.target.value)}
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">All</option>
+                  <option value="true">Company Owned</option>
+                  <option value="false">Franchise</option>
+                </select>
+              </div>
+            </>
           )}
 
           {/* Product Performance Filters */}
@@ -1252,10 +1280,10 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                 }
                 
                 return (
-                  <div key={key} className="bg-gray-50 p-4 rounded-lg">
+                <div key={key} className="bg-gray-50 p-4 rounded-lg">
                     <p className="text-sm text-gray-600 mb-1">{displayKey}</p>
                     <p className="text-xl font-semibold text-gray-900">{displayValue}</p>
-                  </div>
+                </div>
                 )
               })}
             </div>
@@ -1391,9 +1419,9 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                       />
                     </PieChart>
                   </ResponsiveContainer>
-                </div>
-              )}
             </div>
+              )}
+          </div>
           )}
 
           {reportData.type === 'Staff Performance Report' && (
