@@ -294,22 +294,39 @@ export default function OrderPage() {
       
       if (error) throw error
       
+      // Clear all existing data before switching to prevent stale data from showing
+      setProducts([])
+      setCartItems([])
+      setPendingOrder(null)
+      setPastOrders([])
+      setCurrentView('home')
+      setShowPastOrders(false)
+      setShowCartModal(false)
+      setShowReturnablePansModal(false)
+      setShowDepositSlipModal(false)
+      setCartReturnablePansImage(null)
+      setCartReturnablePansPreview(null)
+      setSelectedDepositSlipImage(null)
+      setSelectedDepositSlipOrder(null)
+      
+      // Set new location
       setLocation(data)
       setIsAuthenticated(true)
       localStorage.setItem('order_authenticated', 'true')
       localStorage.setItem('order_location', JSON.stringify(data))
       
+      // Fetch fresh data for the new branch
       await Promise.all([
         checkPendingOrders(data.id),
         fetchPastOrders(data.id),
         fetchProducts(data.brand_id)
       ])
       
-      setCurrentView('home')
       setSuccess(`Switched to ${data.name} successfully!`)
       setTimeout(() => setSuccess(''), 3000)
     } catch (error) {
       setError('Failed to switch branch. Please try again.')
+      console.error('Error switching branch:', error)
     } finally {
       setLoading(false)
     }
@@ -648,12 +665,33 @@ export default function OrderPage() {
         }
       }
 
-      // Reserve inventory
+      // Reserve inventory - fetch fresh reserved values from database first
+      const productIds = cartItems.map(item => item.product_id)
+      const { data: currentProducts, error: fetchError } = await supabase
+        .from('products')
+        .select('id, reserved')
+        .in('id', productIds)
+      
+      if (fetchError) throw fetchError
+      
+      const currentReserved = new Map(
+        currentProducts?.map(p => [p.id, p.reserved || 0]) || []
+      )
+
+      // Update reserved values using fresh data from database
       for (const item of cartItems) {
+        const currentReservedValue = currentReserved.get(item.product_id) || 0
+        const newReservedValue = currentReservedValue + item.quantity
+        
+        // Validate: ensure reserved doesn't go negative (shouldn't happen, but safety check)
+        if (newReservedValue < 0) {
+          throw new Error(`Invalid reserved value for product ${item.product_id}. Current: ${currentReservedValue}, Adding: ${item.quantity}`)
+        }
+        
         const { error } = await supabase
           .from('products')
           .update({ 
-            reserved: (item.product.reserved || 0) + item.quantity,
+            reserved: newReservedValue,
             updated_at: new Date().toISOString()
           })
           .eq('id', item.product_id)
@@ -752,23 +790,40 @@ export default function OrderPage() {
   const handleUpdateOrder = async () => {
     if (!pendingOrder || cartItems.length === 0) return
 
-    // Validate stock availability before updating
-    const stockErrors = await validateStockAvailability()
-    if (stockErrors.length > 0) {
-      setError(`Insufficient stock for the following items:\n${stockErrors.join('\n')}`)
-      return
-    }
-
     setLoading(true)
     setError('')
 
     try {
+      // Validate order status - only allow modification of pending orders
+      const { data: orderData, error: orderCheckError } = await supabase
+        .from('customer_orders')
+        .select('status')
+        .eq('id', pendingOrder.id)
+        .single()
+
+      if (orderCheckError) throw orderCheckError
+
+      if (orderData.status !== 'pending') {
+        setError('Only pending orders can be modified. Please refresh the page.')
+        setLoading(false)
+        return
+      }
+
+      // Validate stock availability before updating
+      const stockErrors = await validateStockAvailability()
+      if (stockErrors.length > 0) {
+        setError(`Insufficient stock for the following items:\n${stockErrors.join('\n')}`)
+        setLoading(false)
+        return
+      }
+
       // Get current reserved values from database for all affected products
       const allProductIds = new Set([
         ...(pendingOrder.order_details?.map((item: any) => item.product_id) || []),
         ...cartItems.map(item => item.product_id)
       ])
       
+      // Fetch fresh reserved values right before calculating changes to minimize race conditions
       const { data: currentProducts, error: fetchError } = await supabase
         .from('products')
         .select('id, reserved')
@@ -801,29 +856,45 @@ export default function OrderPage() {
         }
       }
 
-      // Update reserved values based on net changes
+      // Validate all changes before applying them
+      const inventoryUpdates: Array<{ productId: string; newReserved: number }> = []
       for (const [productId, netChange] of Array.from(netChanges.entries())) {
         if (netChange !== 0) {
           const currentReservedValue = currentReserved.get(productId) || 0
-          const newReservedValue = Math.max(0, currentReservedValue + netChange)
+          const newReservedValue = currentReservedValue + netChange
           
-          const { error: updateError } = await supabase
-            .from('products')
-            .update({ 
-              reserved: newReservedValue,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', productId)
+          // Validate: ensure reserved doesn't go negative
+          if (newReservedValue < 0) {
+            throw new Error(`Invalid reserved value for product ${productId}. Current: ${currentReservedValue}, Change: ${netChange}`)
+          }
           
-          if (updateError) throw updateError
+          inventoryUpdates.push({ productId, newReserved: newReservedValue })
+        }
+      }
+
+      // Apply all inventory updates
+      for (const { productId, newReserved } of inventoryUpdates) {
+        const { error: updateError } = await supabase
+          .from('products')
+          .update({ 
+            reserved: newReserved,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', productId)
+        
+        if (updateError) {
+          console.error('Error updating product inventory:', updateError)
+          throw new Error(`Failed to update inventory for product ${productId}`)
         }
       }
 
       // Delete existing order details
-      await supabase
+      const { error: deleteError } = await supabase
         .from('order_details')
         .delete()
         .eq('order_id', pendingOrder.id)
+
+      if (deleteError) throw deleteError
 
       // Insert new order details
       const orderDetails = cartItems.map(item => ({
@@ -833,19 +904,23 @@ export default function OrderPage() {
         unit_price: item.product.price || 0
       }))
 
-      await supabase
+      const { error: insertError } = await supabase
         .from('order_details')
         .insert(orderDetails)
 
+      if (insertError) throw insertError
+
       // Update order total and delivery type
       const totalAmount = calculateTotal()
-      await supabase
+      const { error: orderUpdateError } = await supabase
         .from('customer_orders')
         .update({ 
           total_amount: totalAmount,
           delivery_type: deliveryType
         })
         .eq('id', pendingOrder.id)
+
+      if (orderUpdateError) throw orderUpdateError
 
       setSuccess('Order updated successfully!')
       setCartItems([])
@@ -856,7 +931,17 @@ export default function OrderPage() {
       setShowCartModal(false)
     } catch (error) {
       console.error('Error updating order:', error)
-      setError('Failed to update order. Please try again.')
+      
+      // Provide more specific error messages
+      if (error instanceof Error) {
+        if (error.message.includes('Invalid reserved value')) {
+          setError('Stock levels have changed. Please refresh and try again.')
+        } else {
+          setError(`Failed to update order: ${error.message}`)
+        }
+      } else {
+        setError('Failed to update order. Please try again.')
+      }
     } finally {
       setLoading(false)
     }

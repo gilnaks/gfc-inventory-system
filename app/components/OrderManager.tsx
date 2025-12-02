@@ -216,6 +216,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
       // If fulfilling order, update inventory quantities
       if (newStatus === 'fulfilled') {
+        // Verify order is currently in in-transit status
+        if (orderData.status !== 'in-transit') {
+          alert(`Cannot fulfill order from ${orderData.status} status. Order must be in-transit first.`)
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
         // First get the order details to know which products and quantities to update
         const { data: orderDetails, error: detailsError } = await supabase
           .from('order_details')
@@ -225,61 +232,133 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         if (detailsError) {
           console.error('Error fetching order details:', detailsError)
           alert('Failed to fetch order details')
+          fetchOrders() // Revert optimistic update
           return
         }
 
-        // Batch fetch all product data
-        const productIds = orderDetails?.map(d => d.product_id).filter(Boolean) || []
-        if (productIds.length > 0) {
-          const { data: productsData, error: fetchError } = await supabase
+        if (!orderDetails || orderDetails.length === 0) {
+          alert('Order has no items to fulfill')
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
+        // Batch fetch all product data with fresh values
+        const productIds = orderDetails.map(d => d.product_id).filter(Boolean)
+        if (productIds.length === 0) {
+          alert('No valid products found in order')
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
+        const { data: productsData, error: fetchError } = await supabase
+          .from('products')
+          .select('id, initial_stock, released')
+          .in('id', productIds)
+
+        if (fetchError) {
+          console.error('Error fetching product data:', fetchError)
+          alert('Failed to fetch product data')
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
+        if (!productsData || productsData.length === 0) {
+          alert('No product data found')
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
+        // Create a map for quick lookup
+        const productsMap = new Map(productsData.map(p => [p.id, p]))
+
+        // Validate all quantities before making any updates
+        const validationErrors: string[] = []
+        for (const detail of orderDetails) {
+          if (!detail.product_id) continue
+
+          const productData = productsMap.get(detail.product_id)
+          if (!productData) {
+            validationErrors.push(`Product ${detail.product_id} not found`)
+            continue
+          }
+
+          const currentReleased = productData.released || 0
+          const currentInitialStock = productData.initial_stock || 0
+          
+          if (currentReleased < detail.quantity) {
+            validationErrors.push(`Insufficient released quantity for product ${detail.product_id}. Released: ${currentReleased}, Required: ${detail.quantity}`)
+          }
+          
+          if (currentInitialStock < detail.quantity) {
+            validationErrors.push(`Insufficient initial stock for product ${detail.product_id}. Initial Stock: ${currentInitialStock}, Required: ${detail.quantity}`)
+          }
+        }
+
+        if (validationErrors.length > 0) {
+          alert(`Cannot fulfill order:\n${validationErrors.join('\n')}`)
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
+        // All validations passed - update all products
+        const updatePromises = orderDetails.map(async (detail) => {
+          if (!detail.product_id) return
+
+          const productData = productsMap.get(detail.product_id)
+          if (!productData) {
+            throw new Error(`Product ${detail.product_id} not found during update`)
+          }
+
+          const currentInitialStock = productData.initial_stock || 0
+          const currentReleased = productData.released || 0
+          
+          // Calculate new values
+          const newInitialStock = currentInitialStock - detail.quantity
+          const newReleased = currentReleased - detail.quantity
+
+          // Validate: ensure values don't go negative (shouldn't happen after validation, but safety check)
+          if (newInitialStock < 0) {
+            throw new Error(`Invalid initial_stock value for product ${detail.product_id}. Current: ${currentInitialStock}, Subtracting: ${detail.quantity}`)
+          }
+          
+          if (newReleased < 0) {
+            throw new Error(`Invalid released value for product ${detail.product_id}. Current: ${currentReleased}, Subtracting: ${detail.quantity}`)
+          }
+
+          const { error: updateError } = await supabase
             .from('products')
-            .select('id, initial_stock, released')
-            .in('id', productIds)
+            .update({
+              initial_stock: newInitialStock,
+              released: newReleased,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', detail.product_id)
 
-          if (fetchError) {
-            console.error('Error fetching product data:', fetchError)
-            alert('Failed to fetch product data')
-            return
+          if (updateError) {
+            console.error('Error updating product quantities:', updateError)
+            throw new Error(`Failed to update product ${detail.product_id}: ${updateError.message}`)
           }
+        })
 
-          // Create a map for quick lookup
-          const productsMap = new Map(productsData?.map(p => [p.id, p]))
-
-          // Batch update all products in parallel
-          const updatePromises = (orderDetails || []).map(async (detail) => {
-            const productData = productsMap.get(detail.product_id)
-            if (!productData) return
-
-            const newInitialStock = Math.max(0, (productData.initial_stock || 0) - detail.quantity)
-            const newReleased = Math.max(0, (productData.released || 0) - detail.quantity)
-
-            const { error: updateError } = await supabase
-              .from('products')
-              .update({
-                initial_stock: newInitialStock,
-                released: newReleased,
-                updated_at: new Date().toISOString()
-              })
-              .eq('id', detail.product_id)
-
-            if (updateError) {
-              console.error('Error updating product quantities:', updateError)
-              throw new Error('Failed to update product quantities')
-            }
-          })
-
-          const results = await Promise.allSettled(updatePromises)
-          const failed = results.filter(r => r.status === 'rejected')
-          if (failed.length > 0) {
-            alert('Failed to update some product quantities')
-            fetchOrders() // Revert optimistic update
-            return
-          }
+        const results = await Promise.allSettled(updatePromises)
+        const failed = results.filter(r => r.status === 'rejected')
+        if (failed.length > 0) {
+          const errorMessages = failed.map(r => r.status === 'rejected' ? r.reason?.message || 'Unknown error' : '').filter(Boolean)
+          alert(`Failed to update some product quantities:\n${errorMessages.join('\n')}`)
+          fetchOrders() // Revert optimistic update
+          return
         }
       }
 
       // If dispatching order (moving to in-transit), move from reserved to released
       if (newStatus === 'in-transit') {
+        // Verify order is currently in approved status (not already in-transit)
+        if (orderData.status !== 'approved') {
+          alert(`Cannot move order to in-transit from ${orderData.status} status. Order must be approved first.`)
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
         // First get the order details to know which products and quantities to update
         const { data: orderDetails, error: detailsError } = await supabase
           .from('order_details')
@@ -289,60 +368,111 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         if (detailsError) {
           console.error('Error fetching order details:', detailsError)
           alert('Failed to fetch order details')
+          fetchOrders() // Revert optimistic update
           return
         }
 
-        // Batch fetch all product data
-        const productIds = orderDetails?.map(d => d.product_id).filter(Boolean) || []
-        if (productIds.length > 0) {
-          const { data: productsData, error: fetchError } = await supabase
-            .from('products')
-            .select('id, reserved, released')
-            .in('id', productIds)
+        if (!orderDetails || orderDetails.length === 0) {
+          alert('Order has no items to dispatch')
+          fetchOrders() // Revert optimistic update
+          return
+        }
 
-          if (fetchError) {
-            console.error('Error fetching product data:', fetchError)
-            // Continue with other products instead of failing completely
-          } else {
-            // Create a map for quick lookup
-            const productsMap = new Map(productsData?.map(p => [p.id, p]))
+        // Batch fetch all product data with fresh reserved/released values
+        const productIds = orderDetails.map(d => d.product_id).filter(Boolean)
+        if (productIds.length === 0) {
+          alert('No valid products found in order')
+          fetchOrders() // Revert optimistic update
+          return
+        }
 
-            // Batch update all products in parallel
-            const updatePromises = (orderDetails || []).map(async (detail) => {
-              if (!detail.product_id) return
+        const { data: productsData, error: fetchError } = await supabase
+          .from('products')
+          .select('id, reserved, released')
+          .in('id', productIds)
 
-              const productData = productsMap.get(detail.product_id)
-              if (!productData) {
-                console.warn('Product not found for product_id:', detail.product_id)
-                return
-              }
+        if (fetchError) {
+          console.error('Error fetching product data:', fetchError)
+          alert('Failed to fetch product data')
+          fetchOrders() // Revert optimistic update
+          return
+        }
 
-              const newReserved = Math.max(0, (productData.reserved || 0) - detail.quantity)
-              const newReleased = (productData.released || 0) + detail.quantity
+        if (!productsData || productsData.length === 0) {
+          alert('No product data found')
+          fetchOrders() // Revert optimistic update
+          return
+        }
 
-              const { error: updateError } = await supabase
-                .from('products')
-                .update({
-                  reserved: newReserved,
-                  released: newReleased,
-                  updated_at: new Date().toISOString()
-                })
-                .eq('id', detail.product_id)
+        // Create a map for quick lookup
+        const productsMap = new Map(productsData.map(p => [p.id, p]))
 
-              if (updateError) {
-                console.error('Error updating product quantities:', updateError)
-                throw new Error('Failed to update product quantities')
-              }
-            })
+        // Validate all quantities before making any updates
+        const validationErrors: string[] = []
+        for (const detail of orderDetails) {
+          if (!detail.product_id) continue
 
-            const results = await Promise.allSettled(updatePromises)
-            const failed = results.filter(r => r.status === 'rejected')
-            if (failed.length > 0) {
-              alert('Failed to update some product quantities')
-              fetchOrders() // Revert optimistic update
-              return
-            }
+          const productData = productsMap.get(detail.product_id)
+          if (!productData) {
+            validationErrors.push(`Product ${detail.product_id} not found`)
+            continue
           }
+
+          const currentReserved = productData.reserved || 0
+          if (currentReserved < detail.quantity) {
+            validationErrors.push(`Insufficient reserved quantity for product ${detail.product_id}. Reserved: ${currentReserved}, Required: ${detail.quantity}`)
+          }
+        }
+
+        if (validationErrors.length > 0) {
+          alert(`Cannot move order to in-transit:\n${validationErrors.join('\n')}`)
+          fetchOrders() // Revert optimistic update
+          return
+        }
+
+        // All validations passed - update all products
+        const updatePromises = orderDetails.map(async (detail) => {
+          if (!detail.product_id) return
+
+          const productData = productsMap.get(detail.product_id)
+          if (!productData) {
+            throw new Error(`Product ${detail.product_id} not found during update`)
+          }
+
+          const currentReserved = productData.reserved || 0
+          const currentReleased = productData.released || 0
+          
+          // Calculate new values
+          const newReserved = currentReserved - detail.quantity
+          const newReleased = currentReleased + detail.quantity
+
+          // Validate: ensure reserved doesn't go negative (shouldn't happen after validation, but safety check)
+          if (newReserved < 0) {
+            throw new Error(`Invalid reserved value for product ${detail.product_id}. Current: ${currentReserved}, Subtracting: ${detail.quantity}`)
+          }
+
+          const { error: updateError } = await supabase
+            .from('products')
+            .update({
+              reserved: newReserved,
+              released: newReleased,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', detail.product_id)
+
+          if (updateError) {
+            console.error('Error updating product quantities:', updateError)
+            throw new Error(`Failed to update product ${detail.product_id}: ${updateError.message}`)
+          }
+        })
+
+        const results = await Promise.allSettled(updatePromises)
+        const failed = results.filter(r => r.status === 'rejected')
+        if (failed.length > 0) {
+          const errorMessages = failed.map(r => r.status === 'rejected' ? r.reason?.message || 'Unknown error' : '').filter(Boolean)
+          alert(`Failed to update some product quantities:\n${errorMessages.join('\n')}`)
+          fetchOrders() // Revert optimistic update
+          return
         }
       }
 
@@ -388,8 +518,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
               const productData = productsMap.get(detail.product_id)
               if (!productData) {
-                console.warn('Product not found for product_id:', detail.product_id)
-                return
+                throw new Error(`Product not found for product_id: ${detail.product_id}`)
               }
 
               // Determine what to return based on current state
@@ -400,18 +529,34 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               
               if (currentReleased >= detail.quantity) {
                 // If there are enough released quantities, return those
-                updateData.released = Math.max(0, currentReleased - detail.quantity)
+                const newReleased = currentReleased - detail.quantity
+                if (newReleased < 0) {
+                  throw new Error(`Invalid released value for product ${detail.product_id}. Current: ${currentReleased}, Subtracting: ${detail.quantity}`)
+                }
+                updateData.released = newReleased
               } else if (currentReserved >= detail.quantity) {
                 // If there are enough reserved quantities, return those
-                updateData.reserved = Math.max(0, currentReserved - detail.quantity)
+                const newReserved = currentReserved - detail.quantity
+                if (newReserved < 0) {
+                  throw new Error(`Invalid reserved value for product ${detail.product_id}. Current: ${currentReserved}, Subtracting: ${detail.quantity}`)
+                }
+                updateData.reserved = newReserved
               } else {
                 // Handle partial quantities in both reserved and released
                 const remainingToReturn = detail.quantity
                 let releasedToReturn = Math.min(remainingToReturn, currentReleased)
                 let reservedToReturn = remainingToReturn - releasedToReturn
                 
-                updateData.released = Math.max(0, currentReleased - releasedToReturn)
-                updateData.reserved = Math.max(0, currentReserved - reservedToReturn)
+                const newReleased = currentReleased - releasedToReturn
+                const newReserved = currentReserved - reservedToReturn
+                
+                // Validate: ensure values don't go negative
+                if (newReleased < 0 || newReserved < 0) {
+                  throw new Error(`Invalid inventory values for product ${detail.product_id}. Released: ${currentReleased} -> ${newReleased}, Reserved: ${currentReserved} -> ${newReserved}`)
+                }
+                
+                updateData.released = newReleased
+                updateData.reserved = newReserved
               }
 
               const { error: updateError } = await supabase
@@ -421,14 +566,15 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
               if (updateError) {
                 console.error('Error updating product quantities:', updateError)
-                throw new Error('Failed to update product quantities')
+                throw new Error(`Failed to update product ${detail.product_id}: ${updateError.message}`)
               }
             })
 
             const results = await Promise.allSettled(updatePromises)
             const failed = results.filter(r => r.status === 'rejected')
             if (failed.length > 0) {
-              alert('Failed to update some product quantities')
+              const errorMessages = failed.map(r => r.status === 'rejected' ? r.reason?.message || 'Unknown error' : '').filter(Boolean)
+              alert(`Failed to update some product quantities:\n${errorMessages.join('\n')}`)
               fetchOrders() // Revert optimistic update
               return
             }
@@ -1128,7 +1274,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
                       {order.status === 'approved' && (
                         <button
-                          onClick={() => updateOrderStatus(order.id, 'in-transit')}
+                          onClick={() => {
+                            if (confirm('Are you sure you want to dispatch this order? This action will move reserved inventory to released and cannot be undone.')) {
+                              updateOrderStatus(order.id, 'in-transit')
+                            }
+                          }}
                           disabled={updatingOrder === order.id || !canDispatchOrder(order)}
                           className={`p-1 rounded ${updatingOrder === order.id || !canDispatchOrder(order) ? 'text-gray-400 cursor-not-allowed' : 'text-orange-600 hover:text-orange-900 hover:bg-orange-100'}`}
                           title={!isOrderScheduled(order) ? "Schedule order in logistics tab first" : !canDispatchOrder(order) ? "Delivery date has not arrived yet" : "Dispatch Order"}
@@ -1895,61 +2045,100 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
     setOverrideLoading(true)
     try {
+      // Fetch fresh order_details from database to ensure accuracy
+      const { data: currentOrderDetails, error: detailsFetchError } = await supabase
+        .from('order_details')
+        .select('product_id, quantity')
+        .eq('order_id', editingOrder.id)
+
+      if (detailsFetchError) {
+        console.error('Error fetching current order details:', detailsFetchError)
+        alert('Failed to fetch current order details')
+        return
+      }
+
+      // Use fresh order_details from database instead of originalOrder which might be stale
+      const currentOrderDetailsMap = new Map(
+        currentOrderDetails?.map(d => [d.product_id, d.quantity]) || []
+      )
 
       // Calculate quantity differences for inventory updates
       const quantityChanges = new Map<string, number>()
       
-      // Get all unique product IDs from both original and new order
+      // Get all unique product IDs from both current and new order
       const allProductIds = new Set([
-        ...originalOrder.order_details.map(d => d.product_id),
+        ...(currentOrderDetails?.map(d => d.product_id) || []),
         ...editingOrder.order_details.map(d => d.product_id)
       ])
       
-      // Calculate net change for each product
+      // Calculate net change for each product based on current database state
       allProductIds.forEach(productId => {
-        const originalQuantity = originalOrder.order_details.find(d => d.product_id === productId)?.quantity || 0
+        const currentQuantity = currentOrderDetailsMap.get(productId) || 0
         const newQuantity = editingOrder.order_details.find(d => d.product_id === productId)?.quantity || 0
-        const netChange = newQuantity - originalQuantity
+        const netChange = newQuantity - currentQuantity
         quantityChanges.set(productId, netChange)
       })
+
+      // Determine order status - fetch fresh from database
+      const { data: orderStatusData, error: statusError } = await supabase
+        .from('customer_orders')
+        .select('status')
+        .eq('id', editingOrder.id)
+        .single()
+
+      if (statusError) {
+        console.error('Error fetching order status:', statusError)
+        alert('Failed to fetch order status')
+        return
+      }
+
+      const isInTransit = orderStatusData.status === 'in-transit'
+
+      // Fetch fresh product data for stock validation
+      const productIdsArray = Array.from(allProductIds)
+      const { data: freshProducts, error: productsFetchError } = await supabase
+        .from('products')
+        .select('id, reserved, released, initial_stock, production')
+        .in('id', productIdsArray)
+
+      if (productsFetchError) {
+        console.error('Error fetching products:', productsFetchError)
+        alert('Failed to fetch product data')
+        return
+      }
+
+      const productsMap = new Map(freshProducts?.map(p => [p.id, p]) || [])
 
       // Check stock availability for all changes
       for (const [productId, quantityChange] of Array.from(quantityChanges.entries())) {
         if (quantityChange > 0) {
-          // Adding quantity - check if we have enough stock
-          let product = availableProducts.find(p => p.id === productId)
-          
+          const product = productsMap.get(productId)
           if (!product) {
-            // Try finding by product_id as well
-            product = availableProducts.find(p => p.product_id === productId)
-            
-            if (!product) {
-              alert(`Product not found: ${productId}`)
-              return
-            }
+            alert(`Product not found: ${productId}`)
+            return
           }
 
-          const originalQuantity = originalOrder.order_details.find(d => d.product_id === productId)?.quantity || 0
+          const currentQuantity = currentOrderDetailsMap.get(productId) || 0
           
-          // For in-transit orders, the original quantity is in released, not reserved
-          // For approved orders, the original quantity is in reserved
-          const isInTransit = editingOrder.status === 'in-transit'
+          // Calculate available stock
+          const finalStock = (product.initial_stock || 0) + (product.production || 0) - (product.released || 0)
           
           if (isInTransit) {
-            // For in-transit orders: available_stock + original quantity (since it's in released)
-            const availableStock = (product.available_stock || 0) + originalQuantity
-            const additionalStock = (product.released || 0) - originalQuantity // Additional released stock beyond this order
+            // For in-transit orders: the current quantity is in released
+            // Available = final_stock - reserved + current_quantity (since it's in released, not reserved)
+            const availableStock = finalStock - (product.reserved || 0) + currentQuantity
             
-            if (quantityChange > availableStock + additionalStock) {
-              alert(`Insufficient stock for ${product.name}. Available: ${availableStock + additionalStock}, Requested: ${quantityChange}`)
+            if (quantityChange > availableStock) {
+              alert(`Insufficient stock for product. Available: ${availableStock}, Requested increase: ${quantityChange}`)
               return
             }
           } else {
-            // For approved orders: available_stock + original quantity (since it's in reserved)
-            const availableStock = (product.available_stock || 0) + originalQuantity
+            // For approved orders: the current quantity is in reserved
+            // Available = final_stock - reserved + current_quantity
+            const availableStock = finalStock - (product.reserved || 0) + currentQuantity
             
             if (quantityChange > availableStock) {
-              alert(`Insufficient stock for ${product.name}. Available: ${availableStock}, Requested: ${quantityChange}`)
+              alert(`Insufficient stock for product. Available: ${availableStock}, Requested increase: ${quantityChange}`)
               return
             }
           }
@@ -1959,39 +2148,56 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       // Update inventory for all products with quantity changes
       for (const [productId, quantityChange] of Array.from(quantityChanges.entries())) {
         if (quantityChange !== 0) {
-          // For in-transit orders, use released; for approved orders, use reserved
-          const isInTransit = editingOrder.status === 'in-transit'
-          const fieldToUpdate = isInTransit ? 'released' : 'reserved'
-          
-          // Get current quantities first
-          const { data: currentProduct, error: fetchError } = await supabase
-            .from('products')
-            .select('reserved, released')
-            .eq('id', productId)
-            .single()
-
-          if (fetchError) {
-            console.error('Error fetching current product:', fetchError)
-            alert('Failed to fetch current product data')
-            return
+          const product = productsMap.get(productId)
+          if (!product) {
+            console.error('Product not found for inventory update:', productId)
+            continue
           }
 
-          const currentValue = isInTransit ? (currentProduct.released || 0) : (currentProduct.reserved || 0)
-          const newValue = currentValue + quantityChange
+          if (isInTransit) {
+            // For in-transit orders: update released
+            const currentReleased = product.released || 0
+            const newReleased = currentReleased + quantityChange
+            
+            // Validate: ensure released doesn't go negative
+            if (newReleased < 0) {
+              throw new Error(`Invalid released value for product ${productId}. Current: ${currentReleased}, Change: ${quantityChange}`)
+            }
 
-          const updateData = isInTransit 
-            ? { released: newValue, updated_at: new Date().toISOString() }
-            : { reserved: newValue, updated_at: new Date().toISOString() }
+            const { error: inventoryError } = await supabase
+              .from('products')
+              .update({ 
+                released: newReleased,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', productId)
 
-          const { error: inventoryError } = await supabase
-            .from('products')
-            .update(updateData)
-            .eq('id', productId)
+            if (inventoryError) {
+              console.error('Error updating inventory:', inventoryError)
+              throw new Error(`Failed to update released inventory for product ${productId}`)
+            }
+          } else {
+            // For approved orders: update reserved
+            const currentReserved = product.reserved || 0
+            const newReserved = currentReserved + quantityChange
+            
+            // Validate: ensure reserved doesn't go negative
+            if (newReserved < 0) {
+              throw new Error(`Invalid reserved value for product ${productId}. Current: ${currentReserved}, Change: ${quantityChange}`)
+            }
 
-          if (inventoryError) {
-            console.error('Error updating inventory:', inventoryError)
-            alert('Failed to update inventory')
-            return
+            const { error: inventoryError } = await supabase
+              .from('products')
+              .update({ 
+                reserved: newReserved,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', productId)
+
+            if (inventoryError) {
+              console.error('Error updating inventory:', inventoryError)
+              throw new Error(`Failed to update reserved inventory for product ${productId}`)
+            }
           }
         }
       }

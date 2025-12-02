@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
-import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X } from 'lucide-react'
+import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X, Plus } from 'lucide-react'
 
 interface Brand {
   id: string
@@ -69,7 +69,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [totalPages, setTotalPages] = useState(1)
   const [totalReports, setTotalReports] = useState(0)
   const [loadingMore, setLoadingMore] = useState(false)
-  const reportsPerPage = 20
+  const reportsPerPage = 30
   
   // Edit Items Modal State
   const [isEditItemsModalOpen, setIsEditItemsModalOpen] = useState(false)
@@ -79,15 +79,25 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [newItem, setNewItem] = useState({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
   const [editingItemId, setEditingItemId] = useState<string | null>(null)
   
+  // Create Report Modal State
+  const [isCreateReportModalOpen, setIsCreateReportModalOpen] = useState(false)
+  const [createReportDate, setCreateReportDate] = useState(() => {
+    const today = new Date()
+    return today.toISOString().split('T')[0]
+  })
+  const [createReportLocationId, setCreateReportLocationId] = useState<string>('')
+  const [createReportStaffId, setCreateReportStaffId] = useState<string>('')
+  const [availableLocations, setAvailableLocations] = useState<Location[]>([])
+  const [availableStaff, setAvailableStaff] = useState<StaffRegistration[]>([])
+  const [loadingLocations, setLoadingLocations] = useState(false)
+  const [loadingStaff, setLoadingStaff] = useState(false)
+  const [creatingReport, setCreatingReport] = useState(false)
+  
   // Inventory differences tracking
   const [inventoryDifferences, setInventoryDifferences] = useState<{[reportId: string]: boolean}>({})
   
-  // Monthly summary state
-  const [selectedMonth, setSelectedMonth] = useState(() => {
-    const now = new Date()
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-  })
-  const [monthlySummaryByLocation, setMonthlySummaryByLocation] = useState<{
+  // Last 7 days summary state
+  const [last7DaysSummaryByLocation, setLast7DaysSummaryByLocation] = useState<{
     [locationId: string]: {
       locationName: string
       totalGrossSales: number
@@ -111,8 +121,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   }, [searchTerm, statusFilter, locationTypeFilter, dateFilter])
   
   useEffect(() => {
-    calculateMonthlySummary()
-  }, [reports, selectedMonth, selectedLocation])
+    calculateLast7DaysSummary()
+  }, [reports, selectedLocation])
 
   // Close report view when brand changes
   useEffect(() => {
@@ -127,20 +137,29 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     }
   }, [isEditItemsModalOpen])
 
-  const calculateMonthlySummary = useCallback(async () => {
-    if (!selectedMonth) return
-    
-    // Parse the selected month (format: YYYY-MM)
-    const [year, month] = selectedMonth.split('-')
-    const startDate = `${year}-${month}-01`
-    const endDate = `${year}-${month}-${new Date(parseInt(year), parseInt(month), 0).getDate()}`
-    
+  useEffect(() => {
+    if (createReportLocationId) {
+      loadStaffForLocation(createReportLocationId)
+    } else {
+      setAvailableStaff([])
+      setCreateReportStaffId('')
+    }
+  }, [createReportLocationId])
+
+  const calculateLast7DaysSummary = useCallback(async () => {
     try {
-      // Filter reports by selected month
+      // Calculate date range for last 7 days (including today)
+      const today = new Date()
+      const endDate = today.toISOString().split('T')[0] // Today in YYYY-MM-DD
+      const startDateObj = new Date(today)
+      startDateObj.setDate(today.getDate() - 6) // 6 days ago (7 days including today)
+      const startDate = startDateObj.toISOString().split('T')[0] // Start date in YYYY-MM-DD
+      
+      // Filter reports by last 7 days
       let filteredReports = reports.filter(report => {
         const reportDate = report.report_date
-        const matchesMonth = reportDate >= startDate && reportDate <= endDate
-        return matchesMonth && report.status !== 'draft'
+        const matchesLast7Days = reportDate >= startDate && reportDate <= endDate
+        return matchesLast7Days && report.status !== 'draft'
       })
       
       // Group by location and find latest report for each location
@@ -206,11 +225,11 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         }
       }
       
-      setMonthlySummaryByLocation(summaryByLocation)
+      setLast7DaysSummaryByLocation(summaryByLocation)
     } catch (error) {
-      console.error('Error calculating monthly summary:', error)
+      console.error('Error calculating last 7 days summary:', error)
     }
-  }, [reports, selectedMonth, selectedLocation])
+  }, [reports, selectedLocation])
 
   const loadReports = async (page = 1, append = false) => {
     if (page === 1) {
@@ -547,6 +566,127 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     }
   }
 
+  // Create Report Functions
+  const loadLocationsForCreate = async () => {
+    setLoadingLocations(true)
+    try {
+      const { data, error } = await supabase
+        .from('locations')
+        .select('*')
+        .eq('brand_id', selectedBrand.id)
+        .order('name')
+
+      if (error) throw error
+      setAvailableLocations(data || [])
+    } catch (error) {
+      console.error('Error loading locations:', error)
+      setError('Failed to load locations')
+    } finally {
+      setLoadingLocations(false)
+    }
+  }
+
+  const loadStaffForLocation = async (locationId: string) => {
+    if (!locationId) {
+      setAvailableStaff([])
+      return
+    }
+
+    setLoadingStaff(true)
+    try {
+      // Get staff assigned to this location
+      const { data: assignments, error: assignmentsError } = await supabase
+        .from('staff_assignments')
+        .select(`
+          staff_registration:staff_registrations(*)
+        `)
+        .eq('location_id', locationId)
+
+      if (assignmentsError) throw assignmentsError
+
+      const staff = assignments?.map((a: any) => a.staff_registration).filter(Boolean) || []
+      setAvailableStaff(staff as StaffRegistration[])
+    } catch (error) {
+      console.error('Error loading staff:', error)
+      setError('Failed to load staff')
+    } finally {
+      setLoadingStaff(false)
+    }
+  }
+
+  const handleCreateReport = async () => {
+    if (!createReportDate || !createReportLocationId) {
+      setError('Please select a date and location')
+      return
+    }
+
+    if (!createReportStaffId) {
+      setError('Please select a staff member')
+      return
+    }
+
+    setCreatingReport(true)
+    setError('')
+
+    try {
+      // Check if report already exists
+      const { data: existingReport, error: checkError } = await supabase
+        .from('dsir_reports')
+        .select('id')
+        .eq('location_id', createReportLocationId)
+        .eq('staff_registration_id', createReportStaffId)
+        .eq('report_date', createReportDate)
+        .single()
+
+      if (existingReport) {
+        setError('A report already exists for this date, location, and staff combination')
+        setCreatingReport(false)
+        return
+      }
+
+      // Get staff name
+      const selectedStaff = availableStaff.find(s => s.id === createReportStaffId)
+      const staffName = selectedStaff?.full_name || 'Unknown'
+
+      // Create the report
+      const { data: newReport, error: createError } = await supabase
+        .from('dsir_reports')
+        .insert({
+          location_id: createReportLocationId,
+          staff_registration_id: createReportStaffId,
+          report_date: createReportDate,
+          staff_name: staffName,
+          status: 'draft'
+        })
+        .select(`
+          *,
+          location:locations(*),
+          staff_registration:staff_registrations(*)
+        `)
+        .single()
+
+      if (createError) throw createError
+
+      setSuccess('DSIR report created successfully!')
+      setIsCreateReportModalOpen(false)
+      
+      // Reset form
+      setCreateReportDate(new Date().toISOString().split('T')[0])
+      setCreateReportLocationId('')
+      setCreateReportStaffId('')
+      
+      // Reload reports
+      await loadReports()
+      
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (error: any) {
+      console.error('Error creating report:', error)
+      setError(error.message || 'Failed to create DSIR report')
+    } finally {
+      setCreatingReport(false)
+    }
+  }
+
   // Predefined Items Management Functions
   const loadPredefinedItems = async () => {
     setLoadingItems(true)
@@ -816,7 +956,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           </div>
         </div>
 
-        {/* Monthly Summary Skeleton */}
+        {/* Last 7 Days Summary Skeleton */}
         <div className="bg-white rounded-lg shadow-sm border p-4">
           <div className="animate-pulse">
             <div className="h-5 bg-gray-200 rounded w-48 mb-3"></div>
@@ -892,6 +1032,16 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           </p>
         </div>
         <div className="flex space-x-3">
+          <button
+            onClick={() => {
+              setIsCreateReportModalOpen(true)
+              loadLocationsForCreate()
+            }}
+            className="flex items-center space-x-2 px-4 py-2 text-white bg-green-600 hover:bg-green-700 rounded-md"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Create DSIR Report</span>
+          </button>
           {showEditItemsButton && (
             <button
               onClick={() => setIsEditItemsModalOpen(true)}
@@ -911,29 +1061,23 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         </div>
       </div>
 
-      {/* Monthly Summary */}
+      {/* Last 7 Days Summary */}
       <div className="bg-white rounded-lg shadow-sm border p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center space-x-4">
-            <h2 className="text-base font-semibold text-gray-900">Branch Monthly Summary</h2>
+            <h2 className="text-base font-semibold text-gray-900">Branch Last 7 Days Summary</h2>
             <div className="text-sm text-gray-600">
               Total Net Sales: <span className="font-semibold text-green-600">
-                ₱{Object.values(monthlySummaryByLocation)
+                ₱{Object.values(last7DaysSummaryByLocation)
                   .reduce((total, summary) => total + summary.netSales, 0)
                   .toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
               </span>
             </div>
           </div>
-          <input
-            type="month"
-            value={selectedMonth}
-            onChange={(e) => setSelectedMonth(e.target.value)}
-            className="px-2 py-1 text-sm border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-          />
         </div>
         
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-          {Object.entries(monthlySummaryByLocation)
+          {Object.entries(last7DaysSummaryByLocation)
             .sort(([, a], [, b]) => b.netSales - a.netSales)
             .map(([locationId, summary]) => (
             <div key={locationId} className="bg-gray-50 border border-gray-200 rounded-lg p-3">
@@ -977,9 +1121,9 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           ))}
         </div>
         
-        {Object.keys(monthlySummaryByLocation).length === 0 && (
+        {Object.keys(last7DaysSummaryByLocation).length === 0 && (
           <div className="text-center py-4 text-sm text-gray-500">
-            No data available for the selected month
+            No data available for the last 7 days
           </div>
         )}
       </div>
@@ -1491,6 +1635,136 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                 className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create DSIR Report Modal */}
+      {isCreateReportModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Create DSIR Report</h3>
+              <button
+                onClick={() => {
+                  setIsCreateReportModalOpen(false)
+                  setCreateReportDate(new Date().toISOString().split('T')[0])
+                  setCreateReportLocationId('')
+                  setCreateReportStaffId('')
+                  setError('')
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            {error && (
+              <div className="mb-4 bg-red-50 border border-red-200 rounded-md p-3">
+                <p className="text-red-800 text-sm">{error}</p>
+              </div>
+            )}
+
+            {success && (
+              <div className="mb-4 bg-green-50 border border-green-200 rounded-md p-3">
+                <p className="text-green-800 text-sm">{success}</p>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {/* Date Input */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Report Date *
+                </label>
+                <input
+                  type="date"
+                  value={createReportDate}
+                  onChange={(e) => setCreateReportDate(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  required
+                />
+              </div>
+
+              {/* Location Select */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Branch/Location *
+                </label>
+                {loadingLocations ? (
+                  <div className="px-3 py-2 border border-gray-300 rounded-md bg-gray-50">
+                    <span className="text-sm text-gray-500">Loading locations...</span>
+                  </div>
+                ) : (
+                  <select
+                    value={createReportLocationId}
+                    onChange={(e) => setCreateReportLocationId(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  >
+                    <option value="">Select a location</option>
+                    {availableLocations.map((location) => (
+                      <option key={location.id} value={location.id}>
+                        {location.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {/* Staff Selection */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Staff *
+                </label>
+                {loadingStaff ? (
+                  <div className="px-3 py-2 border border-gray-300 rounded-md bg-gray-50">
+                    <span className="text-sm text-gray-500">Loading staff...</span>
+                  </div>
+                ) : (
+                  <select
+                    value={createReportStaffId}
+                    onChange={(e) => setCreateReportStaffId(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                    disabled={!createReportLocationId}
+                    required
+                  >
+                    <option value="">Select a staff member</option>
+                    {availableStaff.map((staff) => (
+                      <option key={staff.id} value={staff.id}>
+                        {staff.full_name} ({staff.staff_code})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {createReportLocationId && availableStaff.length === 0 && !loadingStaff && (
+                  <p className="mt-1 text-sm text-gray-500">No staff assigned to this location</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-gray-200">
+              <button
+                onClick={() => {
+                  setIsCreateReportModalOpen(false)
+                  setCreateReportDate(new Date().toISOString().split('T')[0])
+                  setCreateReportLocationId('')
+                  setCreateReportStaffId('')
+                  setError('')
+                }}
+                className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300"
+                disabled={creatingReport}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateReport}
+                disabled={creatingReport}
+                className="px-4 py-2 text-white bg-green-600 rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {creatingReport ? 'Creating...' : 'Create Report'}
               </button>
             </div>
           </div>

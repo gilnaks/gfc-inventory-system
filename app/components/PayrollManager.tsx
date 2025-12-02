@@ -600,17 +600,32 @@ export function PayrollManager() {
     // Calculate overtime hours (overtime after 48 hours total)
     const overtimeHours = Math.max(0, totalHours - 48)
     
-    // If total hours < 48, add all excess daily hours to regular hours
-    if (totalHours < 48) {
-      staffSchedules.forEach(schedule => {
-        // If staff is marked absent, hours should be 0
-        const hours = schedule.is_absent ? 0 : (schedule.hours || 11)
-        const dayStatus = dayStatusMap[schedule.schedule_date] || 'default'
+    // Calculate excess daily hours (hours beyond 8 per day) for regular days only
+    let excessRegularDayHours = 0
+    staffSchedules.forEach(schedule => {
+      const hours = schedule.is_absent ? 0 : (schedule.hours || 11)
+      const dayStatus = dayStatusMap[schedule.schedule_date] || 'default'
+      
+      // Only count excess hours from regular days (not holidays)
+      if (dayStatus === 'default') {
         const excessHours = Math.max(0, hours - 8)
-        
-        // Add excess hours to regular hours for all day types when total < 48
-        regularHours += excessHours
-      })
+        excessRegularDayHours += excessHours
+      }
+    })
+    
+    // Fill regular hours up to 48 if totalHours >= 48, otherwise add all excess hours
+    if (totalHours >= 48) {
+      // If total hours >= 48, regular hours should be capped at 48
+      // Add excess hours from regular days to fill up to 48
+      const hoursNeededToReach48 = Math.max(0, 48 - regularHours)
+      const hoursToAdd = Math.min(hoursNeededToReach48, excessRegularDayHours)
+      regularHours += hoursToAdd
+      
+      // Cap regular hours at 48 - any excess beyond this is already counted in overtimeHours
+      regularHours = Math.min(48, regularHours)
+    } else {
+      // If total hours < 48, add all excess daily hours to regular hours
+      regularHours += excessRegularDayHours
     }
     
     // Calculate pay following exact formulas:
