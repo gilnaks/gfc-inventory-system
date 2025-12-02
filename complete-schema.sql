@@ -94,9 +94,18 @@ CREATE TABLE IF NOT EXISTS daily_stock_summaries (
   total_production INTEGER DEFAULT 0,
   total_released INTEGER DEFAULT 0,
   total_final_stock INTEGER DEFAULT 0,
+  production_details JSONB DEFAULT '[]'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   UNIQUE(brand_id, date)
 );
+
+-- Add production_details column if it doesn't exist (for existing databases)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'daily_stock_summaries' AND column_name = 'production_details') THEN
+        ALTER TABLE daily_stock_summaries ADD COLUMN production_details JSONB DEFAULT '[]'::jsonb;
+    END IF;
+END $$;
 
 -- =============================================
 -- 2. VIEWS

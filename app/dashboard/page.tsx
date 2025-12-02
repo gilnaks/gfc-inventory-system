@@ -9,15 +9,16 @@ import { LogisticsManager } from '../components/LogisticsManager'
 import { DSIRReportsViewer } from '../components/DSIRReportsViewer'
 import { StaffManager } from '../components/StaffManager'
 import { PayrollManager } from '../components/PayrollManager'
+import { ReportsManager } from '../components/ReportsManager'
 import { BrandsProvider } from '../contexts/BrandsContext'
 import { Brand, supabase } from '../../lib/supabase'
-import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck, FileText, Users, Calculator } from 'lucide-react'
+import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck, FileText, Users, Calculator, BarChart3 } from 'lucide-react'
 
 export default function DashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [passcode, setPasscode] = useState('')
   const [selectedBrand, setSelectedBrand] = useState<Brand | null>(null)
-  const [activeTab, setActiveTab] = useState<'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll'>('products')
+  const [activeTab, setActiveTab] = useState<'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports'>('products')
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [initialLoading, setInitialLoading] = useState(true)
@@ -43,8 +44,8 @@ export default function DashboardPage() {
         }
       }
       
-      if (savedTab && ['products', 'orders', 'branches', 'billing', 'logistics', 'dsir', 'staff', 'payroll'].includes(savedTab)) {
-        setActiveTab(savedTab as 'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll')
+      if (savedTab && ['products', 'orders', 'branches', 'billing', 'logistics', 'dsir', 'staff', 'payroll', 'reports'].includes(savedTab)) {
+        setActiveTab(savedTab as 'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports')
       }
       
       // Add a minimum loading time to prevent flash
@@ -317,8 +318,7 @@ export default function DashboardPage() {
               >
                 <div className="flex items-center space-x-1 sm:space-x-2">
                   <Package className="h-4 w-4" />
-                  <span className="hidden sm:inline">Products & Inventory</span>
-                  <span className="sm:hidden">Products</span>
+                  <span>Inventory</span>
                 </div>
               </button>
               <button
@@ -383,8 +383,7 @@ export default function DashboardPage() {
               >
                 <div className="flex items-center space-x-1 sm:space-x-2">
                   <FileText className="h-4 w-4" />
-                  <span className="hidden sm:inline">DSIR Reports</span>
-                  <span className="sm:hidden">DSIR</span>
+                  <span>DSIR</span>
                 </div>
               </button>
               <button
@@ -417,6 +416,22 @@ export default function DashboardPage() {
                 <div className="flex items-center space-x-1 sm:space-x-2">
                   <Calculator className="h-4 w-4" />
                   <span>Payroll</span>
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab('reports')}
+                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                  activeTab === 'reports'
+                    ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
+                      currentTheme === 'red' ? 'border-red-500 text-red-600' :
+                      currentTheme === 'yellow' ? 'border-yellow-500 text-yellow-600' :
+                      'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <div className="flex items-center space-x-1 sm:space-x-2">
+                  <BarChart3 className="h-4 w-4" />
+                  <span>Reports</span>
                 </div>
               </button>
               <button
@@ -520,6 +535,11 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {activeTab === 'reports' && (
+            <div className="p-4 sm:p-6">
+              <ReportsManager selectedBrand={selectedBrand} theme={currentTheme} />
+            </div>
+          )}
 
           
           {!selectedBrand && activeTab === 'products' && (

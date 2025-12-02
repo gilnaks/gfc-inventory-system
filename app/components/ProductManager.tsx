@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Product, Brand } from '../../lib/supabase'
-import { Plus, Edit, Trash2, Save, X, CheckCircle } from 'lucide-react'
+import { Plus, Edit, Trash2, Save, X, Package, Eye, FileText } from 'lucide-react'
 import { getPhilippinesDate } from '../../lib/timezone'
 
 interface ProductManagerProps {
@@ -29,6 +29,14 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false)
   const [fetchTimeout, setFetchTimeout] = useState<NodeJS.Timeout | null>(null)
   const [updateTimeout, setUpdateTimeout] = useState<NodeJS.Timeout | null>(null)
+  const [productionInputMode, setProductionInputMode] = useState(false)
+  const [productionValues, setProductionValues] = useState<{[productId: string]: number}>({})
+  const [savingProduction, setSavingProduction] = useState(false)
+  const [showProductionReports, setShowProductionReports] = useState(false)
+  const [productionReports, setProductionReports] = useState<any[]>([])
+  const [loadingReports, setLoadingReports] = useState(false)
+  const [selectedReport, setSelectedReport] = useState<any | null>(null)
+  const [deletingItem, setDeletingItem] = useState<string | null>(null)
 
   useEffect(() => {
     if (selectedBrand) {
@@ -357,6 +365,231 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     setUpdateTimeout(timeout)
   }, [updateTimeout])
 
+  const handleSaveAllProduction = async () => {
+    if (!selectedBrand) return
+
+    setSavingProduction(true)
+    try {
+      // First, fetch current product data to get initial_stock values
+      const productIds = Object.keys(productionValues)
+      const { data: currentProducts, error: fetchError } = await supabase
+        .from('products')
+        .select('id, initial_stock, production')
+        .in('id', productIds)
+
+      if (fetchError) throw fetchError
+
+      const currentProductsMap = new Map(
+        currentProducts?.map(p => [p.id, p]) || []
+      )
+
+      // Get today's date in Philippines timezone
+      const today = getPhilippinesDate()
+
+      // Calculate totals for daily summary
+      const totalProduction = Object.values(productionValues).reduce((sum, val) => sum + (val || 0), 0)
+      
+      // Get product names for production details
+      const { data: allProductsData } = await supabase
+        .from('products')
+        .select('id, name')
+        .eq('brand_id', selectedBrand.id)
+
+      // Build production details array with product names and quantities
+      // Use products from state first (they have product_id or id), then fall back to fetched data
+      const productionDetails = Object.entries(productionValues)
+        .filter(([_, value]) => value > 0) // Only include products with production > 0
+        .map(([productId, productionValue]) => {
+          // First try to find in current products state
+          const productFromState = products.find(p => {
+            const pId = p.product_id || p.id
+            return pId === productId
+          })
+          
+          // If not found in state, try fetched data
+          const productFromFetched = allProductsData?.find(p => p.id === productId)
+          
+          // Get product name from state or fetched data
+          const productName = productFromState?.name || productFromState?.product_name || productFromFetched?.name || 'Unknown Product'
+          
+          return {
+            product_id: productId,
+            product_name: productName,
+            production: productionValue || 0
+          }
+        })
+
+      // Update all products: add production to initial_stock and reset production to 0
+      const updatePromises = Object.entries(productionValues).map(async ([productId, productionValue]) => {
+        const currentProduct = currentProductsMap.get(productId)
+        if (!currentProduct) return
+
+        const newInitialStock = (currentProduct.initial_stock || 0) + (productionValue || 0)
+
+        const { error } = await supabase
+          .from('products')
+          .update({
+            initial_stock: newInitialStock,
+            production: 0, // Reset production after adding to initial stock
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', productId)
+
+        if (error) {
+          console.error(`Error updating product ${productId}:`, error)
+          throw error
+        }
+      })
+
+      await Promise.all(updatePromises)
+
+      // Save or update daily production report
+      const { data: existingReport, error: checkError } = await supabase
+        .from('daily_stock_summaries')
+        .select('id')
+        .eq('brand_id', selectedBrand.id)
+        .eq('date', today)
+        .maybeSingle()
+
+      // Check if error is something other than "no rows found"
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('Error checking for existing report:', checkError)
+        // Don't throw - production was already saved
+      } else if (existingReport && existingReport.id) {
+        // Update existing report - merge production details
+        const { data: existingReportData } = await supabase
+          .from('daily_stock_summaries')
+          .select('production_details')
+          .eq('id', existingReport.id)
+          .maybeSingle()
+
+        const existingDetails = (existingReportData?.production_details && Array.isArray(existingReportData.production_details)) 
+          ? existingReportData.production_details 
+          : []
+        const mergedDetails = [...existingDetails, ...productionDetails]
+
+        const { error: updateReportError } = await supabase
+          .from('daily_stock_summaries')
+          .update({
+            total_production: totalProduction,
+            production_details: mergedDetails
+          })
+          .eq('id', existingReport.id)
+
+        if (updateReportError) {
+          console.error('Error updating daily report:', updateReportError)
+          // Don't throw - production was already saved
+        }
+      } else {
+        // Create new report
+        const { error: createReportError } = await supabase
+          .from('daily_stock_summaries')
+          .insert({
+            brand_id: selectedBrand.id,
+            date: today,
+            total_production: totalProduction,
+            production_details: productionDetails
+          })
+
+        if (createReportError) {
+          console.error('Error creating daily report:', createReportError)
+          // Don't throw - production was already saved
+        }
+      }
+
+      // Refresh products to show updated values
+      await fetchProducts()
+
+      // Exit production input mode
+      setProductionInputMode(false)
+      setProductionValues({})
+
+      alert('Production values added to initial stock and saved to daily report successfully!')
+    } catch (error) {
+      console.error('Error saving production values:', error)
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      alert(`Failed to save production values: ${errorMessage}. Please try again.`)
+    } finally {
+      setSavingProduction(false)
+    }
+  }
+
+  const fetchProductionReports = async () => {
+    if (!selectedBrand) return
+
+    setLoadingReports(true)
+    try {
+      const { data, error } = await supabase
+        .from('daily_stock_summaries')
+        .select('*')
+        .eq('brand_id', selectedBrand.id)
+        .order('date', { ascending: false })
+        .limit(30)
+
+      if (error) throw error
+
+      setProductionReports(data || [])
+    } catch (error) {
+      console.error('Error fetching production reports:', error)
+      alert('Failed to fetch production reports')
+    } finally {
+      setLoadingReports(false)
+    }
+  }
+
+  const handleDeleteProductionItem = async (reportId: string, itemIndex: number) => {
+    if (!selectedReport || !confirm('Are you sure you want to delete this item from the production report?')) {
+      return
+    }
+
+    setDeletingItem(`${reportId}-${itemIndex}`)
+    try {
+      const currentDetails = Array.isArray(selectedReport.production_details) 
+        ? selectedReport.production_details 
+        : []
+      
+      // Remove the item at the specified index
+      const updatedDetails = currentDetails.filter((_: any, index: number) => index !== itemIndex)
+      
+      // Recalculate total production
+      const newTotalProduction = updatedDetails.reduce((sum: number, item: any) => sum + (item.production || 0), 0)
+
+      // Update the report in the database
+      const { error } = await supabase
+        .from('daily_stock_summaries')
+        .update({
+          total_production: newTotalProduction,
+          production_details: updatedDetails
+        })
+        .eq('id', reportId)
+
+      if (error) throw error
+
+      // Update the selected report in state
+      setSelectedReport({
+        ...selectedReport,
+        total_production: newTotalProduction,
+        production_details: updatedDetails
+      })
+
+      // Update the report in the reports list
+      setProductionReports(prevReports => 
+        prevReports.map(report => 
+          report.id === reportId 
+            ? { ...report, total_production: newTotalProduction, production_details: updatedDetails }
+            : report
+        )
+      )
+
+      alert('Item deleted successfully!')
+    } catch (error) {
+      console.error('Error deleting production item:', error)
+      alert('Failed to delete item. Please try again.')
+    } finally {
+      setDeletingItem(null)
+    }
+  }
+
   const handleDeleteProduct = async (productId: string) => {
     if (!confirm('Are you sure you want to delete this product?')) return
 
@@ -387,106 +620,6 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
     }
   }
 
-  const handleFinalizeStock = async () => {
-    if (!selectedBrand) return
-
-    // Require password
-    const password = prompt('Please enter Wendy\'s birthdate to finalize stock:')
-    if (password !== '030199') {
-      alert('Invalid birthdate. Stock finalization cancelled.')
-      return
-    }
-
-    if (!confirm('Are you sure you want to finalize the stock? This will add production to initial stock and reset production for all products.')) {
-      return
-    }
-
-    try {
-      // First, get all products for the current brand
-      const { data: allProducts, error: fetchError } = await supabase
-        .from('products')
-        .select('*')
-        .eq('brand_id', selectedBrand.id)
-
-      if (fetchError) {
-        console.error('Error fetching products:', fetchError)
-        alert('Error fetching products for finalization')
-        return
-      }
-
-      if (!allProducts || allProducts.length === 0) {
-        alert('No products found to finalize')
-        return
-      }
-
-      // Create daily summary record first
-      const { data: summaryData, error: summaryError } = await supabase
-        .from('daily_stock_summaries')
-        .insert({
-          brand_id: selectedBrand.id,
-          date: getPhilippinesDate(), // YYYY-MM-DD format in Philippines timezone
-          total_production: allProducts.reduce((sum, p) => sum + (p.production || 0), 0),
-          total_released: allProducts.reduce((sum, p) => sum + (p.released || 0), 0),
-          total_final_stock: allProducts.reduce((sum, p) => sum + (p.initial_stock || 0) + (p.production || 0), 0)
-        })
-        .select()
-        .single()
-
-      if (summaryError) {
-        console.error('Error creating daily summary:', summaryError)
-        alert('Error creating daily summary')
-        return
-      }
-
-      // Optimistic UI update - update all products immediately
-      const previousProducts = products
-      setProducts(prevProducts => prevProducts.map(p => {
-        const newInitialStock = (p.initial_stock || 0) + (p.production || 0)
-        return {
-          ...p,
-          initial_stock: newInitialStock,
-          production: 0,
-          final_stock: newInitialStock - (p.released || 0),
-          available_stock: newInitialStock - (p.released || 0) - (p.reserved || 0)
-        }
-      }))
-
-      // Update all products in parallel
-      const updatePromises = allProducts.map(async (product) => {
-        const newInitialStock = (product.initial_stock || 0) + (product.production || 0)
-        
-        const { error: updateError } = await supabase
-          .from('products')
-          .update({
-            initial_stock: newInitialStock,
-            production: 0,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', product.id)
-
-        if (updateError) {
-          console.error(`Error updating product ${product.name}:`, updateError)
-          throw new Error(`Failed to update product ${product.name}`)
-        }
-      })
-
-      const results = await Promise.allSettled(updatePromises)
-      const failed = results.filter(r => r.status === 'rejected')
-      
-      if (failed.length > 0) {
-        alert(`Failed to update ${failed.length} product(s). Stock finalization incomplete.`)
-        // Revert optimistic update on error
-        setProducts(previousProducts)
-        return
-      }
-
-      alert('Stock finalized successfully! Production has been added to initial stock.')
-      
-    } catch (error) {
-      console.error('Error finalizing stock:', error)
-      alert('Error finalizing stock')
-    }
-  }
 
   if (!selectedBrand) {
     return (
@@ -502,24 +635,63 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">
-            Products & Inventory
+            Inventory
           </h1>
           <p className="text-sm text-gray-600">
-            Manage products and inventory for {selectedBrand.name}
+            Manage inventory for {selectedBrand.name}
           </p>
         </div>
         <div className="flex space-x-3">
           <button
-            onClick={handleFinalizeStock}
+            onClick={() => {
+              if (productionInputMode) {
+                // Cancel production input mode
+                setProductionInputMode(false)
+                setProductionValues({})
+              } else {
+                // Enter production input mode - initialize with current production values
+                const initialValues: {[productId: string]: number} = {}
+                products.forEach(product => {
+                  const productId = product.product_id || product.id
+                  initialValues[productId] = product.production || 0
+                })
+                setProductionValues(initialValues)
+                setProductionInputMode(true)
+              }
+            }}
             className={`flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors ${
-              theme === 'green' ? 'bg-orange-600 hover:bg-orange-700' :
-              theme === 'red' ? 'bg-orange-600 hover:bg-orange-700' :
-              theme === 'yellow' ? 'bg-orange-600 hover:bg-orange-700' :
-              'bg-orange-600 hover:bg-orange-700'
+              productionInputMode
+                ? 'bg-gray-600 hover:bg-gray-700'
+                : 'bg-orange-600 hover:bg-orange-700'
             }`}
           >
-            <CheckCircle className="h-4 w-4" />
-            <span>Finalize Stock</span>
+            <Package className="h-4 w-4" />
+            <span>{productionInputMode ? 'Cancel' : 'Production'}</span>
+          </button>
+          {productionInputMode && (
+            <button
+              onClick={handleSaveAllProduction}
+              disabled={savingProduction}
+              className={`flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors ${
+                theme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                theme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                theme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                'bg-blue-600 hover:bg-blue-700'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
+            >
+              <Save className="h-4 w-4" />
+              <span>{savingProduction ? 'Saving...' : 'Save All Production'}</span>
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setShowProductionReports(true)
+              fetchProductionReports()
+            }}
+            className="flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors bg-purple-600 hover:bg-purple-700"
+          >
+            <FileText className="h-4 w-4" />
+            <span>Production Log</span>
           </button>
           <button
             onClick={async () => {
@@ -810,36 +982,36 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
               <tbody className="bg-white divide-y divide-gray-200">
                 {categoryProducts.map((product) => (
                   <tr key={product.product_id || product.id} className="hover:bg-blue-100">
-                    <td className="px-6 py-2 whitespace-nowrap text-sm font-medium text-gray-900">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-medium text-gray-900">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="text"
                           value={editingProduct.name}
                           onChange={(e) => setEditingProduct({...editingProduct, name: e.target.value})}
-                          className="w-full max-w-44 px-2 py-1 border border-gray-300 rounded text-sm"
+                          className="w-full max-w-44 px-2 h-6 border border-gray-300 rounded text-sm"
                         />
                       ) : (
                         product.product_name || product.name
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-500">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="text"
                           value={editingProduct.sku || ''}
                           onChange={(e) => setEditingProduct({...editingProduct, sku: e.target.value})}
-                          className="w-full max-w-28 px-2 py-1 border border-gray-300 rounded text-sm"
+                          className="w-full max-w-28 px-2 h-6 border border-gray-300 rounded text-sm"
                         />
                       ) : (
                         product.sku || '-'
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-500">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <select
                           value={editingProduct.unit}
                           onChange={(e) => setEditingProduct({...editingProduct, unit: e.target.value})}
-                          className="w-full max-w-20 px-2 py-1 border border-gray-300 rounded text-sm"
+                          className="w-full max-w-20 px-2 h-6 border border-gray-300 rounded text-sm"
                         >
                           <option value="pans">Pans</option>
                           <option value="pcs">Pieces</option>
@@ -856,7 +1028,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         product.unit
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm font-medium text-green-600">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-medium text-green-600">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="number"
@@ -864,75 +1036,95 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                           step="0.01"
                           value={editingProduct.price === 0 ? '' : editingProduct.price || ''}
                           onChange={(e) => setEditingProduct({...editingProduct, price: e.target.value === '' ? 0 : parseFloat(e.target.value) || 0})}
-                          className="w-full max-w-20 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                          className="w-full max-w-20 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
                         `₱${(product.price || 0).toFixed(2)}`
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="number"
                           min="0"
                           value={editingProduct.initial_stock === 0 ? '' : editingProduct.initial_stock || ''}
                           onChange={(e) => setEditingProduct({...editingProduct, initial_stock: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
-                          className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                          className="w-full max-w-16 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
                         product.initial_stock || 0
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-900">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
+                      {productionInputMode ? (
+                        <input
+                          type="number"
+                          min="0"
+                          value={productionValues[product.product_id || product.id] === 0 ? '' : productionValues[product.product_id || product.id] || ''}
+                          onChange={(e) => {
+                            const productId = product.product_id || product.id
+                            setProductionValues({
+                              ...productionValues,
+                              [productId]: e.target.value === '' ? 0 : parseInt(e.target.value) || 0
+                            })
+                          }}
+                          className="w-full max-w-16 px-2 h-6 border-2 border-blue-400 rounded text-sm text-center bg-blue-50 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                        />
+                      ) : editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="number"
                           min="0"
                           value={editingProduct.production === 0 ? '' : editingProduct.production || ''}
                           onChange={(e) => setEditingProduct({...editingProduct, production: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
-                          className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                          className="w-full max-w-16 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
                         product.production || 0
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="number"
                           min="0"
                           value={editingProduct.released === 0 ? '' : editingProduct.released || ''}
                           onChange={(e) => setEditingProduct({...editingProduct, released: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
-                          className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                          className="w-full max-w-16 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
                         product.released || 0
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm font-semibold text-purple-600">
-                      {editingProduct?.id === (product.product_id || product.id)
-                        ? (editingProduct.initial_stock || 0) + (editingProduct.production || 0) - (editingProduct.released || 0)
-                        : product.final_stock || 0
-                      }
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-semibold text-purple-600">
+                      {productionInputMode ? (
+                        (product.initial_stock || 0) + (productionValues[product.product_id || product.id] || product.production || 0) - (product.released || 0)
+                      ) : editingProduct?.id === (product.product_id || product.id) ? (
+                        (editingProduct.initial_stock || 0) + (editingProduct.production || 0) - (editingProduct.released || 0)
+                      ) : (
+                        product.final_stock || 0
+                      )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-900">
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
                           type="number"
                           min="0"
                           value={editingProduct.reserved === 0 ? '' : editingProduct.reserved || ''}
                           onChange={(e) => setEditingProduct({...editingProduct, reserved: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
-                          className="w-full max-w-16 px-2 py-1 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                          className="w-full max-w-16 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
                         product.reserved || 0
                       )}
                     </td>
-                    <td className="px-6 py-2 whitespace-nowrap text-sm font-semibold text-emerald-600">
-                      {editingProduct?.id === (product.product_id || product.id)
-                        ? ((editingProduct.initial_stock || 0) + (editingProduct.production || 0) - (editingProduct.released || 0)) - (editingProduct.reserved || 0)
-                        : product.available_stock || 0
-                      }
+                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-semibold text-emerald-600">
+                      {productionInputMode ? (
+                        ((product.initial_stock || 0) + (productionValues[product.product_id || product.id] || product.production || 0) - (product.released || 0)) - (product.reserved || 0)
+                      ) : editingProduct?.id === (product.product_id || product.id) ? (
+                        ((editingProduct.initial_stock || 0) + (editingProduct.production || 0) - (editingProduct.released || 0)) - (editingProduct.reserved || 0)
+                      ) : (
+                        product.available_stock || 0
+                      )}
                     </td>
                     <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
                       <div className="flex space-x-2">
@@ -994,6 +1186,160 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Production Reports Modal */}
+      {showProductionReports && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Daily Production Reports</h3>
+              <button
+                onClick={() => {
+                  setShowProductionReports(false)
+                  setSelectedReport(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            {loadingReports ? (
+              <div className="text-center py-8">
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
+                <p className="mt-2 text-gray-600">Loading reports...</p>
+              </div>
+            ) : productionReports.length === 0 ? (
+              <div className="text-center py-8">
+                <Package className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                <p className="text-gray-600">No production reports found</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Production</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {productionReports.map((report) => (
+                        <tr key={report.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {new Date(report.date).toLocaleDateString('en-US', { 
+                              year: 'numeric', 
+                              month: 'long', 
+                              day: 'numeric' 
+                            })}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {report.total_production || 0}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm">
+                            <button
+                              onClick={() => setSelectedReport(report)}
+                              className="text-blue-600 hover:text-blue-900 flex items-center space-x-1"
+                            >
+                              <Eye className="h-4 w-4" />
+                              <span>View Details</span>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Report Details Modal */}
+      {selectedReport && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Production Report - {new Date(selectedReport.date).toLocaleDateString('en-US', { 
+                  year: 'numeric', 
+                  month: 'long', 
+                  day: 'numeric' 
+                })}
+              </h3>
+              <button
+                onClick={() => setSelectedReport(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <p className="text-sm text-gray-600 mb-1">Total Production</p>
+                <p className="text-2xl font-semibold text-gray-900">{selectedReport.total_production || 0}</p>
+              </div>
+
+              {/* Production Details List */}
+              {selectedReport.production_details && Array.isArray(selectedReport.production_details) && selectedReport.production_details.length > 0 && (
+                <div className="mt-6">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">Production Items</h4>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product Name</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Production Quantity</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {selectedReport.production_details.map((item: any, index: number) => (
+                          <tr key={item.product_id || index} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                              {item.product_name || 'Unknown Product'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                              {item.production || 0}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                              <button
+                                onClick={() => handleDeleteProductionItem(selectedReport.id, index)}
+                                disabled={deletingItem === `${selectedReport.id}-${index}`}
+                                className="text-red-600 hover:text-red-900 disabled:opacity-50 disabled:cursor-not-allowed flex items-center space-x-1"
+                                title="Delete item"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                                <span>{deletingItem === `${selectedReport.id}-${index}` ? 'Deleting...' : 'Delete'}</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-4 pt-4 border-t">
+                <p className="text-sm text-gray-600">
+                  <strong>Created:</strong> {new Date(selectedReport.created_at).toLocaleString('en-US', {
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  })}
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

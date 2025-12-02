@@ -1040,7 +1040,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             className="flex items-center space-x-2 px-4 py-2 text-white bg-green-600 hover:bg-green-700 rounded-md"
           >
             <Plus className="h-4 w-4" />
-            <span>Create DSIR Report</span>
+            <span>Create DSIR</span>
           </button>
           {showEditItemsButton && (
             <button
@@ -1646,7 +1646,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto h-full w-full z-50">
           <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Create DSIR Report</h3>
+              <h3 className="text-lg font-semibold text-gray-900">Create DSIR</h3>
               <button
                 onClick={() => {
                   setIsCreateReportModalOpen(false)
