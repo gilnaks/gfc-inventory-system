@@ -103,7 +103,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       .select(`
         *,
         supplier:suppliers(*),
-        items:purchase_order_items(*),
+        items:purchase_order_items(*, material:raw_materials(*)),
         payments:po_payments(*)
       `)
       .eq('brand_id', selectedBrand.id)
@@ -655,6 +655,8 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
         // Insert new items
         const itemsToInsert = poItems.map(item => ({
           ...item,
+          unit_price: typeof item.unit_price === 'string' ? parseFloat(item.unit_price) || 0 : item.unit_price,
+          material_id: item.material_id || null,
           po_id: editingPO.id
         }))
         await supabase
@@ -706,8 +708,9 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
           product_description: item.product_description,
           quantity: item.quantity,
           unit: item.unit,
-          unit_price: item.unit_price,
+          unit_price: typeof item.unit_price === 'string' ? parseFloat(item.unit_price) || 0 : item.unit_price,
           notes: item.notes || null,
+          material_id: item.material_id || null,
           po_id: newPO.id
         }))
         
@@ -731,10 +734,34 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   }
   
   const updatePOStatus = async (poId: string, newStatus: string) => {
+    // If closing PO, check if delivery receipt exists
+    if (newStatus === 'closed') {
+      const { data: deliveries } = await supabase
+        .from('delivery_receipts')
+        .select('id, delivery_receipt_url')
+        .eq('po_id', poId)
+      
+      if (!deliveries || deliveries.length === 0) {
+        alert('Cannot close PO: No delivery receipt recorded.\n\nPlease record a delivery first.')
+        return
+      }
+      
+      const hasReceipt = deliveries.some(d => d.delivery_receipt_url && d.delivery_receipt_url.trim() !== '')
+      if (!hasReceipt) {
+        alert('Cannot close PO: Delivery receipt URL is missing.\n\nPlease add the delivery receipt attachment before closing.')
+        return
+      }
+    }
+    
     const { error } = await supabase
       .from('purchase_orders')
       .update({ status: newStatus })
       .eq('id', poId)
+    
+    if (error) {
+      alert(`Error updating PO status: ${error.message}`)
+      return
+    }
     
     loadPurchaseOrders()
   }
@@ -795,7 +822,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     return `DR-${year}${random}`
   }
   
-  const saveDelivery = async (deliveryData: Partial<DeliveryReceipt>) => {
+  const saveDelivery = async (
+    deliveryData: Partial<DeliveryReceipt>, 
+    items: Array<{po_item_id: string, quantity_received: number, notes?: string}>
+  ) => {
     if (!selectedPOForDelivery) return
     
     const delivery = {
@@ -810,15 +840,43 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     }
     
     console.log('Creating delivery:', delivery)
+    console.log('Delivery items:', items)
     
-    const { error } = await supabase
+    // Insert delivery receipt and get the ID
+    const { data: newDelivery, error } = await supabase
       .from('delivery_receipts')
       .insert([delivery])
+      .select()
+      .single()
     
     if (error) {
       console.error('Error creating delivery:', error)
       alert(`Error recording delivery: ${error.message}`)
       return
+    }
+    
+    // Insert delivery receipt items
+    if (newDelivery && items.length > 0) {
+      const deliveryItems = items.map(item => ({
+        delivery_receipt_id: newDelivery.id,
+        po_item_id: item.po_item_id,
+        quantity_received: item.quantity_received,
+        notes: item.notes || null
+      }))
+      
+      console.log('Creating delivery items:', deliveryItems)
+      
+      const { error: itemsError } = await supabase
+        .from('delivery_receipt_items')
+        .insert(deliveryItems)
+      
+      if (itemsError) {
+        console.error('Error creating delivery items:', itemsError)
+        alert(`Error recording delivery items: ${itemsError.message}`)
+        return
+      }
+      
+      console.log('✅ Delivery items created successfully - material stock should update automatically')
     }
     
     // Update PO status to delivered if not already
@@ -830,6 +888,9 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     setSelectedPOForDelivery(null)
     loadDeliveries()
     loadPurchaseOrders()
+    loadRawMaterials() // Reload materials to see updated stock
+    
+    alert('✅ Delivery recorded successfully! Raw materials inventory has been updated.')
   }
   
   // =============================================
@@ -986,7 +1047,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 <button
                   onClick={() => {
                     setEditingPO(null)
-                    setPOItems([{ product_description: '', quantity: 1, unit: 'pcs', unit_price: 0 }])
+                    setPOItems([])
                     setShowPOModal(true)
                   }}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
@@ -1138,7 +1199,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                             <button
                               onClick={() => {
                                 setEditingPO(po)
-                                setPOItems(po.items || [{ product_description: '', quantity: 1, unit: 'pcs', unit_price: 0 }])
+                                setPOItems(po.items || [])
                                 setShowPOModal(true)
                               }}
                               className="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
@@ -1232,17 +1293,32 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                         {supplier.contact_person && (
                           <p className="text-sm text-gray-600">{supplier.contact_person}</p>
                         )}
-                        <div className="mt-2 space-y-1 text-sm">
-                          {supplier.phone && (
-                            <p className="text-gray-600">📞 {supplier.phone}</p>
-                          )}
-                          {supplier.email && (
-                            <p className="text-gray-600">📧 {supplier.email}</p>
-                          )}
-                          {supplier.payment_terms && (
-                            <p className="text-gray-600">💳 {supplier.payment_terms}</p>
-                          )}
-                        </div>
+                          <div className="mt-2 space-y-1 text-sm">
+                            {supplier.phone && (
+                              <p className="text-gray-600 flex items-center gap-2">
+                                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                                </svg>
+                                {supplier.phone}
+                              </p>
+                            )}
+                            {supplier.email && (
+                              <p className="text-gray-600 flex items-center gap-2">
+                                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                                </svg>
+                                {supplier.email}
+                              </p>
+                            )}
+                            {supplier.payment_terms && (
+                              <p className="text-gray-600 flex items-center gap-2">
+                                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                                </svg>
+                                {supplier.payment_terms}
+                              </p>
+                            )}
+                          </div>
                       </div>
                       <div className="flex gap-2">
                         <button
@@ -1346,18 +1422,30 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                 </h5>
                                 {poData.payments.length > 0 ? (
                                   <div className="space-y-1.5">
-                                    {poData.payments.map((payment: any) => (
-                                      <div key={payment.id} className="bg-green-50 border border-green-200 rounded p-2">
-                                        <div className="flex justify-between items-start">
-                                          <div className="flex-1">
-                                            <p className="text-xs font-medium">{payment.payment_number}</p>
-                                            <p className="text-xs text-gray-600">{new Date(payment.payment_date).toLocaleDateString()}</p>
-                                            <p className="text-xs text-gray-600">{payment.payment_method}</p>
+                                      {poData.payments.map((payment: any) => (
+                                        <div key={payment.id} className="bg-green-50 border border-green-200 rounded p-2">
+                                          <div className="flex justify-between items-start">
+                                            <div className="flex-1">
+                                              <p className="text-xs font-medium">{payment.payment_number}</p>
+                                              <p className="text-xs text-gray-600">{new Date(payment.payment_date).toLocaleDateString()}</p>
+                                              <p className="text-xs text-gray-600">{payment.payment_method}</p>
+                                            </div>
+                                            <div className="text-right">
+                                              <p className="text-sm font-bold text-green-600">₱{payment.amount.toLocaleString()}</p>
+                                              {payment.proof_of_payment_url && (
+                                                <a
+                                                  href={payment.proof_of_payment_url}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                                                >
+                                                  Payment Receipt
+                                                </a>
+                                              )}
+                                            </div>
                                           </div>
-                                          <p className="text-sm font-bold text-green-600">₱{payment.amount.toLocaleString()}</p>
                                         </div>
-                                      </div>
-                                    ))}
+                                      ))}
                                   </div>
                                 ) : (
                                   <p className="text-xs text-gray-400">No payments</p>
@@ -1380,14 +1468,26 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                             <p className="text-xs text-gray-600">{new Date(delivery.delivery_date).toLocaleDateString()}</p>
                                             <p className="text-xs text-gray-600">By: {delivery.received_by}</p>
                                           </div>
-                                          <span className={`px-2 py-0.5 text-xs font-medium rounded ${
-                                            delivery.condition === 'good' ? 'bg-green-100 text-green-800' :
-                                            delivery.condition === 'damaged' ? 'bg-red-100 text-red-800' :
-                                            delivery.condition === 'incomplete' ? 'bg-orange-100 text-orange-800' :
-                                            'bg-yellow-100 text-yellow-800'
-                                          }`}>
-                                            {delivery.condition}
-                                          </span>
+                                          <div className="text-right">
+                                            <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded ${
+                                              delivery.condition === 'good' ? 'bg-green-100 text-green-800' :
+                                              delivery.condition === 'damaged' ? 'bg-red-100 text-red-800' :
+                                              delivery.condition === 'incomplete' ? 'bg-orange-100 text-orange-800' :
+                                              'bg-yellow-100 text-yellow-800'
+                                            }`}>
+                                              {delivery.condition === 'good' ? 'Complete' : delivery.condition}
+                                            </span>
+                                            {delivery.delivery_receipt_url && (
+                                              <a
+                                                href={delivery.delivery_receipt_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="block mt-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                                              >
+                                                Delivery Receipt
+                                              </a>
+                                            )}
+                                          </div>
                                         </div>
                                       </div>
                                     ))}
@@ -1780,7 +1880,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 product_description: item.product_description,
                 quantity: item.quantity,
                 unit: item.unit,
-                estimated_price: item.estimated_price || null,
+                estimated_price: typeof item.estimated_price === 'string' ? parseFloat(item.estimated_price) || null : item.estimated_price || null,
                 notes: item.notes || null
               }))
               
@@ -1846,8 +1946,9 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 product_description: item.product_description,
                 quantity: item.quantity,
                 unit: item.unit,
-                unit_price: item.unit_price,
+                unit_price: typeof item.unit_price === 'string' ? parseFloat(item.unit_price) || 0 : item.unit_price,
                 notes: item.notes || null,
+                material_id: item.material_id || null,
                 po_id: newPO.id
               }))
               
@@ -1891,10 +1992,18 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
           brandId={selectedBrand?.id || ''}
           suppliers={suppliers}
           onSave={async (materialData) => {
+            // Parse string values to numbers
+            const dataToSave = {
+              ...materialData,
+              unit_cost: typeof materialData.unit_cost === 'string' ? parseFloat(materialData.unit_cost) || 0 : materialData.unit_cost,
+              minimum_stock: typeof materialData.minimum_stock === 'string' ? parseFloat(materialData.minimum_stock) || 0 : materialData.minimum_stock,
+              current_stock: typeof materialData.current_stock === 'string' ? parseFloat(materialData.current_stock) || 0 : materialData.current_stock
+            }
+            
             if (editingMaterial) {
               const { error } = await supabase
                 .from('raw_materials')
-                .update(materialData)
+                .update(dataToSave)
                 .eq('id', editingMaterial.id)
               
               if (error) {
@@ -1904,7 +2013,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
             } else {
               const { error } = await supabase
                 .from('raw_materials')
-                .insert([{ ...materialData, brand_id: selectedBrand?.id }])
+                .insert([{ ...dataToSave, brand_id: selectedBrand?.id }])
               
               if (error) {
                 alert(`Error adding material: ${error.message}`)
@@ -2257,7 +2366,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
   const addFromCatalog = (material: RawMaterial) => {
     // Check if item already exists
     const exists = items.some(item => 
-      item.product_description === material.material_name && (item as any).fromCatalog
+      item.product_description === material.material_name && item.material_id === material.id
     )
     
     if (exists) {
@@ -2265,12 +2374,13 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
       return
     }
     
-    const newItem = {
+    const newItem: Partial<PurchaseOrderItem> = {
       product_description: material.material_name,
       quantity: 1,
       unit: material.unit,
       unit_price: material.unit_cost,
-      fromCatalog: true as any // Mark as catalog item
+      material_id: material.id,
+      material: material
     }
     setItems([...items, newItem])
   }
@@ -2296,7 +2406,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
     areItemsValid
   
   const addItem = () => {
-    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', unit_price: 0 }])
+    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', unit_price: '' as any }])
   }
   
   const removeItem = (index: number) => {
@@ -2508,7 +2618,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                 <div className="space-y-1 max-h-48 overflow-y-auto">
                   {catalog.map((material) => {
                     const alreadyAdded = items.some(item => 
-                      item.product_description === material.material_name && (item as any).fromCatalog
+                      item.material_id === material.id
                     )
                     return (
                     <button
@@ -2562,8 +2672,8 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-gray-500">#{index + 1}</span>
-                        {(item as any).fromCatalog && (
-                          <span className="text-xs text-purple-600 bg-purple-50 px-2 py-0.5 rounded">Catalog</span>
+                        {item.material_id && (
+                          <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded">🔗 Linked to Inventory</span>
                         )}
                       </div>
                       <button
@@ -2587,9 +2697,9 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                           value={item.product_description}
                           onChange={(e) => updateItem(index, 'product_description', e.target.value)}
                           className={`w-full px-3 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${
-                            (item as any).fromCatalog ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
+                            item.material_id ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
                           }`}
-                          readOnly={(item as any).fromCatalog}
+                          readOnly={!!item.material_id}
                           required
                         />
                       </div>
@@ -2637,10 +2747,11 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                           <input
                             type="number"
                             value={item.unit_price}
-                            onChange={(e) => updateItem(index, 'unit_price', parseFloat(e.target.value))}
+                            onChange={(e) => updateItem(index, 'unit_price', e.target.value)}
                             className={`w-full pl-6 pr-2 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${
                               (item as any).fromCatalog ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
                             }`}
+                            placeholder="0.00"
                             readOnly={(item as any).fromCatalog}
                             min="0"
                             step="0.01"
@@ -2736,8 +2847,12 @@ function PaymentModal({ po, onSave, onClose }: {
     check_number: '',
     bank_name: '',
     reference_number: '',
+    proof_of_payment_url: '',
     notes: ''
   })
+  
+  const [receiptFile, setReceiptFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
   
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -2749,56 +2864,60 @@ function PaymentModal({ po, onSave, onClose }: {
         </div>
         
         <div className="p-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Payment Date *</label>
-            <input
-              type="date"
-              value={formData.payment_date}
-              onChange={(e) => setFormData({ ...formData, payment_date: e.target.value })}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              required
-            />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">Payment Date *</label>
+              <input
+                type="date"
+                value={formData.payment_date}
+                onChange={(e) => setFormData({ ...formData, payment_date: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                required
+              />
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium mb-1">Payment Type *</label>
+              <select
+                value={formData.payment_type}
+                onChange={(e) => setFormData({ ...formData, payment_type: e.target.value as any })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="advance">Advance</option>
+                <option value="partial">Partial</option>
+                <option value="full">Full</option>
+                <option value="final">Final</option>
+              </select>
+            </div>
           </div>
           
-          <div>
-            <label className="block text-sm font-medium mb-1">Payment Type *</label>
-            <select
-              value={formData.payment_type}
-              onChange={(e) => setFormData({ ...formData, payment_type: e.target.value as any })}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="advance">Advance</option>
-              <option value="partial">Partial</option>
-              <option value="full">Full</option>
-              <option value="final">Final</option>
-            </select>
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium mb-1">Payment Method *</label>
-            <select
-              value={formData.payment_method}
-              onChange={(e) => setFormData({ ...formData, payment_method: e.target.value as any })}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="cash">Cash</option>
-              <option value="check">Check</option>
-              <option value="bank_transfer">Bank Transfer</option>
-            </select>
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium mb-1">Amount *</label>
-            <input
-              type="number"
-              value={formData.amount}
-              onChange={(e) => setFormData({ ...formData, amount: parseFloat(e.target.value) })}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              min="0"
-              max={po.balance_amount}
-              step="0.01"
-              required
-            />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">Payment Method *</label>
+              <select
+                value={formData.payment_method}
+                onChange={(e) => setFormData({ ...formData, payment_method: e.target.value as any })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="cash">Cash</option>
+                <option value="check">Check</option>
+                <option value="bank_transfer">Bank Transfer</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium mb-1">Amount *</label>
+              <input
+                type="number"
+                value={formData.amount}
+                onChange={(e) => setFormData({ ...formData, amount: parseFloat(e.target.value) })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                min="0"
+                max={po.balance_amount}
+                step="0.01"
+                required
+              />
+            </div>
           </div>
           
           {formData.payment_method === 'check' && (
@@ -2814,7 +2933,7 @@ function PaymentModal({ po, onSave, onClose }: {
           )}
           
           {formData.payment_method === 'bank_transfer' && (
-            <>
+            <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium mb-1">Bank Name</label>
                 <input
@@ -2833,8 +2952,28 @@ function PaymentModal({ po, onSave, onClose }: {
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
-            </>
+            </div>
           )}
+          
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Payment Receipt/Proof Attachment
+              <span className="text-gray-400 font-normal ml-1">(optional)</span>
+            </label>
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              onChange={(e) => setReceiptFile(e.target.files?.[0] || null)}
+              className="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-white hover:bg-gray-50 focus:outline-none file:mr-3 file:py-2.5 file:px-4 file:border-0 file:text-sm file:font-medium file:bg-gray-900 file:text-white hover:file:bg-gray-800"
+            />
+            <p className="mt-1 text-xs text-gray-500">Deposit slip, bank receipt, or payment proof • PDF or image • Max 10MB</p>
+            {receiptFile && (
+              <div className="mt-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                <p className="text-sm font-medium text-gray-900">{receiptFile.name}</p>
+                <p className="text-xs text-gray-500">{(receiptFile.size / 1024 / 1024).toFixed(2)} MB</p>
+              </div>
+            )}
+          </div>
           
           <div>
             <label className="block text-sm font-medium mb-1">Notes</label>
@@ -2855,11 +2994,49 @@ function PaymentModal({ po, onSave, onClose }: {
             Cancel
           </button>
           <button
-            onClick={() => onSave(formData)}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-            disabled={!formData.amount || formData.amount <= 0}
+            onClick={async () => {
+              if (uploading) return
+              
+              try {
+                setUploading(true)
+                let paymentData = { ...formData }
+                
+                // Upload file if selected
+                if (receiptFile) {
+                  const fileExt = receiptFile.name.split('.').pop()
+                  const fileName = `${po.po_number}-payment-${Date.now()}.${fileExt}`
+                  
+                  const { data: uploadData, error: uploadError } = await supabase.storage
+                    .from('payment_receipts')
+                    .upload(fileName, receiptFile)
+                  
+                  if (uploadError) {
+                    throw uploadError
+                  }
+                  
+                  // Get public URL
+                  const { data: urlData } = supabase.storage
+                    .from('payment_receipts')
+                    .getPublicUrl(fileName)
+                  
+                  paymentData.proof_of_payment_url = urlData.publicUrl
+                }
+                
+                onSave(paymentData)
+              } catch (error) {
+                console.error('Error uploading payment receipt:', error)
+                alert('Failed to upload payment receipt. Please try again.')
+                setUploading(false)
+              }
+            }}
+            className={`px-4 py-2 rounded-lg ${
+              !uploading && formData.amount && formData.amount > 0
+                ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer'
+                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+            }`}
+            disabled={!formData.amount || formData.amount <= 0 || uploading}
           >
-            Record Payment
+            {uploading ? 'Uploading...' : 'Record Payment'}
           </button>
         </div>
       </div>
@@ -2873,7 +3050,7 @@ function PaymentModal({ po, onSave, onClose }: {
 
 function DeliveryModal({ po, onSave, onClose }: {
   po: PurchaseOrder
-  onSave: (delivery: Partial<DeliveryReceipt>) => void
+  onSave: (delivery: Partial<DeliveryReceipt>, items: Array<{po_item_id: string, quantity_received: number, notes?: string}>) => void
   onClose: () => void
 }) {
   const [formData, setFormData] = useState<Partial<DeliveryReceipt>>({
@@ -2881,18 +3058,54 @@ function DeliveryModal({ po, onSave, onClose }: {
     received_by: '',
     condition: 'good',
     notes: '',
-    inspection_notes: ''
+    inspection_notes: '',
+    delivery_receipt_url: ''
   })
+  
+  const [receiptFile, setReceiptFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+  
+  // Initialize delivery items with PO items
+  const [deliveryItems, setDeliveryItems] = useState<Array<{
+    po_item_id: string
+    product_description: string
+    ordered_quantity: number
+    quantity_received: number
+    unit: string
+    notes: string
+    material_id?: string
+  }>>(
+    (po.items || []).map(item => ({
+      po_item_id: item.id,
+      product_description: item.product_description,
+      ordered_quantity: item.quantity,
+      quantity_received: item.quantity, // Default to full quantity
+      unit: item.unit,
+      notes: '',
+      material_id: item.material_id
+    }))
+  )
+  
+  const updateDeliveryItem = (index: number, field: string, value: any) => {
+    const newItems = [...deliveryItems]
+    newItems[index] = { ...newItems[index], [field]: value }
+    setDeliveryItems(newItems)
+  }
+  
+  const hasValidItems = deliveryItems.some(item => item.quantity_received > 0)
+  const isFormValid = formData.received_by && formData.received_by.trim() !== '' && 
+                      hasValidItems && 
+                      receiptFile !== null
   
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg max-w-lg w-full">
+      <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
         <div className="p-6 border-b">
           <h2 className="text-xl font-semibold">Record Delivery</h2>
           <p className="text-sm text-gray-600 mt-1">PO: {po.po_number} - {po.supplier?.name}</p>
         </div>
         
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-4 overflow-y-auto flex-1">
           <div>
             <label className="block text-sm font-medium mb-1">Delivery Date *</label>
             <input
@@ -2904,56 +3117,127 @@ function DeliveryModal({ po, onSave, onClose }: {
             />
           </div>
           
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Received By *
-              {!formData.received_by && <span className="text-red-500 text-xs ml-1">(required)</span>}
-            </label>
-            <input
-              type="text"
-              value={formData.received_by}
-              onChange={(e) => setFormData({ ...formData, received_by: e.target.value })}
-              className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
-                !formData.received_by 
-                  ? 'border-red-300 focus:ring-red-500' 
-                  : 'focus:ring-blue-500'
-              }`}
-              required
-            />
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium mb-1">Condition *</label>
-            <select
-              value={formData.condition}
-              onChange={(e) => setFormData({ ...formData, condition: e.target.value as any })}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="good">Good</option>
-              <option value="damaged">Damaged</option>
-              <option value="partial">Partial</option>
-              <option value="incomplete">Incomplete</option>
-            </select>
-          </div>
-          
-          <div>
-            <label className="block text-sm font-medium mb-1">Inspection Notes</label>
-              <textarea
-                value={formData.inspection_notes}
-                onChange={(e) => setFormData({ ...formData, inspection_notes: e.target.value })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={3}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Received By *
+                {!formData.received_by && <span className="text-red-500 text-xs ml-1">(required)</span>}
+              </label>
+              <input
+                type="text"
+                value={formData.received_by}
+                onChange={(e) => setFormData({ ...formData, received_by: e.target.value })}
+                className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
+                  !formData.received_by 
+                    ? 'border-red-300 focus:ring-red-500' 
+                    : 'focus:ring-blue-500'
+                }`}
+                required
               />
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium mb-1">Condition *</label>
+              <select
+                value={formData.condition}
+                onChange={(e) => setFormData({ ...formData, condition: e.target.value as any })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="good">Complete</option>
+                <option value="damaged">Damaged</option>
+                <option value="partial">Partial</option>
+                <option value="incomplete">Incomplete</option>
+              </select>
+            </div>
           </div>
           
           <div>
-            <label className="block text-sm font-medium mb-1">General Notes</label>
+            <label className="block text-sm font-medium mb-1">Notes</label>
             <textarea
               value={formData.notes}
               onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              rows={2}
+              rows={3}
+              placeholder="Add any inspection notes or general comments..."
             />
+          </div>
+          
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Delivery Receipt Attachment *
+              {!receiptFile && <span className="text-red-500 text-xs ml-1">(required)</span>}
+            </label>
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              onChange={(e) => setReceiptFile(e.target.files?.[0] || null)}
+              className="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-white hover:bg-gray-50 focus:outline-none file:mr-3 file:py-2.5 file:px-4 file:border-0 file:text-sm file:font-medium file:bg-gray-900 file:text-white hover:file:bg-gray-800"
+              required
+            />
+            <p className="mt-1 text-xs text-gray-500">PDF or image • Max 10MB</p>
+            {receiptFile && (
+              <div className="mt-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+                <p className="text-sm font-medium text-gray-900">{receiptFile.name}</p>
+                <p className="text-xs text-gray-500">{(receiptFile.size / 1024 / 1024).toFixed(2)} MB</p>
+              </div>
+            )}
+          </div>
+          
+          {/* Items Section */}
+          <div>
+            <label className="block text-sm font-medium mb-2">Items Delivered</label>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-100 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left p-2 font-medium text-gray-700">Item</th>
+                    <th className="text-center p-2 font-medium text-gray-700 w-24">Ordered</th>
+                    <th className="text-center p-2 font-medium text-gray-700 w-32">Received</th>
+                    <th className="text-left p-2 font-medium text-gray-700 w-32">Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deliveryItems.map((item, index) => (
+                    <tr key={item.po_item_id} className="border-b border-gray-200 last:border-0">
+                      <td className="p-2">
+                        <div className="flex items-center gap-2">
+                          <span>{item.product_description}</span>
+                          {item.material_id && (
+                            <span className="text-xs text-green-600 bg-green-50 px-1.5 py-0.5 rounded">🔗</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="p-2 text-center text-gray-600">
+                        {item.ordered_quantity} {item.unit}
+                      </td>
+                      <td className="p-2">
+                        <input
+                          type="number"
+                          min="0"
+                          max={item.ordered_quantity}
+                          step="0.01"
+                          value={item.quantity_received}
+                          onChange={(e) => updateDeliveryItem(index, 'quantity_received', parseFloat(e.target.value) || 0)}
+                          className="w-full px-2 py-1 border rounded text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <input
+                          type="text"
+                          value={item.notes}
+                          onChange={(e) => updateDeliveryItem(index, 'notes', e.target.value)}
+                          placeholder="Optional"
+                          className="w-full px-2 py-1 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              💡 Items with 🔗 will automatically update raw materials inventory
+            </p>
           </div>
         </div>
         
@@ -2965,16 +3249,65 @@ function DeliveryModal({ po, onSave, onClose }: {
             Cancel
           </button>
           <button
-            onClick={() => onSave(formData)}
+            onClick={async () => {
+              if (!receiptFile || uploading) return
+              
+              try {
+                setUploading(true)
+                
+                // Upload file to Supabase storage
+                const fileExt = receiptFile.name.split('.').pop()
+                const fileName = `${po.po_number}-${Date.now()}.${fileExt}`
+                
+                const { data: uploadData, error: uploadError } = await supabase.storage
+                  .from('delivery_receipts')
+                  .upload(fileName, receiptFile)
+                
+                if (uploadError) {
+                  throw uploadError
+                }
+                
+                // Get public URL
+                const { data: urlData } = supabase.storage
+                  .from('delivery_receipts')
+                  .getPublicUrl(fileName)
+                
+                // Add URL to form data
+                const deliveryData = {
+                  ...formData,
+                  delivery_receipt_url: urlData.publicUrl
+                }
+                
+                const itemsToSave = deliveryItems
+                  .filter(item => item.quantity_received > 0)
+                  .map(item => ({
+                    po_item_id: item.po_item_id,
+                    quantity_received: item.quantity_received,
+                    notes: item.notes || undefined
+                  }))
+                
+                onSave(deliveryData, itemsToSave)
+              } catch (error) {
+                console.error('Error uploading receipt:', error)
+                alert('Failed to upload delivery receipt. Please try again.')
+                setUploading(false)
+              }
+            }}
             className={`px-4 py-2 rounded-lg ${
-              formData.received_by && formData.received_by.trim() !== ''
+              isFormValid && !uploading
                 ? 'bg-blue-600 text-white hover:bg-blue-700 cursor-pointer' 
                 : 'bg-gray-300 text-gray-500 cursor-not-allowed'
             }`}
-            disabled={!formData.received_by || formData.received_by.trim() === ''}
-            title={!formData.received_by ? 'Please enter who received the delivery' : ''}
+            disabled={!isFormValid || uploading}
+            title={
+              !formData.received_by ? 'Please enter who received the delivery' : 
+              !hasValidItems ? 'Please enter quantities received' :
+              !receiptFile ? 'Please attach delivery receipt' :
+              uploading ? 'Uploading...' :
+              ''
+            }
           >
-            Record Delivery
+            {uploading ? 'Uploading Receipt...' : 'Record Delivery'}
           </button>
         </div>
       </div>
@@ -3003,12 +3336,12 @@ function PRModal({ brandId, onSave, onClose }: {
     product_description: string
     quantity: number
     unit: string
-    estimated_price: number
+    estimated_price: number | string
     notes: string
-  }>>([{ product_description: '', quantity: 1, unit: 'pcs', estimated_price: 0, notes: '' }])
+  }>>([])
   
   const addItem = () => {
-    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', estimated_price: 0, notes: '' }])
+    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', estimated_price: '', notes: '' }])
   }
   
   const removeItem = (index: number) => {
@@ -3187,8 +3520,9 @@ function PRModal({ brandId, onSave, onClose }: {
                           <input
                             type="number"
                             value={item.estimated_price}
-                            onChange={(e) => updateItem(index, 'estimated_price', parseFloat(e.target.value))}
+                            onChange={(e) => updateItem(index, 'estimated_price', e.target.value)}
                             className="w-full pl-6 pr-2 py-2 bg-white border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500"
+                            placeholder="0.00"
                             min="0"
                             step="0.01"
                           />
@@ -3209,7 +3543,10 @@ function PRModal({ brandId, onSave, onClose }: {
                     <p className="text-xs text-gray-500">{items.length} item{items.length !== 1 ? 's' : ''}</p>
                   </div>
                   <div className="text-2xl font-bold text-gray-900">
-                    ₱{items.reduce((sum, item) => sum + ((item.quantity || 0) * (item.estimated_price || 0)), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ₱{items.reduce((sum, item) => {
+                      const price = typeof item.estimated_price === 'string' ? parseFloat(item.estimated_price) || 0 : item.estimated_price || 0
+                      return sum + ((item.quantity || 0) * price)
+                    }, 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </div>
                 </div>
               </div>
@@ -3306,7 +3643,7 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
   const addFromCatalog = (material: RawMaterial) => {
     // Check if item already exists
     const exists = items.some(item => 
-      item.product_description === material.material_name && (item as any).fromCatalog
+      item.material_id === material.id
     )
     
     if (exists) {
@@ -3314,18 +3651,19 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
       return
     }
     
-    const newItem = {
+    const newItem: Partial<PurchaseOrderItem> = {
       product_description: material.material_name,
       quantity: 1,
       unit: material.unit,
       unit_price: material.unit_cost,
-      fromCatalog: true as any // Mark as catalog item
+      material_id: material.id,
+      material: material
     }
     setItems([...items, newItem])
   }
   
   const addItem = () => {
-    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', unit_price: 0 }])
+    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', unit_price: '' as any }])
   }
   
   const removeItem = (index: number) => {
@@ -3520,7 +3858,7 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                 <div className="space-y-1 max-h-48 overflow-y-auto">
                   {catalog.map((material) => {
                     const alreadyAdded = items.some(item => 
-                      item.product_description === material.material_name && (item as any).fromCatalog
+                      item.material_id === material.id
                     )
                     return (
                     <button
@@ -3718,9 +4056,9 @@ function MaterialModal({ material, brandId, suppliers, onSave, onClose }: {
     sku: material?.sku || '',
     category: material?.category || '',
     unit: material?.unit || 'kg',
-    unit_cost: material?.unit_cost || 0,
-    minimum_stock: material?.minimum_stock || 0,
-    current_stock: material?.current_stock || 0,
+    unit_cost: material?.unit_cost || ('' as any),
+    minimum_stock: material?.minimum_stock || ('' as any),
+    current_stock: material?.current_stock || ('' as any),
     notes: material?.notes || '',
     is_active: material?.is_active ?? true
   })
@@ -3817,9 +4155,10 @@ function MaterialModal({ material, brandId, suppliers, onSave, onClose }: {
               <input
                 type="number"
                 value={formData.minimum_stock}
-                onChange={(e) => setFormData({ ...formData, minimum_stock: parseFloat(e.target.value) })}
+                onChange={(e) => setFormData({ ...formData, minimum_stock: e.target.value as any })}
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 min="0"
+                placeholder="0"
                 step="0.01"
               />
             </div>
@@ -3827,12 +4166,13 @@ function MaterialModal({ material, brandId, suppliers, onSave, onClose }: {
             {!material && (
               <div>
                 <label className="block text-sm font-medium mb-1">Initial Stock</label>
-                <input
+                  <input
                   type="number"
                   value={formData.current_stock}
-                  onChange={(e) => setFormData({ ...formData, current_stock: parseFloat(e.target.value) })}
+                  onChange={(e) => setFormData({ ...formData, current_stock: e.target.value as any })}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                   min="0"
+                  placeholder="0"
                   step="0.01"
                 />
               </div>
@@ -3897,7 +4237,7 @@ function StockMovementModal({ material, onSave, onClose }: {
 }) {
   const [formData, setFormData] = useState({
     movement_type: 'in' as 'in' | 'out' | 'adjustment',
-    quantity: 0,
+    quantity: '' as any,
     unit_cost: material.unit_cost,
     reference_type: '',
     reference_number: '',
@@ -3906,7 +4246,12 @@ function StockMovementModal({ material, onSave, onClose }: {
     created_by: ''
   })
   
-  const isValid = formData.quantity > 0
+  // For adjustment, allow any non-zero quantity (positive or negative)
+  // For in/out, require positive quantity
+  const quantityNum = typeof formData.quantity === 'string' ? parseFloat(formData.quantity) || 0 : formData.quantity
+  const isValid = formData.movement_type === 'adjustment' 
+    ? quantityNum !== 0 
+    : quantityNum > 0
   
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -3922,24 +4267,30 @@ function StockMovementModal({ material, onSave, onClose }: {
             <label className="block text-sm font-medium mb-1">Movement Type *</label>
             <select
               value={formData.movement_type}
-              onChange={(e) => setFormData({ ...formData, movement_type: e.target.value as any })}
+              onChange={(e) => setFormData({ ...formData, movement_type: e.target.value as any, quantity: 0 })}
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="in">Stock In (Purchase/Receipt)</option>
               <option value="out">Stock Out (Usage/Consumption)</option>
-              <option value="adjustment">Adjustment (Correction)</option>
+              <option value="adjustment">Adjustment (+ to add, - to subtract)</option>
             </select>
           </div>
           
           <div>
-            <label className="block text-sm font-medium mb-1">Quantity * ({material.unit})</label>
+            <label className="block text-sm font-medium mb-1">
+              Quantity * ({material.unit})
+              {formData.movement_type === 'adjustment' && (
+                <span className="text-xs text-gray-500 ml-2">(Use negative for decrease, positive for increase)</span>
+              )}
+            </label>
             <input
               type="number"
               value={formData.quantity}
-              onChange={(e) => setFormData({ ...formData, quantity: parseFloat(e.target.value) })}
+              onChange={(e) => setFormData({ ...formData, quantity: e.target.value as any })}
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              min="0"
+              min={formData.movement_type === 'adjustment' ? undefined : "0"}
               step="0.01"
+              placeholder="Enter quantity"
               required
             />
           </div>
@@ -3950,10 +4301,11 @@ function StockMovementModal({ material, onSave, onClose }: {
               <input
                 type="number"
                 value={formData.unit_cost}
-                onChange={(e) => setFormData({ ...formData, unit_cost: parseFloat(e.target.value) })}
+                onChange={(e) => setFormData({ ...formData, unit_cost: e.target.value as any })}
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 min="0"
                 step="0.01"
+                placeholder="0.00"
               />
             </div>
           )}
@@ -3990,19 +4342,35 @@ function StockMovementModal({ material, onSave, onClose }: {
             />
           </div>
           
-          {formData.quantity > 0 && (
-            <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+          {quantityNum !== 0 && (
+            <div className={`border rounded-md p-3 ${
+              formData.movement_type === 'in' || (formData.movement_type === 'adjustment' && quantityNum > 0)
+                ? 'bg-green-50 border-green-200'
+                : 'bg-orange-50 border-orange-200'
+            }`}>
               <p className="text-sm font-medium text-gray-700">
                 New Stock After Movement:
               </p>
-              <p className="text-lg font-bold text-blue-600">
+              <p className={`text-lg font-bold ${
+                formData.movement_type === 'in' || (formData.movement_type === 'adjustment' && quantityNum > 0)
+                  ? 'text-green-600'
+                  : 'text-orange-600'
+              }`}>
                 {formData.movement_type === 'in' 
-                  ? material.current_stock + formData.quantity
+                  ? material.current_stock + quantityNum
                   : formData.movement_type === 'out'
-                  ? material.current_stock - formData.quantity
-                  : material.current_stock + formData.quantity
+                  ? material.current_stock - quantityNum
+                  : material.current_stock + quantityNum
                 } {material.unit}
               </p>
+              {formData.movement_type === 'adjustment' && (
+                <p className="text-xs text-gray-600 mt-1">
+                  {quantityNum > 0 
+                    ? `+${quantityNum} ${material.unit} (increase)`
+                    : `${quantityNum} ${material.unit} (decrease)`
+                  }
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -4015,7 +4383,7 @@ function StockMovementModal({ material, onSave, onClose }: {
             Cancel
           </button>
           <button
-            onClick={() => onSave(formData)}
+            onClick={() => onSave({ ...formData, quantity: quantityNum })}
             className={`px-4 py-2 rounded-lg ${
               isValid 
                 ? 'bg-blue-600 text-white hover:bg-blue-700' 
@@ -4394,6 +4762,11 @@ function PODetailsModal({ po, onClose }: {
             </div>
           </div>
           
+          {/* Delivery History */}
+          {po.id && (
+            <DeliveryHistorySection poId={po.id} />
+          )}
+          
           {/* Payment History */}
           {po.payments && po.payments.length > 0 && (
             <div>
@@ -4402,11 +4775,21 @@ function PODetailsModal({ po, onClose }: {
                 {po.payments.map((payment) => (
                   <div key={payment.id} className="bg-green-50 border border-green-200 rounded-md p-3">
                     <div className="flex justify-between items-center">
-                      <div>
+                      <div className="flex-1">
                         <p className="font-medium text-sm">{payment.payment_number}</p>
                         <p className="text-xs text-gray-600">
                           {new Date(payment.payment_date).toLocaleDateString()} - {payment.payment_method}
                         </p>
+                        {payment.proof_of_payment_url && (
+                          <a 
+                            href={payment.proof_of_payment_url} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1 mt-1"
+                          >
+                            📎 View Payment Receipt
+                          </a>
+                        )}
                       </div>
                       <p className="font-bold text-green-600">₱{payment.amount.toLocaleString()}</p>
                     </div>
@@ -4448,6 +4831,75 @@ function PODetailsModal({ po, onClose }: {
             Close
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// =============================================
+// DELIVERY HISTORY SECTION
+// =============================================
+
+function DeliveryHistorySection({ poId }: { poId: string }) {
+  const [deliveries, setDeliveries] = useState<DeliveryReceipt[]>([])
+  const [loading, setLoading] = useState(true)
+  
+  useEffect(() => {
+    loadDeliveries()
+  }, [poId])
+  
+  const loadDeliveries = async () => {
+    const { data } = await supabase
+      .from('delivery_receipts')
+      .select('*')
+      .eq('po_id', poId)
+      .order('delivery_date', { ascending: false })
+    
+    if (data) setDeliveries(data)
+    setLoading(false)
+  }
+  
+  if (loading) return <div className="text-sm text-gray-500">Loading deliveries...</div>
+  if (deliveries.length === 0) return null
+  
+  return (
+    <div>
+      <h3 className="font-medium mb-3">Delivery History</h3>
+      <div className="space-y-2">
+        {deliveries.map((delivery) => (
+          <div key={delivery.id} className="bg-blue-50 border border-blue-200 rounded-md p-3">
+            <div className="flex justify-between items-start">
+              <div className="flex-1">
+                <p className="font-medium text-sm">{delivery.receipt_number}</p>
+                <p className="text-xs text-gray-600">
+                  {new Date(delivery.delivery_date).toLocaleDateString()} - Received by {delivery.received_by}
+                </p>
+                <p className="text-xs text-gray-600">
+                  Condition: <span className={`font-medium ${
+                    delivery.condition === 'good' ? 'text-green-600' :
+                    delivery.condition === 'damaged' ? 'text-red-600' :
+                    'text-yellow-600'
+                  }`}>{delivery.condition === 'good' ? 'Complete' : delivery.condition}</span>
+                </p>
+                {delivery.delivery_receipt_url && (
+                  <a 
+                    href={delivery.delivery_receipt_url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1 mt-1"
+                  >
+                    📎 View Delivery Receipt
+                  </a>
+                )}
+                {!delivery.delivery_receipt_url && (
+                  <span className="text-xs text-red-500 mt-1 inline-block">
+                    ⚠️ No receipt attached
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )

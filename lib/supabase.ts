@@ -168,6 +168,7 @@ export type PurchaseOrderItem = {
   id: string
   po_id: string
   pr_item_id?: string
+  material_id?: string
   product_description: string
   quantity: number
   unit: string
@@ -177,6 +178,7 @@ export type PurchaseOrderItem = {
   quantity_remaining?: number
   notes?: string
   created_at?: string
+  material?: RawMaterial
 }
 
 export type POPayment = {
