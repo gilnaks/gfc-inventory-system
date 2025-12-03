@@ -638,7 +638,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
             Inventory
           </h1>
           <p className="text-sm text-gray-600">
-            Manage inventory for {selectedBrand.name}
+            Manage finished goods and stock levels for {selectedBrand.name}
           </p>
         </div>
         <div className="flex space-x-3">

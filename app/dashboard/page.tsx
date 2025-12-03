@@ -167,7 +167,7 @@ export default function DashboardPage() {
               <Lock className="h-6 w-6 text-blue-600" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Admin Dashboard</h2>
-            <p className="text-gray-600 mt-2">Enter passcode to access inventory management</p>
+            <p className="text-gray-600 mt-2">Enter passcode to access product management</p>
           </div>
           
           <form onSubmit={handleLogin} className="space-y-6">
@@ -447,7 +447,7 @@ export default function DashboardPage() {
               >
                 <div className="flex items-center space-x-1 sm:space-x-2">
                   <ClipboardList className="h-4 w-4" />
-                  <span>Purchasing</span>
+                  <span>Procurement</span>
                 </div>
               </button>
               <button
