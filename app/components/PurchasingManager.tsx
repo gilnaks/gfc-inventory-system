@@ -1946,7 +1946,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                   setSelectedMaterialForMovement(material)
                                   setShowStockMovementModal(true)
                                 }}
-                                className="p-1.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                                className="p-1.5 text-blue-600 hover:text-blue-800 rounded hover:bg-gray-100"
                                 title="Stock In/Out"
                               >
                                 <Package size={16} />
@@ -1957,7 +1957,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                   await loadMovementHistory(material.id)
                                   setShowMovementHistory(true)
                                 }}
-                                className="p-1.5 bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
+                                className="p-1.5 text-purple-600 hover:text-purple-800 rounded hover:bg-gray-100"
                                 title="History"
                               >
                                 <History size={16} />
@@ -1967,7 +1967,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                   setEditingMaterial(material)
                                   setShowMaterialModal(true)
                                 }}
-                                className="p-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                                className="p-1.5 text-gray-600 hover:text-gray-800 rounded hover:bg-gray-100"
                                 title="Edit"
                               >
                                 <Edit size={16} />
@@ -1987,7 +1987,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                     loadRawMaterials()
                                   }
                                 }}
-                                className="p-1.5 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                                className="p-1.5 text-red-600 hover:text-red-800 rounded hover:bg-gray-100"
                                 title="Delete"
                               >
                                 <Trash2 size={16} />
