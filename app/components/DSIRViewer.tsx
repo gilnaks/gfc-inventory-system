@@ -16,6 +16,11 @@ interface DSIRReport {
   net_sales: number
   total_cash: number
   discrepancy: number
+  big_cup_sales?: number
+  small_cup_sales?: number
+  water_sales?: number
+  ml_500_sales?: number
+  choco_coated_sales?: number
   status: 'draft' | 'submitted' | 'reviewed'
   notes: string
   created_at: string
@@ -759,6 +764,101 @@ export function DSIRViewer({
       const sales = sold * price
       
       return sum + sales
+    }, 0)
+  }
+  
+  const getProductSales = (productName: string) => {
+    return predefinedSalesItems.reduce((sum, itemObj, index) => {
+      const item = salesInventory.find(i => i.item_name === itemObj.name)
+      const itemId = item?.id || `new-${index}`
+      
+      // Check if item name matches the product we're looking for
+      const itemName = (itemObj.name || '').toString().toUpperCase().trim()
+      const searchName = productName.toUpperCase()
+      
+      if (itemName.includes(searchName)) {
+        const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
+        const price = itemObj.price || 0
+        const sales = sold * price
+        return sum + sales
+      }
+      
+      return sum
+    }, 0)
+  }
+  
+  const getBigCupSales = () => {
+    return predefinedSalesItems.reduce((sum, itemObj, index) => {
+      const item = salesInventory.find(i => i.item_name === itemObj.name)
+      const itemId = item?.id || `new-${index}`
+      const itemName = (itemObj.name || '').toString().toUpperCase().trim()
+      
+      if ((itemName.includes('BIG') && itemName.includes('CUP')) || itemName === 'BIGCUP' || itemName === 'BIG CUP') {
+        const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
+        const price = itemObj.price || 0
+        return sum + (sold * price)
+      }
+      return sum
+    }, 0)
+  }
+  
+  const getSmallCupSales = () => {
+    return predefinedSalesItems.reduce((sum, itemObj, index) => {
+      const item = salesInventory.find(i => i.item_name === itemObj.name)
+      const itemId = item?.id || `new-${index}`
+      const itemName = (itemObj.name || '').toString().toUpperCase().trim()
+      
+      if ((itemName.includes('SMALL') && itemName.includes('CUP')) || itemName === 'SMALLCUP' || itemName === 'SMALL CUP') {
+        const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
+        const price = itemObj.price || 0
+        return sum + (sold * price)
+      }
+      return sum
+    }, 0)
+  }
+  
+  const getWaterSales = () => {
+    return predefinedSalesItems.reduce((sum, itemObj, index) => {
+      const item = salesInventory.find(i => i.item_name === itemObj.name)
+      const itemId = item?.id || `new-${index}`
+      const itemName = (itemObj.name || '').toString().toUpperCase().trim()
+      
+      if (itemName.includes('WATER') || itemName === 'WATER') {
+        const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
+        const price = itemObj.price || 0
+        return sum + (sold * price)
+      }
+      return sum
+    }, 0)
+  }
+  
+  const get500MLSales = () => {
+    return predefinedSalesItems.reduce((sum, itemObj, index) => {
+      const item = salesInventory.find(i => i.item_name === itemObj.name)
+      const itemId = item?.id || `new-${index}`
+      const itemName = (itemObj.name || '').toString().toUpperCase().trim()
+      
+      if (itemName.includes('500') || itemName.includes('500ML') || itemName.includes('500 ML')) {
+        const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
+        const price = itemObj.price || 0
+        return sum + (sold * price)
+      }
+      return sum
+    }, 0)
+  }
+  
+  const getChocoCoatedSales = () => {
+    return predefinedSalesItems.reduce((sum, itemObj, index) => {
+      const item = salesInventory.find(i => i.item_name === itemObj.name)
+      const itemId = item?.id || `new-${index}`
+      const itemName = (itemObj.name || '').toString().toUpperCase().trim()
+      
+      if (itemName.includes('CHOCO') || itemName.includes('CHOCOLATE') || itemName.includes('COATED')) {
+        const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
+        const price = itemObj.price || 0
+        return sum + (sold * price)
+      }
+      return sum
     }, 0)
   }
 
@@ -2248,6 +2348,13 @@ export function DSIRViewer({
       const totalCash = getTotalCash()
       const discrepancy = getDiscrepancy()
       
+      // Calculate product-specific sales
+      const bigCupSales = getBigCupSales()
+      const smallCupSales = getSmallCupSales()
+      const waterSales = getWaterSales()
+      const ml500Sales = get500MLSales()
+      const chocoCoatedSales = getChocoCoatedSales()
+      
       // Then submit the report with calculated values
       const { error } = await supabase
         .from('dsir_reports')
@@ -2258,7 +2365,12 @@ export function DSIRViewer({
           total_expenses: totalExpenses,
           net_sales: netSales,
           total_cash: totalCash,
-          discrepancy: discrepancy
+          discrepancy: discrepancy,
+          big_cup_sales: bigCupSales,
+          small_cup_sales: smallCupSales,
+          water_sales: waterSales,
+          ml_500_sales: ml500Sales,
+          choco_coated_sales: chocoCoatedSales
         })
         .eq('id', report.id)
 
@@ -2274,7 +2386,12 @@ export function DSIRViewer({
           total_expenses: totalExpenses,
           net_sales: netSales,
           total_cash: totalCash,
-          discrepancy: discrepancy
+          discrepancy: discrepancy,
+          big_cup_sales: bigCupSales,
+          small_cup_sales: smallCupSales,
+          water_sales: waterSales,
+          ml_500_sales: ml500Sales,
+          choco_coated_sales: chocoCoatedSales
         })
       }
 

@@ -63,7 +63,12 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     setSelectedCategory('')
     setSelectedStaff('')
     setSelectedLocation('')
-    setSelectedCompanyOwned('')
+    // Keep ownership default for reports that use it
+    if (reportType === 'branch' || reportType === 'sales') {
+      setSelectedCompanyOwned('true')
+    } else {
+      setSelectedCompanyOwned('')
+    }
   }, [selectedBrand])
 
   useEffect(() => {
@@ -75,7 +80,12 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     setSelectedCategory('')
     setSelectedStaff('')
     setSelectedLocation('')
-    setSelectedCompanyOwned('')
+    // Set ownership default for reports that use it
+    if (reportType === 'branch' || reportType === 'sales') {
+      setSelectedCompanyOwned('true')
+    } else {
+      setSelectedCompanyOwned('')
+    }
     // Reset brand to prop brand when switching away from staff performance
     if (reportType !== 'staff' && propSelectedBrand) {
       setSelectedBrand(propSelectedBrand)
@@ -198,7 +208,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     }
   }
 
-  // Sales Report - filters: date range, branch
+  // Order Sales Report - filters: date range, branch
   const generateSalesReport = async () => {
     if (!selectedBrand) return
 
@@ -267,7 +277,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     }))
 
     setReportData({
-      type: 'Sales Report',
+      type: 'Order Sales Report',
       period: `${dateRange.start} to ${dateRange.end}`,
       summary: {
         totalSales,
@@ -656,6 +666,9 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     }
 
     const totalGrossSales = filteredReports.reduce((sum, r) => sum + (parseFloat(r.gross_sales) || 0), 0)
+    const totalNetSales = filteredReports.reduce((sum, r) => sum + (parseFloat(r.net_sales) || 0), 0)
+    const totalBigCupSales = filteredReports.reduce((sum, r) => sum + (parseFloat(r.big_cup_sales) || 0), 0)
+    const totalSmallCupSales = filteredReports.reduce((sum, r) => sum + (parseFloat(r.small_cup_sales) || 0), 0)
 
     // Fetch customer orders for quantity data
     let ordersQuery = supabase
@@ -698,6 +711,26 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     const salesOverTime = filteredReports.reduce((acc: any, report) => {
       const date = report.report_date
       acc[date] = (acc[date] || 0) + (parseFloat(report.gross_sales) || 0)
+      return acc
+    }, {})
+    
+    // Prepare net sales over time
+    const netSalesOverTime = filteredReports.reduce((acc: any, report) => {
+      const date = report.report_date
+      acc[date] = (acc[date] || 0) + (parseFloat(report.net_sales) || 0)
+      return acc
+    }, {})
+    
+    // Prepare big cup and small cup sales over time
+    const bigCupSalesOverTime = filteredReports.reduce((acc: any, report) => {
+      const date = report.report_date
+      acc[date] = (acc[date] || 0) + (parseFloat(report.big_cup_sales) || 0)
+      return acc
+    }, {})
+    
+    const smallCupSalesOverTime = filteredReports.reduce((acc: any, report) => {
+      const date = report.report_date
+      acc[date] = (acc[date] || 0) + (parseFloat(report.small_cup_sales) || 0)
       return acc
     }, {})
 
@@ -748,12 +781,18 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     // Combine sales and quantity data by date
     const allDates = new Set<string>()
     Object.keys(salesOverTime).forEach(date => allDates.add(date))
+    Object.keys(netSalesOverTime).forEach(date => allDates.add(date))
     Object.keys(quantityByDate).forEach(date => allDates.add(date))
+    Object.keys(bigCupSalesOverTime).forEach(date => allDates.add(date))
+    Object.keys(smallCupSalesOverTime).forEach(date => allDates.add(date))
 
     const lineGraphData = Array.from(allDates)
       .map(date => ({
         date,
         grossSales: Number(salesOverTime[date] || 0),
+        netSales: Number(netSalesOverTime[date] || 0),
+        bigCupSales: Number(bigCupSalesOverTime[date] || 0),
+        smallCupSales: Number(smallCupSalesOverTime[date] || 0),
         [categoryKey]: quantityByDate[date] || 0,
         categoryLabel // Store label for graph rendering
       }))
@@ -762,8 +801,9 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     // Calculate total quantity for the selected category
     const totalQuantity = Object.values(quantityByDate).reduce((sum, qty) => sum + qty, 0)
     
-    // Calculate sales per unit (total gross sales / total quantity)
-    const salesPerUnit = totalQuantity > 0 ? totalGrossSales / totalQuantity : 0
+    // Calculate sales per unit (big cups + small cups sales / total quantity)
+    const totalCupSales = totalBigCupSales + totalSmallCupSales
+    const salesPerUnit = totalQuantity > 0 ? totalCupSales / totalQuantity : 0
 
     // Prepare pie graph data - sales by location
     const salesByLocation = filteredReports.reduce((acc: any, report) => {
@@ -814,6 +854,9 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
       period: `${dateRange.start} to ${dateRange.end}`,
       summary: {
         totalGrossSales,
+        totalNetSales,
+        totalBigCupSales,
+        totalSmallCupSales,
         totalReports: filteredReports.length,
         totalQuantity,
         salesPerUnit,
@@ -848,10 +891,19 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
       
       // Format display key and value based on the field
       if (key === 'totalQuantity' && reportData.summary.categoryLabel) {
-        displayKey = `Total ${reportData.summary.categoryLabel} Quantity`
+        displayKey = `Total ${reportData.summary.categoryLabel} Delivery`
         displayValue = typeof value === 'number' ? value.toLocaleString() : String(value)
-      } else if (key === 'salesPerUnit') {
+      } else if (key === 'salesPerUnit' && reportData.type === 'Branch Performance Report (DSIR)') {
         displayKey = `Sales Per Pan`
+        displayValue = typeof value === 'number' ? `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : String(value)
+      } else if (key === 'totalNetSales' && reportData.type === 'Branch Performance Report (DSIR)') {
+        displayKey = `Net Sales`
+        displayValue = typeof value === 'number' ? `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : String(value)
+      } else if (key === 'totalBigCupSales' && reportData.type === 'Branch Performance Report (DSIR)') {
+        displayKey = `Big Cup Sales`
+        displayValue = typeof value === 'number' ? `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : String(value)
+      } else if (key === 'totalSmallCupSales' && reportData.type === 'Branch Performance Report (DSIR)') {
+        displayKey = `Small Cup Sales`
         displayValue = typeof value === 'number' ? `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : String(value)
       } else if (typeof value === 'number') {
         displayValue = (key.includes('Sales') || key.includes('Amount') || key.includes('Value') || key.includes('Payroll') || key.includes('Per')) 
@@ -868,7 +920,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
     // Add detailed data
     if (reportData.tableData) {
       csv += 'Data\n'
-      if (reportData.type === 'Sales Report') {
+      if (reportData.type === 'Order Sales Report') {
         csv += 'Date,Location,Amount\n'
         reportData.tableData.forEach((row: any) => {
           csv += `${row.date},${row.location},${row.amount}\n`
@@ -926,7 +978,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
             }`}
           >
             <DollarSign className={`h-6 w-6 mb-2 ${reportType === 'sales' ? 'text-blue-600' : 'text-gray-400'}`} />
-            <div className="font-medium text-sm">Sales Report</div>
+            <div className="font-medium text-sm">Order Sales Report</div>
           </button>
           <button
             onClick={() => setReportType('product')}
@@ -1057,9 +1109,24 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
             />
           </div>
 
-          {/* Sales Report Filters */}
+          {/* Order Sales Report Filters */}
           {reportType === 'sales' && (
             <>
+              <div className="flex-shrink-0 min-w-[150px]">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Ownership</label>
+                <select
+                  value={selectedCompanyOwned}
+                  onChange={(e) => {
+                    setSelectedCompanyOwned(e.target.value)
+                    setSelectedBranch('') // Reset branch when ownership changes
+                  }}
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">All</option>
+                  <option value="true">Company Owned</option>
+                  <option value="false">Franchise</option>
+                </select>
+              </div>
               <div className="flex-shrink-0 min-w-[150px]">
                 <label className="block text-xs font-medium text-gray-700 mb-1">Branch</label>
                 <select
@@ -1068,21 +1135,17 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                   className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
                   <option value="">All Branches</option>
-                  {branches.map(branch => (
-                    <option key={branch.id} value={branch.id}>{branch.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex-shrink-0 min-w-[150px]">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Ownership</label>
-                <select
-                  value={selectedCompanyOwned}
-                  onChange={(e) => setSelectedCompanyOwned(e.target.value)}
-                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="">All</option>
-                  <option value="true">Company Owned</option>
-                  <option value="false">Franchise</option>
+                  {branches
+                    .filter(branch => {
+                      if (selectedCompanyOwned === '') return true
+                      if (selectedCompanyOwned === 'true') return branch.company_owned === true
+                      if (selectedCompanyOwned === 'false') return branch.company_owned === false
+                      return true
+                    })
+                    .map(branch => (
+                      <option key={branch.id} value={branch.id}>{branch.name}</option>
+                    ))
+                  }
                 </select>
               </div>
             </>
@@ -1175,6 +1238,21 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
           {reportType === 'branch' && (
             <>
               <div className="flex-shrink-0 min-w-[150px]">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Ownership</label>
+                <select
+                  value={selectedCompanyOwned}
+                  onChange={(e) => {
+                    setSelectedCompanyOwned(e.target.value)
+                    setSelectedLocation('') // Reset location when ownership changes
+                  }}
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">All</option>
+                  <option value="true">Company Owned</option>
+                  <option value="false">Franchise</option>
+                </select>
+              </div>
+              <div className="flex-shrink-0 min-w-[150px]">
                 <label className="block text-xs font-medium text-gray-700 mb-1">Location</label>
                 <select
                   value={selectedLocation}
@@ -1182,21 +1260,17 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                   className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
                   <option value="">All Locations</option>
-                  {locations.map(loc => (
-                    <option key={loc.id} value={loc.id}>{loc.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex-shrink-0 min-w-[150px]">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Ownership</label>
-                <select
-                  value={selectedCompanyOwned}
-                  onChange={(e) => setSelectedCompanyOwned(e.target.value)}
-                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="">All</option>
-                  <option value="true">Company Owned</option>
-                  <option value="false">Franchise</option>
+                  {locations
+                    .filter(loc => {
+                      if (selectedCompanyOwned === '') return true // Show all if "All" is selected
+                      if (selectedCompanyOwned === 'true') return loc.company_owned === true
+                      if (selectedCompanyOwned === 'false') return loc.company_owned === false
+                      return true
+                    })
+                    .map(loc => (
+                      <option key={loc.id} value={loc.id}>{loc.name}</option>
+                    ))
+                  }
                 </select>
               </div>
             </>
@@ -1256,10 +1330,70 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
           {/* Summary */}
           <div className="mb-6">
             <h3 className="text-md font-semibold text-gray-900 mb-3">Summary</h3>
+            
+            {/* Branch Performance Report - Custom Layout */}
+            {reportData.type === 'Branch Performance Report (DSIR)' && (
+              <>
+                {/* Main Metrics Row */}
+                <div className="grid grid-cols-4 gap-4 mb-4">
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600 mb-1">Total Gross Sales</p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      ₱{reportData.summary.totalGrossSales?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600 mb-1">Total Net Sales</p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      ₱{reportData.summary.totalNetSales?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600 mb-1">Total Reports</p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      {reportData.summary.totalReports?.toLocaleString() || '0'}
+                    </p>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <p className="text-sm text-gray-600 mb-1">
+                      {reportData.summary.categoryLabel ? `Total ${reportData.summary.categoryLabel} Delivery` : 'Total Quantity'}
+                    </p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      {reportData.summary.totalQuantity?.toLocaleString() || '0'}
+                    </p>
+                  </div>
+                </div>
+                
+                {/* Cup Sales Row */}
+                <div className="grid grid-cols-3 gap-4 mb-4">
+                  <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                    <p className="text-sm text-gray-600 mb-1">Big Cup Sales</p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      ₱{reportData.summary.totalBigCupSales?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                    </p>
+                  </div>
+                  <div className="bg-purple-50 p-4 rounded-lg border border-purple-200">
+                    <p className="text-sm text-gray-600 mb-1">Small Cup Sales</p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      ₱{reportData.summary.totalSmallCupSales?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                    </p>
+                  </div>
+                  <div className="bg-green-50 p-4 rounded-lg border border-green-200">
+                    <p className="text-sm text-gray-600 mb-1">Sales Per Pan</p>
+                    <p className="text-xl font-semibold text-gray-900">
+                      ₱{reportData.summary.salesPerUnit?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+                    </p>
+                  </div>
+                </div>
+              </>
+            )}
+            
+            {/* Other Summary Items */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {Object.entries(reportData.summary).map(([key, value]) => {
-                // Skip categoryLabel as it's just metadata
-                if (key === 'categoryLabel') return null
+                // Skip these as they're in their own row for branch performance
+                if (reportData.type === 'Branch Performance Report (DSIR)' && 
+                    (key === 'categoryLabel' || key === 'totalGrossSales' || key === 'totalNetSales' || key === 'totalBigCupSales' || key === 'totalSmallCupSales' || key === 'salesPerUnit' || key === 'totalReports' || key === 'totalQuantity')) return null
                 
                 let displayKey = key.replace(/([A-Z])/g, ' $1').trim()
                 let displayValue: string = ''
@@ -1268,9 +1402,6 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                 if (key === 'totalQuantity' && reportData.summary.categoryLabel) {
                   displayKey = `Total ${reportData.summary.categoryLabel} Quantity`
                   displayValue = typeof value === 'number' ? value.toLocaleString() : String(value)
-                } else if (key === 'salesPerUnit') {
-                  displayKey = `Sales Per Pan`
-                  displayValue = typeof value === 'number' ? `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : String(value)
                 } else if (typeof value === 'number') {
                   displayValue = (key.includes('Sales') || key.includes('Amount') || key.includes('Value') || key.includes('Payroll') || key.includes('Per')) 
                     ? `₱${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
@@ -1290,11 +1421,11 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
           </div>
 
           {/* Charts */}
-          {reportData.type === 'Sales Report' && (
+          {reportData.type === 'Order Sales Report' && (
             <div className="mb-6 space-y-6">
               {reportData.dailySalesData && reportData.dailySalesData.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold text-gray-900 mb-3">Sales Over Time (Line Graph)</h3>
+                  <h3 className="text-md font-semibold text-gray-900 mb-3">Sales Over Time</h3>
                   <ResponsiveContainer width="100%" height={300}>
                     <LineChart data={reportData.dailySalesData} margin={{ top: 5, right: 30, left: 20, bottom: 60 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -1322,7 +1453,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
               )}
               {reportData.salesByLocationData && reportData.salesByLocationData.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold text-gray-900 mb-3">Sales by Location (Bar Graph)</h3>
+                  <h3 className="text-md font-semibold text-gray-900 mb-3">Sales by Location</h3>
                   <ResponsiveContainer width="100%" height={300}>
                     <BarChart data={reportData.salesByLocationData} margin={{ top: 5, right: 30, left: 20, bottom: 80 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -1355,7 +1486,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
             <div className="mb-6 space-y-6">
               {reportData.barGraphData && reportData.barGraphData.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold text-gray-900 mb-3">Product Performance (Bar Graph)</h3>
+                  <h3 className="text-md font-semibold text-gray-900 mb-3">Product Performance</h3>
                   <ResponsiveContainer width="100%" height={400}>
                     <BarChart data={reportData.barGraphData} layout="vertical" margin={{ top: 5, right: 30, left: 150, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -1388,7 +1519,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
               )}
               {reportData.pieGraphData && reportData.pieGraphData.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold text-gray-900 mb-3">Product Distribution (Pie Graph)</h3>
+                  <h3 className="text-md font-semibold text-gray-900 mb-3">Product Distribution</h3>
                   <ResponsiveContainer width="100%" height={400}>
                     <PieChart>
                       <Pie
@@ -1428,7 +1559,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
             <div className="mb-6">
               {reportData.lineGraphData && reportData.lineGraphData.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold text-gray-900 mb-3">Average Sales Over Time (Line Graph)</h3>
+                  <h3 className="text-md font-semibold text-gray-900 mb-3">Average Sales Over Time</h3>
                   <ResponsiveContainer width="100%" height={300}>
                     <LineChart data={reportData.lineGraphData} margin={{ top: 5, right: 30, left: 20, bottom: 60 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -1470,7 +1601,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
             <div className="mb-6 space-y-6">
               {reportData.lineGraphData && reportData.lineGraphData.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold text-gray-900 mb-3">Gross Sales & Product Quantities Over Time (Line Graph)</h3>
+                  <h3 className="text-md font-semibold text-gray-900 mb-3">Sales Breakdown & Product Quantities Over Time</h3>
                   <ResponsiveContainer width="100%" height={400}>
                     <LineChart data={reportData.lineGraphData} margin={{ top: 5, right: 50, left: 20, bottom: 60 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -1486,7 +1617,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                         yAxisId="sales"
                         tick={{ fontSize: 12 }}
                         tickFormatter={(value) => `₱${(value / 1000).toFixed(0)}k`}
-                        label={{ value: 'Gross Sales (₱)', angle: -90, position: 'insideLeft' }}
+                        label={{ value: 'Sales (₱)', angle: -90, position: 'insideLeft' }}
                       />
                       <YAxis 
                         yAxisId="quantity"
@@ -1494,14 +1625,14 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                         tick={{ fontSize: 12 }}
                         tickFormatter={(value) => value.toLocaleString()}
                         label={{ 
-                          value: reportData.categoryLabel ? `${reportData.categoryLabel} Quantity` : 'Quantity', 
+                          value: reportData.categoryLabel ? `${reportData.categoryLabel} Delivery Quantity` : 'Quantity', 
                           angle: 90, 
                           position: 'insideRight' 
                         }}
                       />
                       <Tooltip 
                         formatter={(value: any, name: string) => {
-                          if (name === 'Gross Sales') {
+                          if (name === 'Gross Sales' || name === 'Net Sales' || name === 'Big Cup Sales' || name === 'Small Cup Sales') {
                             return `₱${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                           }
                           return `${Number(value).toLocaleString()} units`
@@ -1517,18 +1648,42 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                         strokeWidth={2} 
                         name="Gross Sales" 
                       />
+                      <Line 
+                        yAxisId="sales"
+                        type="monotone" 
+                        dataKey="netSales" 
+                        stroke="#10b981" 
+                        strokeWidth={2} 
+                        name="Net Sales" 
+                      />
+                      <Line 
+                        yAxisId="sales"
+                        type="monotone" 
+                        dataKey="bigCupSales" 
+                        stroke="#8b5cf6" 
+                        strokeWidth={2} 
+                        name="Big Cup Sales" 
+                      />
+                      <Line 
+                        yAxisId="sales"
+                        type="monotone" 
+                        dataKey="smallCupSales" 
+                        stroke="#ec4899" 
+                        strokeWidth={2} 
+                        name="Small Cup Sales" 
+                      />
                       {reportData.categoryKey && reportData.categoryLabel && (
                         <Line 
                           yAxisId="quantity"
                           type="monotone" 
                           dataKey={reportData.categoryKey} 
                           stroke={
-                            reportData.categoryKey === 'iceCream' ? '#10b981' :
-                            reportData.categoryKey === 'gelato' ? '#f59e0b' :
+                            reportData.categoryKey === 'iceCream' ? '#f59e0b' :
+                            reportData.categoryKey === 'gelato' ? '#06b6d4' :
                             '#ef4444'
                           }
                           strokeWidth={2} 
-                          name={reportData.categoryLabel} 
+                          name={`${reportData.categoryLabel} Delivery`} 
                         />
                       )}
                     </LineChart>
@@ -1538,7 +1693,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {reportData.pieGraphData && reportData.pieGraphData.length > 0 && (
                   <div>
-                    <h3 className="text-md font-semibold text-gray-900 mb-3">Sales by Location (Pie Graph)</h3>
+                    <h3 className="text-md font-semibold text-gray-900 mb-3">Sales by Location</h3>
                     <ResponsiveContainer width="100%" height={400}>
                       <PieChart>
                         <Pie
@@ -1577,7 +1732,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
                 {reportData.pansPieGraphData && reportData.pansPieGraphData.length > 0 && (
                   <div>
                     <h3 className="text-md font-semibold text-gray-900 mb-3">
-                      {reportData.categoryLabel ? `${reportData.categoryLabel} Pans by Location (Pie Graph)` : 'Pans by Location (Pie Graph)'}
+                      {reportData.categoryLabel ? `${reportData.categoryLabel} Pans by Location` : 'Pans by Location'}
                     </h3>
                     <ResponsiveContainer width="100%" height={400}>
                       <PieChart>
@@ -1625,7 +1780,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                    {reportData.type === 'Sales Report' && (
+                    {reportData.type === 'Order Sales Report' && (
                     <>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
@@ -1660,7 +1815,7 @@ export function ReportsManager({ selectedBrand: propSelectedBrand, theme = 'blue
               <tbody className="bg-white divide-y divide-gray-200">
                   {reportData.tableData.slice(0, 50).map((row: any, index: number) => (
                     <tr key={index}>
-                      {reportData.type === 'Sales Report' && (
+                      {reportData.type === 'Order Sales Report' && (
                         <>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{row.date}</td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{row.location}</td>

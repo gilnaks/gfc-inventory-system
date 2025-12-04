@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { supabase, Brand, Supplier, PurchaseOrder, PurchaseOrderItem, POPayment, DeliveryReceipt, PurchaseRequisition, RawMaterial, MaterialStockMovement } from '../../lib/supabase'
+import { supabase, Brand, Supplier, PurchaseOrder, PurchaseOrderItem, POPayment, DeliveryReceipt, PurchaseRequisition, RawMaterial, MaterialStockMovement, POStatusHistory } from '../../lib/supabase'
+import { Package, History, Edit, Trash2, Clock } from 'lucide-react'
 
 interface PurchasingManagerProps {
   selectedBrand?: Brand | null
@@ -72,16 +73,36 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
   
+  // Pagination
+  const [currentPOPage, setCurrentPOPage] = useState(1)
+  const [transactionPagination, setTransactionPagination] = useState<{ [supplierId: string]: number }>({})
+  const PO_PER_PAGE = 10
+  const TRANSACTIONS_PER_SUPPLIER = 5
+  
+  // Supplier Lead Times
+  const [supplierLeadTimes, setSupplierLeadTimes] = useState<{ [supplierId: string]: { avgDays: number; completedPOs: number } }>({})
+
+  
   useEffect(() => {
     loadSuppliers()
-    if (selectedBrand) {
-      loadPurchaseOrders()
-      loadPayments()
-      loadDeliveries()
-      loadRequisitions()
-      loadRawMaterials()
-    }
+    loadPurchaseOrders()
+    loadPayments()
+    loadDeliveries()
+    loadRequisitions()
+    loadRawMaterials()
   }, [selectedBrand])
+  
+  // Reset pagination when filters change
+  useEffect(() => {
+    setCurrentPOPage(1)
+  }, [statusFilter, searchTerm])
+  
+  // Calculate supplier lead times when suppliers tab is active
+  useEffect(() => {
+    if (activeTab === 'suppliers') {
+      calculateSupplierLeadTimes()
+    }
+  }, [activeTab, selectedBrand])
   
   // =============================================
   // LOAD DATA FUNCTIONS
@@ -96,8 +117,6 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   }
   
   const loadPurchaseOrders = async () => {
-    if (!selectedBrand) return
-    
     const { data, error } = await supabase
       .from('purchase_orders')
       .select(`
@@ -106,15 +125,12 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
         items:purchase_order_items(*, material:raw_materials(*)),
         payments:po_payments(*)
       `)
-      .eq('brand_id', selectedBrand.id)
       .order('created_at', { ascending: false })
     
     if (data) setPurchaseOrders(data as PurchaseOrder[])
   }
   
   const loadPayments = async () => {
-    if (!selectedBrand) return
-    
     const { data, error } = await supabase
       .from('po_payments')
       .select(`
@@ -127,13 +143,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   }
   
   const loadDeliveries = async () => {
-    if (!selectedBrand) return
-    
-    // Get all PO IDs for this brand first
+    // Get all POs
     const { data: pos } = await supabase
       .from('purchase_orders')
       .select('id, po_number, supplier_id')
-      .eq('brand_id', selectedBrand.id)
     
     if (!pos || pos.length === 0) {
       setDeliveries([])
@@ -186,24 +199,19 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   }
   
   const loadRequisitions = async () => {
-    if (!selectedBrand) return
-    
     const { data, error } = await supabase
       .from('purchase_requisitions')
       .select('*')
-      .eq('brand_id', selectedBrand.id)
       .order('created_at', { ascending: false })
     
     if (data) setRequisitions(data)
   }
   
   const loadRawMaterials = async () => {
-    if (!selectedBrand) return
-    
     const { data, error } = await supabase
       .from('raw_materials')
       .select('*, supplier:suppliers(*)')
-      .eq('brand_id', selectedBrand.id)
+      .order('supplier_id', { ascending: true, nullsFirst: false })
       .order('material_name')
     
     if (data) setRawMaterials(data as RawMaterial[])
@@ -218,6 +226,56 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       .order('created_at', { ascending: false })
     
     if (data) setMovementHistory(data)
+  }
+  
+  const calculateSupplierLeadTimes = async () => {
+    // Get all completed/delivered POs with their status history
+    const { data: completedPOs } = await supabase
+      .from('purchase_orders')
+      .select('id, supplier_id, created_at')
+      .in('status', ['delivered', 'paid', 'closed'])
+    
+    if (!completedPOs || completedPOs.length === 0) return
+    
+    const leadTimeData: { [supplierId: string]: { totalDays: number; count: number } } = {}
+    
+    for (const po of completedPOs) {
+      // Get status history for this PO
+      const { data: history } = await supabase
+        .from('po_status_history')
+        .select('new_status, created_at')
+        .eq('po_id', po.id)
+        .order('created_at', { ascending: true })
+      
+      if (!history || history.length === 0) continue
+      
+      // Find when PO was created (approved/order_confirmed) and when delivered
+      const startStatus = history.find(h => ['approved', 'order_confirmed'].includes(h.new_status))
+      const deliveredStatus = history.find(h => h.new_status === 'delivered')
+      
+      if (startStatus && deliveredStatus) {
+        const startDate = new Date(startStatus.created_at!)
+        const endDate = new Date(deliveredStatus.created_at!)
+        const diffDays = (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)
+        
+        if (!leadTimeData[po.supplier_id]) {
+          leadTimeData[po.supplier_id] = { totalDays: 0, count: 0 }
+        }
+        leadTimeData[po.supplier_id].totalDays += diffDays
+        leadTimeData[po.supplier_id].count += 1
+      }
+    }
+    
+    // Calculate averages
+    const avgLeadTimes: { [supplierId: string]: { avgDays: number; completedPOs: number } } = {}
+    for (const [supplierId, data] of Object.entries(leadTimeData)) {
+      avgLeadTimes[supplierId] = {
+        avgDays: Math.round(data.totalDays / data.count),
+        completedPOs: data.count
+      }
+    }
+    
+    setSupplierLeadTimes(avgLeadTimes)
   }
   
   // =============================================
@@ -904,6 +962,13 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     return matchesStatus && matchesSearch
   })
   
+  // Pagination for Purchase Orders
+  const totalPOPages = Math.ceil(filteredPurchaseOrders.length / PO_PER_PAGE)
+  const paginatedPurchaseOrders = filteredPurchaseOrders.slice(
+    (currentPOPage - 1) * PO_PER_PAGE,
+    currentPOPage * PO_PER_PAGE
+  )
+  
   // =============================================
   // STATUS BADGE FUNCTION
   // =============================================
@@ -1058,7 +1123,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
               
               {/* PO List */}
               <div className="space-y-3">
-                {filteredPurchaseOrders.map((po) => (
+                {paginatedPurchaseOrders.map((po) => (
                   <div key={po.id} className="border rounded-lg p-4 hover:bg-gray-50">
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
@@ -1082,6 +1147,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                           <div>
                             <span className="text-gray-500">Balance:</span>
                             <span className="ml-2 font-medium text-red-600">₱{po.balance_amount.toLocaleString()}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Purchasing Agent:</span>
+                            <span className="ml-2">{po.purchasing_agent}</span>
                           </div>
                           <div>
                             <span className="text-gray-500">Payment:</span>
@@ -1135,7 +1204,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                         )}
                         {po.status === 'approved' && (
                           <>
-                            {po.payment_timing === 'before_delivery' && po.balance_amount > 0 && (
+                            {(po.payment_timing === 'before_delivery' || po.payment_terms === 'Payment upon order' || po.payment_terms === 'Payment before delivery') && po.balance_amount > 0 && (
                               <button
                                 onClick={() => {
                                   setSelectedPOForPayment(po)
@@ -1155,25 +1224,51 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                           </>
                         )}
                         {po.status === 'order_confirmed' && (
-                          <button
-                            onClick={() => updatePOStatus(po.id, 'in_transit')}
-                            className="px-3 py-1 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
-                          >
-                            Mark In Transit
-                          </button>
+                          <>
+                            {po.payment_timing === 'before_delivery' && po.balance_amount > 0 && (
+                              <button
+                                onClick={() => {
+                                  setSelectedPOForPayment(po)
+                                  setShowPaymentModal(true)
+                                }}
+                                className="px-3 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                              >
+                                Add Payment
+                              </button>
+                            )}
+                            <button
+                              onClick={() => updatePOStatus(po.id, 'in_transit')}
+                              className="px-3 py-1 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
+                            >
+                              Mark In Transit
+                            </button>
+                          </>
                         )}
                         {po.status === 'in_transit' && (
-                          <button
-                            onClick={() => {
-                              setSelectedPOForDelivery(po)
-                              setShowDeliveryModal(true)
-                            }}
-                            className="px-3 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200"
-                          >
-                            Record Delivery
-                          </button>
+                          <>
+                            {po.payment_timing === 'before_delivery' && po.balance_amount > 0 && (
+                              <button
+                                onClick={() => {
+                                  setSelectedPOForPayment(po)
+                                  setShowPaymentModal(true)
+                                }}
+                                className="px-3 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                              >
+                                Add Payment
+                              </button>
+                            )}
+                            <button
+                              onClick={() => {
+                                setSelectedPOForDelivery(po)
+                                setShowDeliveryModal(true)
+                              }}
+                              className="px-3 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200"
+                            >
+                              Record Delivery
+                            </button>
+                          </>
                         )}
-                        {po.status === 'delivered' && po.payment_timing === 'after_delivery' && po.balance_amount > 0 && (
+                        {po.status === 'delivered' && po.balance_amount > 0 && (
                           <button
                             onClick={() => {
                               setSelectedPOForPayment(po)
@@ -1254,6 +1349,44 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                   </div>
                 )}
               </div>
+              
+              {/* Pagination Controls */}
+              {totalPOPages > 1 && (
+                <div className="flex justify-center items-center gap-2 mt-4">
+                  <button
+                    onClick={() => setCurrentPOPage(prev => Math.max(1, prev - 1))}
+                    disabled={currentPOPage === 1}
+                    className="px-3 py-1 text-sm border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <div className="flex gap-1">
+                    {Array.from({ length: totalPOPages }, (_, i) => i + 1).map(page => (
+                      <button
+                        key={page}
+                        onClick={() => setCurrentPOPage(page)}
+                        className={`px-3 py-1 text-sm border rounded ${
+                          currentPOPage === page 
+                            ? 'bg-blue-600 text-white border-blue-600' 
+                            : 'hover:bg-gray-50'
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => setCurrentPOPage(prev => Math.min(totalPOPages, prev + 1))}
+                    disabled={currentPOPage === totalPOPages}
+                    className="px-3 py-1 text-sm border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                  <span className="text-sm text-gray-600 ml-2">
+                    Page {currentPOPage} of {totalPOPages} ({filteredPurchaseOrders.length} total)
+                  </span>
+                </div>
+              )}
             </div>
           )}
           
@@ -1277,6 +1410,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 {suppliers.map((supplier) => {
                   // Count products for this supplier
                   const productCount = rawMaterials.filter(m => m.supplier_id === supplier.id).length
+                  const leadTime = supplierLeadTimes[supplier.id]
                   
                   return (
                   <div key={supplier.id} className="border rounded-lg p-4 hover:bg-gray-50">
@@ -1293,6 +1427,21 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                         {supplier.contact_person && (
                           <p className="text-sm text-gray-600">{supplier.contact_person}</p>
                         )}
+                        
+                        {/* Lead Time Badge */}
+                        {leadTime && (
+                          <div className="mt-2 mb-1">
+                            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-green-50 border border-green-200 rounded-lg">
+                              <Clock size={14} className="text-green-600" />
+                              <div className="text-xs">
+                                <span className="font-semibold text-green-900">{leadTime.avgDays} days</span>
+                                <span className="text-green-700"> avg lead time</span>
+                                <span className="text-green-600 ml-1">({leadTime.completedPOs} POs)</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        
                           <div className="mt-2 space-y-1 text-sm">
                             {supplier.phone && (
                               <p className="text-gray-600 flex items-center gap-2">
@@ -1389,17 +1538,26 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                     supplierGroups[supplierId].pos[poId].deliveries.push(delivery)
                   })
                   
-                  return Object.entries(supplierGroups).map(([supplierId, supplier]) => (
-                    <div key={supplierId} className="border border-gray-200 rounded-lg bg-white">
-                      {/* Supplier Header */}
-                      <div className="bg-gray-50 border-b border-gray-200 px-4 py-3">
-                        <h3 className="font-semibold text-lg text-gray-900">{supplier.name}</h3>
-                        <p className="text-xs text-gray-500">{Object.keys(supplier.pos).length} PO{Object.keys(supplier.pos).length !== 1 ? 's' : ''}</p>
-                      </div>
-                      
-                      {/* POs under this supplier */}
-                      <div className="p-4 space-y-3">
-                        {Object.entries(supplier.pos).map(([poId, poData]) => (
+                  return Object.entries(supplierGroups).map(([supplierId, supplier]) => {
+                    const posArray = Object.entries(supplier.pos)
+                    const currentPage = transactionPagination[supplierId] || 1
+                    const totalPages = Math.ceil(posArray.length / TRANSACTIONS_PER_SUPPLIER)
+                    const paginatedPOs = posArray.slice(
+                      (currentPage - 1) * TRANSACTIONS_PER_SUPPLIER,
+                      currentPage * TRANSACTIONS_PER_SUPPLIER
+                    )
+                    
+                    return (
+                      <div key={supplierId} className="border border-gray-200 rounded-lg bg-white">
+                        {/* Supplier Header */}
+                        <div className="bg-gray-50 border-b border-gray-200 px-4 py-3">
+                          <h3 className="font-semibold text-lg text-gray-900">{supplier.name}</h3>
+                          <p className="text-xs text-gray-500">{Object.keys(supplier.pos).length} PO{Object.keys(supplier.pos).length !== 1 ? 's' : ''}</p>
+                        </div>
+                        
+                        {/* POs under this supplier */}
+                        <div className="p-4 space-y-3">
+                          {paginatedPOs.map(([poId, poData]) => (
                           <div key={poId} className="border border-gray-200 rounded-md p-3">
                             {/* PO Number and View Button */}
                             <div className="flex justify-between items-center mb-3 pb-2 border-b border-gray-200">
@@ -1499,9 +1657,39 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                             </div>
                           </div>
                         ))}
+                        
+                        {/* Pagination Controls for this supplier */}
+                        {totalPages > 1 && (
+                          <div className="flex justify-center items-center gap-2 mt-4 pt-3 border-t">
+                            <button
+                              onClick={() => setTransactionPagination(prev => ({
+                                ...prev,
+                                [supplierId]: Math.max(1, (prev[supplierId] || 1) - 1)
+                              }))}
+                              disabled={currentPage === 1}
+                              className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              Prev
+                            </button>
+                            <span className="text-xs text-gray-600">
+                              {currentPage} / {totalPages}
+                            </span>
+                            <button
+                              onClick={() => setTransactionPagination(prev => ({
+                                ...prev,
+                                [supplierId]: Math.min(totalPages, (prev[supplierId] || 1) + 1)
+                              }))}
+                              disabled={currentPage === totalPages}
+                              className="px-2 py-1 text-xs border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              Next
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  ))
+                  )}
+                  )
                 })()}
                 
                 {payments.length === 0 && deliveries.length === 0 && (
@@ -1667,109 +1855,150 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 </button>
               </div>
               
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {rawMaterials.map((material) => {
-                  const stockStatus = 
-                    material.current_stock <= 0 ? 'out' :
-                    material.current_stock <= material.minimum_stock ? 'low' : 'normal'
-                  
-                  return (
-                    <div key={material.id} className="border rounded-lg p-4 hover:bg-gray-50">
-                      <div className="flex justify-between items-start mb-3">
-                        <div className="flex-1">
-                          <h3 className="font-semibold text-lg">{material.material_name}</h3>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            {material.category && (
-                              <span className="text-xs text-gray-500">{material.category}</span>
-                            )}
-                            {material.supplier && (
-                              <span className="text-xs text-purple-600">• {material.supplier.name}</span>
-                            )}
-                          </div>
-                        </div>
-                        <span className={`px-2 py-1 text-xs font-medium rounded ${
-                          stockStatus === 'out' ? 'bg-red-100 text-red-800' :
-                          stockStatus === 'low' ? 'bg-yellow-100 text-yellow-800' :
-                          'bg-green-100 text-green-800'
-                        }`}>
-                          {stockStatus === 'out' ? 'Out of Stock' :
-                           stockStatus === 'low' ? 'Low Stock' : 'In Stock'}
-                        </span>
-                      </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 border rounded-lg">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Material Name
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Supplier
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Category
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Status
+                      </th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Current Stock
+                      </th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Min Stock
+                      </th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Unit Cost
+                      </th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Stock Value
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
+                        Actions
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {rawMaterials.map((material) => {
+                      const stockStatus = 
+                        material.current_stock <= 0 ? 'out' :
+                        material.current_stock <= material.minimum_stock ? 'low' : 'normal'
                       
-                      <div className="space-y-2 text-sm">
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">Current Stock:</span>
-                          <span className="font-semibold">{material.current_stock} {material.unit}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">Minimum Level:</span>
-                          <span>{material.minimum_stock} {material.unit}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">Unit Cost:</span>
-                          <span>₱{material.unit_cost.toLocaleString()}</span>
-                        </div>
-                        <div className="flex justify-between pt-2 border-t">
-                          <span className="text-gray-600">Stock Value:</span>
-                          <span className="font-semibold text-blue-600">
-                            ₱{(material.current_stock * material.unit_cost).toLocaleString()}
-                          </span>
-                        </div>
-                      </div>
-                      
-                      <div className="mt-4 flex gap-2">
-                        <button
-                          onClick={() => {
-                            setSelectedMaterialForMovement(material)
-                            setShowStockMovementModal(true)
-                          }}
-                          className="flex-1 px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
-                        >
-                          Stock In/Out
-                        </button>
-                        <button
-                          onClick={async () => {
-                            setSelectedMaterialForHistory(material)
-                            await loadMovementHistory(material.id)
-                            setShowMovementHistory(true)
-                          }}
-                          className="px-3 py-1.5 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
-                        >
-                          History
-                        </button>
-                        <button
-                          onClick={() => {
-                            setEditingMaterial(material)
-                            setShowMaterialModal(true)
-                          }}
-                          className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={async () => {
-                            if (!confirm(`Delete "${material.material_name}"?\n\nThis will also delete all stock movement history.`)) return
-                            
-                            const { error } = await supabase
-                              .from('raw_materials')
-                              .delete()
-                              .eq('id', material.id)
-                            
-                            if (error) {
-                              alert(`Error deleting material: ${error.message}`)
-                            } else {
-                              loadRawMaterials()
-                            }
-                          }}
-                          className="px-3 py-1.5 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })}
+                      return (
+                        <tr key={material.id} className="bg-white hover:bg-blue-50 transition-all duration-200 hover:shadow-sm">
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="text-sm font-medium text-gray-900">{material.material_name}</div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="text-sm text-purple-600">
+                              {material.supplier ? material.supplier.name : '-'}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <div className="text-sm text-gray-500">
+                              {material.category || '-'}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <span className={`px-2 py-1 text-xs font-medium rounded ${
+                              stockStatus === 'out' ? 'bg-red-100 text-red-800' :
+                              stockStatus === 'low' ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-green-100 text-green-800'
+                            }`}>
+                              {stockStatus === 'out' ? 'Out of Stock' :
+                               stockStatus === 'low' ? 'Low Stock' : 'In Stock'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-right">
+                            <div className="text-sm font-semibold text-gray-900">
+                              {material.current_stock} {material.unit}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-right">
+                            <div className="text-sm text-gray-600">
+                              {material.minimum_stock} {material.unit}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-right">
+                            <div className="text-sm text-gray-600">
+                              ₱{material.unit_cost.toLocaleString()}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-right">
+                            <div className="text-sm font-semibold text-blue-600">
+                              ₱{(material.current_stock * material.unit_cost).toLocaleString()}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap text-center">
+                            <div className="flex gap-2 justify-center">
+                              <button
+                                onClick={() => {
+                                  setSelectedMaterialForMovement(material)
+                                  setShowStockMovementModal(true)
+                                }}
+                                className="p-1.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                                title="Stock In/Out"
+                              >
+                                <Package size={16} />
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  setSelectedMaterialForHistory(material)
+                                  await loadMovementHistory(material.id)
+                                  setShowMovementHistory(true)
+                                }}
+                                className="p-1.5 bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
+                                title="History"
+                              >
+                                <History size={16} />
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setEditingMaterial(material)
+                                  setShowMaterialModal(true)
+                                }}
+                                className="p-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                                title="Edit"
+                              >
+                                <Edit size={16} />
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  if (!confirm(`Delete "${material.material_name}"?\n\nThis will also delete all stock movement history.`)) return
+                                  
+                                  const { error } = await supabase
+                                    .from('raw_materials')
+                                    .delete()
+                                    .eq('id', material.id)
+                                  
+                                  if (error) {
+                                    alert(`Error deleting material: ${error.message}`)
+                                  } else {
+                                    loadRawMaterials()
+                                  }
+                                }}
+                                className="p-1.5 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                                title="Delete"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
               
               {rawMaterials.length === 0 && (
@@ -2098,6 +2327,7 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
     phone: supplier?.phone || '',
     address: supplier?.address || '',
     payment_terms: supplier?.payment_terms || '',
+    payment_method: supplier?.payment_method || 'bank_transfer',
     bank_name: supplier?.bank_name || '',
     bank_account_number: supplier?.bank_account_number || '',
     bank_account_name: supplier?.bank_account_name || '',
@@ -2189,14 +2419,32 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
               />
             </div>
             
-            <div className="col-span-2">
+            <div>
               <label className="block text-sm font-medium mb-1">Payment Terms</label>
-                <input
-                  type="text"
-                  value={formData.payment_terms}
-                  onChange={(e) => setFormData({ ...formData, payment_terms: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+              <select
+                value={formData.payment_terms}
+                onChange={(e) => setFormData({ ...formData, payment_terms: e.target.value })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Select Terms</option>
+                <option value="COD">COD (Cash on Delivery)</option>
+                <option value="Payment upon order">Payment upon order</option>
+                <option value="Payment before delivery">Payment before delivery</option>
+                <option value="Payment after delivery">Payment after delivery</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium mb-1">Payment Method</label>
+              <select
+                value={formData.payment_method}
+                onChange={(e) => setFormData({ ...formData, payment_method: e.target.value as any })}
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="cash">Cash</option>
+                <option value="check">Check</option>
+                <option value="bank_transfer">Bank Transfer</option>
+              </select>
             </div>
             
             <div>
@@ -2342,10 +2590,31 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
   const [catalog, setCatalog] = useState<RawMaterial[]>([])
   const [showCatalog, setShowCatalog] = useState(false)
   
-  // Load supplier catalog when supplier changes
+  // Load supplier catalog and payment terms when supplier changes
   useEffect(() => {
     if (formData.supplier_id) {
       loadSupplierCatalog(formData.supplier_id)
+      // Auto-populate payment terms and method from supplier
+      const selectedSupplier = suppliers.find(s => s.id === formData.supplier_id)
+      if (selectedSupplier && !po) { // Only auto-fill for new POs
+        const updates: Partial<POFormData> = {}
+        
+        if (selectedSupplier.payment_terms) {
+          const terms = selectedSupplier.payment_terms
+          updates.payment_terms = terms
+          updates.payment_timing = terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
+                                    terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
+                                    'after_delivery'
+        }
+        
+        if (selectedSupplier.payment_method) {
+          updates.payment_method = selectedSupplier.payment_method
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          setFormData(prev => ({ ...prev, ...updates }))
+        }
+      }
     } else {
       setCatalog([])
     }
@@ -2512,21 +2781,17 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                       ...formData, 
                       payment_terms: terms,
                       payment_timing: terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
-                                      terms.includes('COD') || terms.includes('delivery') ? 'after_delivery' : 
+                                      terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
                                       'after_delivery'
                     })
                   }}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="">Select Terms</option>
-                  <option value="Cash on delivery (COD)">Cash on delivery (COD)</option>
+                  <option value="COD">COD (Cash on Delivery)</option>
                   <option value="Payment upon order">Payment upon order</option>
                   <option value="Payment before delivery">Payment before delivery</option>
-                  <option value="15 days after delivery">15 days after delivery</option>
-                  <option value="30 days after delivery">30 days after delivery</option>
-                  <option value="45 days after delivery">45 days after delivery</option>
-                  <option value="60 days after delivery">60 days after delivery</option>
-                  <option value="90 days after delivery">90 days after delivery</option>
+                  <option value="Payment after delivery">Payment after delivery</option>
                 </select>
               </div>
               
@@ -2845,7 +3110,7 @@ function PaymentModal({ po, onSave, onClose }: {
     payment_method: po.payment_method || 'bank_transfer',
     amount: po.balance_amount,
     check_number: '',
-    bank_name: '',
+    bank_name: po.supplier?.bank_name || '',
     reference_number: '',
     proof_of_payment_url: '',
     notes: ''
@@ -2933,16 +3198,34 @@ function PaymentModal({ po, onSave, onClose }: {
           )}
           
           {formData.payment_method === 'bank_transfer' && (
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Bank Name</label>
-                <input
-                  type="text"
-                  value={formData.bank_name}
-                  onChange={(e) => setFormData({ ...formData, bank_name: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
+            <>
+              {/* Display Supplier Bank Details */}
+              {po.supplier && (po.supplier.bank_name || po.supplier.bank_account_number || po.supplier.bank_account_name) && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <h4 className="text-sm font-semibold text-blue-900 mb-2">Supplier Bank Details</h4>
+                  <div className="space-y-1 text-sm">
+                    {po.supplier.bank_name && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Bank:</span>
+                        <span className="font-medium text-gray-900">{po.supplier.bank_name}</span>
+                      </div>
+                    )}
+                    {po.supplier.bank_account_name && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Account Name:</span>
+                        <span className="font-medium text-gray-900">{po.supplier.bank_account_name}</span>
+                      </div>
+                    )}
+                    {po.supplier.bank_account_number && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Account Number:</span>
+                        <span className="font-medium text-gray-900">{po.supplier.bank_account_number}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              
               <div>
                 <label className="block text-sm font-medium mb-1">Reference Number</label>
                 <input
@@ -2952,7 +3235,7 @@ function PaymentModal({ po, onSave, onClose }: {
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
-            </div>
+            </>
           )}
           
           <div>
@@ -3623,6 +3906,27 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
   useEffect(() => {
     if (formData.supplier_id) {
       loadSupplierCatalog(formData.supplier_id)
+      // Auto-populate payment terms and method from supplier
+      const selectedSupplier = suppliers.find(s => s.id === formData.supplier_id)
+      if (selectedSupplier) {
+        const updates: Partial<POFormData> = {}
+        
+        if (selectedSupplier.payment_terms) {
+          const terms = selectedSupplier.payment_terms
+          updates.payment_terms = terms
+          updates.payment_timing = terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
+                                    terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
+                                    'after_delivery'
+        }
+        
+        if (selectedSupplier.payment_method) {
+          updates.payment_method = selectedSupplier.payment_method
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          setFormData(prev => ({ ...prev, ...updates }))
+        }
+      }
     } else {
       setCatalog([])
     }
@@ -3791,21 +4095,17 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                       ...formData, 
                       payment_terms: terms,
                       payment_timing: terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
-                                      terms.includes('COD') || terms.includes('delivery') ? 'after_delivery' : 
+                                      terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
                                       'after_delivery'
                     })
                   }}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   <option value="">Select Terms</option>
-                  <option value="Cash on delivery (COD)">Cash on delivery (COD)</option>
+                  <option value="COD">COD (Cash on Delivery)</option>
                   <option value="Payment upon order">Payment upon order</option>
                   <option value="Payment before delivery">Payment before delivery</option>
-                  <option value="15 days after delivery">15 days after delivery</option>
-                  <option value="30 days after delivery">30 days after delivery</option>
-                  <option value="45 days after delivery">45 days after delivery</option>
-                  <option value="60 days after delivery">60 days after delivery</option>
-                  <option value="90 days after delivery">90 days after delivery</option>
+                  <option value="Payment after delivery">Payment after delivery</option>
                 </select>
               </div>
               
@@ -4626,9 +4926,107 @@ function PODetailsModal({ po, onClose }: {
   po: PurchaseOrder
   onClose: () => void
 }) {
+  const [statusHistory, setStatusHistory] = useState<POStatusHistory[]>([])
+  const [loadingHistory, setLoadingHistory] = useState(true)
+  
+  useEffect(() => {
+    loadStatusHistory()
+  }, [po.id])
+  
+  const loadStatusHistory = async () => {
+    setLoadingHistory(true)
+    const { data, error } = await supabase
+      .from('po_status_history')
+      .select('*')
+      .eq('po_id', po.id)
+      .order('created_at', { ascending: true })
+    
+    if (data) {
+      setStatusHistory(data)
+    }
+    setLoadingHistory(false)
+  }
+  
+  const calculateDuration = (startDate: string, endDate: string) => {
+    const start = new Date(startDate)
+    const end = new Date(endDate)
+    const diffMs = end.getTime() - start.getTime()
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
+    
+    if (diffDays > 0) {
+      return `${diffDays}d ${diffHours}h`
+    } else if (diffHours > 0) {
+      return `${diffHours}h`
+    } else {
+      const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60))
+      return `${diffMins}m`
+    }
+  }
+  
+  const getStatusColorClasses = (status: string) => {
+    const colorClasses: Record<string, { dot: string; line: string; text: string; badge: string }> = {
+      draft: { 
+        dot: 'bg-gray-500 ring-gray-100', 
+        line: 'bg-gray-200', 
+        text: 'text-gray-900',
+        badge: 'bg-gray-100 text-gray-700'
+      },
+      pending_approval: { 
+        dot: 'bg-yellow-500 ring-yellow-100', 
+        line: 'bg-yellow-200', 
+        text: 'text-yellow-900',
+        badge: 'bg-yellow-100 text-yellow-700'
+      },
+      approved: { 
+        dot: 'bg-blue-500 ring-blue-100', 
+        line: 'bg-blue-200', 
+        text: 'text-blue-900',
+        badge: 'bg-blue-100 text-blue-700'
+      },
+      order_confirmed: { 
+        dot: 'bg-indigo-500 ring-indigo-100', 
+        line: 'bg-indigo-200', 
+        text: 'text-indigo-900',
+        badge: 'bg-indigo-100 text-indigo-700'
+      },
+      in_transit: { 
+        dot: 'bg-purple-500 ring-purple-100', 
+        line: 'bg-purple-200', 
+        text: 'text-purple-900',
+        badge: 'bg-purple-100 text-purple-700'
+      },
+      delivered: { 
+        dot: 'bg-green-500 ring-green-100', 
+        line: 'bg-green-200', 
+        text: 'text-green-900',
+        badge: 'bg-green-100 text-green-700'
+      },
+      paid: { 
+        dot: 'bg-teal-500 ring-teal-100', 
+        line: 'bg-teal-200', 
+        text: 'text-teal-900',
+        badge: 'bg-teal-100 text-teal-700'
+      },
+      closed: { 
+        dot: 'bg-gray-500 ring-gray-100', 
+        line: 'bg-gray-200', 
+        text: 'text-gray-900',
+        badge: 'bg-gray-100 text-gray-700'
+      },
+      cancelled: { 
+        dot: 'bg-red-500 ring-red-100', 
+        line: 'bg-red-200', 
+        text: 'text-red-900',
+        badge: 'bg-red-100 text-red-700'
+      }
+    }
+    return colorClasses[status] || colorClasses.draft
+  }
+  
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="p-6 border-b bg-gray-50 sticky top-0 z-10">
           <div className="flex justify-between items-start">
@@ -4703,6 +5101,73 @@ function PODetailsModal({ po, onClose }: {
               <p className="font-medium">{po.payment_method?.replace('_', ' ') || 'N/A'}</p>
             </div>
           </div>
+          
+          {/* Status History Timeline */}
+          {!loadingHistory && statusHistory.length > 0 && (
+            <div className="bg-gradient-to-br from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Clock size={20} className="text-blue-600" />
+                <h3 className="font-semibold text-gray-900">Status Timeline</h3>
+              </div>
+              <div className="space-y-3">
+                {statusHistory.map((history, index) => {
+                  const nextHistory = statusHistory[index + 1]
+                  const duration = nextHistory 
+                    ? calculateDuration(history.created_at!, nextHistory.created_at!)
+                    : po.status === history.new_status && index === statusHistory.length - 1
+                      ? calculateDuration(history.created_at!, new Date().toISOString())
+                      : null
+                  const colorClasses = getStatusColorClasses(history.new_status)
+                  
+                  return (
+                    <div key={history.id} className="flex gap-3">
+                      <div className="flex flex-col items-center">
+                        <div className={`w-3 h-3 rounded-full ring-4 ${colorClasses.dot}`}></div>
+                        {index < statusHistory.length - 1 && (
+                          <div className={`w-0.5 h-full min-h-[40px] ${colorClasses.line}`}></div>
+                        )}
+                      </div>
+                      <div className="flex-1 pb-3">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <p className={`font-medium text-sm ${colorClasses.text}`}>
+                              {history.new_status.replace(/_/g, ' ').toUpperCase()}
+                            </p>
+                            <p className="text-xs text-gray-600 mt-0.5">
+                              {new Date(history.created_at!).toLocaleString()} • by {history.changed_by}
+                            </p>
+                            {history.notes && (
+                              <p className="text-xs text-gray-600 mt-1 italic">"{history.notes}"</p>
+                            )}
+                          </div>
+                          {duration && (
+                            <div className="ml-3">
+                              <span className={`px-2 py-1 text-xs font-medium rounded ${colorClasses.badge}`}>
+                                {duration}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {statusHistory.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-blue-200">
+                  <p className="text-xs text-gray-600">
+                    <span className="font-medium">Total processing time:</span> {' '}
+                    {calculateDuration(
+                      statusHistory[0].created_at!,
+                      po.status === 'closed' || po.status === 'cancelled'
+                        ? statusHistory[statusHistory.length - 1].created_at!
+                        : new Date().toISOString()
+                    )}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
           
           {/* Supplier Details */}
           {po.supplier && (
@@ -4795,18 +5260,6 @@ function PODetailsModal({ po, onClose }: {
                     </div>
                   </div>
                 ))}
-                <div className="bg-gray-50 border border-gray-200 rounded-md p-3">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-gray-600">Total Paid:</span>
-                    <span className="font-bold">₱{po.paid_amount.toLocaleString()}</span>
-                  </div>
-                  {po.balance_amount > 0 && (
-                    <div className="flex justify-between items-center text-sm mt-1">
-                      <span className="text-gray-600">Balance:</span>
-                      <span className="font-bold text-red-600">₱{po.balance_amount.toLocaleString()}</span>
-                    </div>
-                  )}
-                </div>
               </div>
             </div>
           )}

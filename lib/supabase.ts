@@ -66,6 +66,7 @@ export type Supplier = {
   phone?: string
   address?: string
   payment_terms?: string
+  payment_method?: 'cash' | 'check' | 'bank_transfer'
   bank_name?: string
   bank_account_number?: string
   bank_account_name?: string

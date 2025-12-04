@@ -25,6 +25,11 @@ interface DSIRReport {
   net_sales: number
   total_cash: number
   discrepancy: number
+  big_cup_sales?: number
+  small_cup_sales?: number
+  water_sales?: number
+  ml_500_sales?: number
+  choco_coated_sales?: number
   status: 'draft' | 'submitted' | 'reviewed'
   notes: string
   created_at: string
