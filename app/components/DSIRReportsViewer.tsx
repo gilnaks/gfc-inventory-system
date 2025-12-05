@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
-import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X, Plus } from 'lucide-react'
+import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X, Plus, ChevronLeft, ChevronRight, Columns } from 'lucide-react'
 
 interface Brand {
   id: string
@@ -70,6 +70,16 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   const [totalReports, setTotalReports] = useState(0)
   const [loadingMore, setLoadingMore] = useState(false)
   const reportsPerPage = 30
+  
+  // Date navigation state
+  const [availableDates, setAvailableDates] = useState<string[]>([])
+  const [loadingNavigation, setLoadingNavigation] = useState(false)
+  
+  // Split view state
+  const [splitViewEnabled, setSplitViewEnabled] = useState(false)
+  const [secondReport, setSecondReport] = useState<DSIRReport | null>(null)
+  const [availableDatesSecond, setAvailableDatesSecond] = useState<string[]>([])
+  const [loadingNavigationSecond, setLoadingNavigationSecond] = useState(false)
   
   // Edit Items Modal State
   const [isEditItemsModalOpen, setIsEditItemsModalOpen] = useState(false)
@@ -145,6 +155,178 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       setCreateReportStaffId('')
     }
   }, [createReportLocationId])
+
+  const loadAvailableDates = useCallback(async (locationId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('dsir_reports')
+        .select('report_date')
+        .eq('location_id', locationId)
+        .order('report_date', { ascending: false })
+
+      if (error) throw error
+
+      const uniqueDates = Array.from(new Set(data?.map(r => r.report_date) || []))
+      setAvailableDates(uniqueDates)
+    } catch (error) {
+      console.error('Error loading available dates:', error)
+      setAvailableDates([])
+    }
+  }, [])
+
+  const navigateToDate = useCallback(async (direction: 'prev' | 'next') => {
+    if (!selectedReport || availableDates.length === 0) return
+
+    const currentIndex = availableDates.indexOf(selectedReport.report_date)
+    if (currentIndex === -1) return
+
+    let targetIndex: number
+    if (direction === 'prev') {
+      targetIndex = currentIndex + 1 // Previous date (older) is at a higher index since dates are sorted desc
+    } else {
+      targetIndex = currentIndex - 1 // Next date (newer) is at a lower index
+    }
+
+    if (targetIndex < 0 || targetIndex >= availableDates.length) return
+
+    const targetDate = availableDates[targetIndex]
+    
+    setLoadingNavigation(true)
+    try {
+      const { data, error } = await supabase
+        .from('dsir_reports')
+        .select(`
+          *,
+          location:locations(*),
+          staff_registration:staff_registrations(*)
+        `)
+        .eq('location_id', selectedReport.location_id)
+        .eq('report_date', targetDate)
+        .limit(1)
+        .single()
+
+      if (error) throw error
+      if (data) {
+        setSelectedReport(data)
+      }
+    } catch (error) {
+      console.error('Error loading report for date:', error)
+      setError('Failed to load report for the selected date')
+    } finally {
+      setLoadingNavigation(false)
+    }
+  }, [selectedReport, availableDates])
+
+  const navigateToDateSecond = useCallback(async (direction: 'prev' | 'next') => {
+    if (!secondReport || availableDatesSecond.length === 0) return
+
+    const currentIndex = availableDatesSecond.indexOf(secondReport.report_date)
+    if (currentIndex === -1) return
+
+    let targetIndex: number
+    if (direction === 'prev') {
+      targetIndex = currentIndex + 1
+    } else {
+      targetIndex = currentIndex - 1
+    }
+
+    if (targetIndex < 0 || targetIndex >= availableDatesSecond.length) return
+
+    const targetDate = availableDatesSecond[targetIndex]
+    
+    setLoadingNavigationSecond(true)
+    try {
+      const { data, error } = await supabase
+        .from('dsir_reports')
+        .select(`
+          *,
+          location:locations(*),
+          staff_registration:staff_registrations(*)
+        `)
+        .eq('location_id', secondReport.location_id)
+        .eq('report_date', targetDate)
+        .limit(1)
+        .single()
+
+      if (error) throw error
+      if (data) {
+        setSecondReport(data)
+      }
+    } catch (error) {
+      console.error('Error loading second report for date:', error)
+      setError('Failed to load report for the selected date')
+    } finally {
+      setLoadingNavigationSecond(false)
+    }
+  }, [secondReport, availableDatesSecond])
+
+  const loadAvailableDatesSecond = useCallback(async (locationId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('dsir_reports')
+        .select('report_date')
+        .eq('location_id', locationId)
+        .order('report_date', { ascending: false })
+
+      if (error) throw error
+
+      const uniqueDates = Array.from(new Set(data?.map(r => r.report_date) || []))
+      setAvailableDatesSecond(uniqueDates)
+    } catch (error) {
+      console.error('Error loading available dates for second report:', error)
+      setAvailableDatesSecond([])
+    }
+  }, [])
+
+  useEffect(() => {
+    if (selectedReport) {
+      loadAvailableDates(selectedReport.location_id)
+    } else {
+      setAvailableDates([])
+    }
+  }, [selectedReport, loadAvailableDates])
+
+  useEffect(() => {
+    if (secondReport) {
+      loadAvailableDatesSecond(secondReport.location_id)
+    } else {
+      setAvailableDatesSecond([])
+    }
+  }, [secondReport, loadAvailableDatesSecond])
+
+  // When enabling split view, auto-select the next date if available
+  useEffect(() => {
+    if (splitViewEnabled && selectedReport && !secondReport && availableDates.length > 1) {
+      const currentIndex = availableDates.indexOf(selectedReport.report_date)
+      if (currentIndex !== -1 && currentIndex + 1 < availableDates.length) {
+        const nextDate = availableDates[currentIndex + 1]
+        // Load the report for the next date
+        supabase
+          .from('dsir_reports')
+          .select(`
+            *,
+            location:locations(*),
+            staff_registration:staff_registrations(*)
+          `)
+          .eq('location_id', selectedReport.location_id)
+          .eq('report_date', nextDate)
+          .limit(1)
+          .single()
+          .then(({ data, error }) => {
+            if (!error && data) {
+              setSecondReport(data)
+            }
+          })
+      }
+    }
+  }, [splitViewEnabled, selectedReport, availableDates, secondReport])
+
+  // When disabling split view, clear the second report
+  useEffect(() => {
+    if (!splitViewEnabled && secondReport) {
+      setSecondReport(null)
+    }
+  }, [splitViewEnabled, secondReport])
 
   const calculateLast7DaysSummary = useCallback(async () => {
     try {
@@ -872,12 +1054,23 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
   }
 
   if (selectedReport) {
+    const currentIndex = availableDates.indexOf(selectedReport.report_date)
+    const hasPrevDate = currentIndex !== -1 && currentIndex < availableDates.length - 1
+    const hasNextDate = currentIndex !== -1 && currentIndex > 0
+
+    const currentIndexSecond = secondReport ? availableDatesSecond.indexOf(secondReport.report_date) : -1
+    const hasPrevDateSecond = currentIndexSecond !== -1 && currentIndexSecond < availableDatesSecond.length - 1
+    const hasNextDateSecond = currentIndexSecond !== -1 && currentIndexSecond > 0
+
     return (
-      <div className="space-y-4 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className={`space-y-4 ${splitViewEnabled ? 'max-w-full' : 'max-w-6xl'} mx-auto px-4 sm:px-6 lg:px-8`}>
         <div className="flex flex-col sm:flex-row sm:items-center space-y-3 sm:space-y-0 sm:space-x-4">
+          {/* Back to Reports Button */}
           <button
             onClick={() => {
               setSelectedReport(null)
+              setSecondReport(null)
+              setSplitViewEnabled(false)
               loadReports()
             }}
             className="flex items-center justify-center sm:justify-start space-x-2 px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50 w-full sm:w-auto"
@@ -885,24 +1078,160 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             <ArrowLeft className="h-4 w-4" />
             <span>Back to Reports</span>
           </button>
+
+          {/* Report Info */}
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-semibold text-gray-900 truncate">
-              DSIR Report - {selectedReport.location?.name || 'Unknown Location'}
+              DSIR Report{splitViewEnabled ? 's' : ''} - {selectedReport.location?.name || 'Unknown Location'}
             </h2>
             <p className="text-sm text-gray-600">
               {formatDate(selectedReport.report_date)} • {selectedReport.staff_name || 'Unknown Staff'}
+              {availableDates.length > 0 && (
+                <span className="ml-2 text-gray-400">
+                  ({currentIndex + 1} of {availableDates.length})
+                </span>
+              )}
+              {splitViewEnabled && secondReport && (
+                <span className="ml-4">
+                  | {formatDate(secondReport.report_date)} • {secondReport.staff_name || 'Unknown Staff'}
+                  {availableDatesSecond.length > 0 && (
+                    <span className="ml-2 text-gray-400">
+                      ({currentIndexSecond + 1} of {availableDatesSecond.length})
+                    </span>
+                  )}
+                </span>
+              )}
             </p>
           </div>
+
+          {/* Split View Toggle */}
+          <button
+            onClick={() => setSplitViewEnabled(!splitViewEnabled)}
+            className={`flex items-center space-x-2 px-3 py-2 border rounded-md flex-shrink-0 ${
+              splitViewEnabled 
+                ? 'bg-blue-600 text-white border-blue-600 hover:bg-blue-700' 
+                : 'text-gray-600 hover:text-gray-800 border-gray-300 hover:bg-gray-50'
+            }`}
+            title="Toggle Split View"
+          >
+            <Columns className="h-4 w-4" />
+          </button>
+
+          {/* Navigation Buttons - Hidden in split view */}
+          {!splitViewEnabled && (
+            <div className="flex items-center space-x-2 flex-shrink-0">
+              <button
+                onClick={() => navigateToDate('prev')}
+                disabled={!hasPrevDate || loadingNavigation}
+                className="flex items-center justify-center px-3 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Previous Date"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => navigateToDate('next')}
+                disabled={!hasNextDate || loadingNavigation}
+                className="flex items-center justify-center px-3 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Next Date"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
+          )}
         </div>
         
-        <DSIRViewer 
-          report={selectedReport} 
-          showEditButton={true} 
-          showDiscrepancyColumns={true}
-          showSalesDiscrepancyColumns={true}
-          showIceCreamDiscrepancyColumns={true}
-          showMaterialsDiscrepancyColumns={false}
-        />
+        {splitViewEnabled ? (
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {/* First Report */}
+            <div className="border border-gray-300 rounded-lg p-4 bg-white">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-md font-semibold text-gray-900">
+                  {formatDate(selectedReport.report_date)}
+                </h3>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => navigateToDate('prev')}
+                    disabled={!hasPrevDate || loadingNavigation}
+                    className="flex items-center justify-center px-2 py-1 text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Previous Date"
+                  >
+                    <ChevronLeft className="h-3 w-3" />
+                  </button>
+                  <button
+                    onClick={() => navigateToDate('next')}
+                    disabled={!hasNextDate || loadingNavigation}
+                    className="flex items-center justify-center px-2 py-1 text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Next Date"
+                  >
+                    <ChevronRight className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+              <DSIRViewer 
+                report={selectedReport} 
+                showEditButton={true} 
+                showDiscrepancyColumns={true}
+                showSalesDiscrepancyColumns={true}
+                showIceCreamDiscrepancyColumns={true}
+                showMaterialsDiscrepancyColumns={false}
+              />
+            </div>
+
+            {/* Second Report */}
+            {secondReport ? (
+              <div className="border border-gray-300 rounded-lg p-4 bg-white">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-md font-semibold text-gray-900">
+                    {formatDate(secondReport.report_date)}
+                  </h3>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => navigateToDateSecond('prev')}
+                      disabled={!hasPrevDateSecond || loadingNavigationSecond}
+                      className="flex items-center justify-center px-2 py-1 text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Previous Date"
+                    >
+                      <ChevronLeft className="h-3 w-3" />
+                    </button>
+                    <button
+                      onClick={() => navigateToDateSecond('next')}
+                      disabled={!hasNextDateSecond || loadingNavigationSecond}
+                      className="flex items-center justify-center px-2 py-1 text-gray-600 hover:text-gray-800 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Next Date"
+                    >
+                      <ChevronRight className="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+                <DSIRViewer 
+                  report={secondReport} 
+                  showEditButton={true} 
+                  showDiscrepancyColumns={true}
+                  showSalesDiscrepancyColumns={true}
+                  showIceCreamDiscrepancyColumns={true}
+                  showMaterialsDiscrepancyColumns={false}
+                />
+              </div>
+            ) : (
+              <div className="border border-gray-300 rounded-lg p-4 bg-gray-50 flex items-center justify-center">
+                <div className="text-center text-gray-500">
+                  <Columns className="h-12 w-12 mx-auto mb-2 text-gray-400" />
+                  <p>No second report available</p>
+                  <p className="text-sm">Select another report to compare</p>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <DSIRViewer 
+            report={selectedReport} 
+            showEditButton={true} 
+            showDiscrepancyColumns={true}
+            showSalesDiscrepancyColumns={true}
+            showIceCreamDiscrepancyColumns={true}
+            showMaterialsDiscrepancyColumns={false}
+          />
+        )}
       </div>
     )
   }
