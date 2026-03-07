@@ -2650,7 +2650,8 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
       unit: material.unit,
       unit_price: material.unit_cost,
       material_id: material.id,
-      material: material
+      material: material,
+      fromCatalog: true
     }
     setItems([...items, newItem])
   }
@@ -4029,7 +4030,8 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
       unit: material.unit,
       unit_price: material.unit_cost,
       material_id: material.id,
-      material: material
+      material: material,
+      fromCatalog: true
     }
     setItems([...items, newItem])
   }

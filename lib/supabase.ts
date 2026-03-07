@@ -180,6 +180,8 @@ export type PurchaseOrderItem = {
   notes?: string
   created_at?: string
   material?: RawMaterial
+  /** UI-only: true when item was selected from catalog (makes fields read-only) */
+  fromCatalog?: boolean
 }
 
 export type POPayment = {
