@@ -2621,11 +2621,12 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
   }, [formData.supplier_id])
   
   const loadSupplierCatalog = async (supplierId: string) => {
+    // Include materials linked to this supplier OR general materials (no supplier)
     const { data } = await supabase
       .from('raw_materials')
       .select('*')
       .eq('brand_id', brandId)
-      .eq('supplier_id', supplierId)
+      .or(`supplier_id.eq.${supplierId},supplier_id.is.null`)
       .eq('is_active', true)
       .order('material_name')
     
@@ -2675,7 +2676,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
     areItemsValid
   
   const addItem = () => {
-    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', unit_price: '' as any }])
+    setItems([...items, { product_description: '', quantity: 1, unit: 'pcs', unit_price: '' as any, material_id: null }])
   }
   
   const removeItem = (index: number) => {
@@ -2685,6 +2686,53 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
   const updateItem = (index: number, field: string, value: any) => {
     const newItems = [...items]
     newItems[index] = { ...newItems[index], [field]: value }
+    setItems(newItems)
+  }
+  
+  // When product is selected from dropdown, auto-populate price, unit, etc.
+  const handleProductSelect = (index: number, materialId: string) => {
+    const material = catalog.find(m => m.id === materialId)
+    if (!material) return
+    const newItems = [...items]
+    newItems[index] = {
+      ...newItems[index],
+      product_description: material.material_name,
+      unit: material.unit,
+      unit_price: material.unit_cost,
+      material_id: material.id,
+      material: material,
+      fromCatalog: true
+    }
+    setItems(newItems)
+  }
+  
+  // Get available products for dropdown (exclude already selected in other rows)
+  const getAvailableProductsForRow = (currentIndex: number) => {
+    const currentItem = items[currentIndex]
+    const selectedMaterialIds = items
+      .map((item, i) => i !== currentIndex ? item.material_id : null)
+      .filter(Boolean)
+    let available = catalog.filter(m => 
+      !selectedMaterialIds.includes(m.id) || m.id === currentItem?.material_id
+    )
+    // If current item has material but not in catalog (e.g. editing PO with different data), include it
+    if (currentItem?.material_id && (currentItem as any).material && !available.find(m => m.id === currentItem.material_id)) {
+      available = [...available, (currentItem as any).material]
+    }
+    return available
+  }
+  
+  const handleProductClear = (index: number) => {
+    const newItems = [...items]
+    newItems[index] = {
+      ...newItems[index],
+      product_description: '',
+      unit: 'pcs',
+      unit_price: '' as any,
+      material_id: null,
+      material: null,
+      fromCatalog: false
+    }
     setItems(newItems)
   }
   
@@ -2952,21 +3000,40 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                     
                     {/* Item Fields - Single Row */}
                     <div className="grid grid-cols-12 gap-2">
-                      {/* Product Description */}
+                      {/* Product - Dropdown of supplier's registered products */}
                       <div className="col-span-5">
                         <label className="block text-xs text-gray-600 mb-1">
                           Product
                         </label>
-                        <input
-                          type="text"
-                          value={item.product_description}
-                          onChange={(e) => updateItem(index, 'product_description', e.target.value)}
+                        <select
+                          value={item.material_id || ''}
+                          onChange={(e) => {
+                            const val = e.target.value
+                            if (val) handleProductSelect(index, val)
+                            else handleProductClear(index)
+                          }}
                           className={`w-full px-3 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${
-                            item.material_id ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
+                            !formData.supplier_id ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
                           }`}
-                          readOnly={!!item.material_id}
+                          disabled={!formData.supplier_id}
                           required
-                        />
+                        >
+                          <option value="">Select product...</option>
+                          {formData.supplier_id ? (
+                            getAvailableProductsForRow(index).map((material) => (
+                              <option key={material.id} value={material.id}>
+                                {material.material_name}
+                                {material.unit_cost > 0 && ` — ₱${material.unit_cost.toLocaleString()}/${material.unit}`}
+                              </option>
+                            ))
+                          ) : null}
+                          {formData.supplier_id && getAvailableProductsForRow(index).length === 0 && catalog.length === 0 && (
+                            <option value="" disabled>No products — add materials in Raw Materials tab and link to this supplier</option>
+                          )}
+                          {formData.supplier_id && getAvailableProductsForRow(index).length === 0 && catalog.length > 0 && (
+                            <option value="" disabled>All products already added</option>
+                          )}
+                        </select>
                       </div>
                       
                       {/* Quantity */}
@@ -3933,11 +4000,12 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
   }, [formData.supplier_id])
   
   const loadSupplierCatalog = async (supplierId: string) => {
+    // Include materials linked to this supplier OR general materials (no supplier)
     const { data } = await supabase
       .from('raw_materials')
       .select('*')
       .eq('brand_id', brandId)
-      .eq('supplier_id', supplierId)
+      .or(`supplier_id.eq.${supplierId},supplier_id.is.null`)
       .eq('is_active', true)
       .order('material_name')
     

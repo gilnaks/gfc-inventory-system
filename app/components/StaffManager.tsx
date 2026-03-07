@@ -141,6 +141,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [absentStaff, setAbsentStaff] = useState<{[key: string]: {[key: string]: {[key: string]: boolean}}}>({}) // {locationId: {dayKey: {staffId: isAbsent}}}
   const [hoveredStaffId, setHoveredStaffId] = useState<string | null>(null) // Track hovered staff for highlighting
   const [scheduleJustSaved, setScheduleJustSaved] = useState(false) // Track if schedule was just saved
+  const [selectedStaffForSchedule, setSelectedStaffForSchedule] = useState<string | null>(null) // Main staff selector for quick-add
   
   // New staff form
   const [newStaff, setNewStaff] = useState({
@@ -2534,6 +2535,20 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 </div>
               </div>
               <div className="flex items-center space-x-4">
+                {/* Main staff selector - select once, then click day slots to add */}
+                <div className="flex items-center space-x-2">
+                  <label className="text-sm font-medium text-gray-700 whitespace-nowrap">Select staff:</label>
+                  <select
+                    value={selectedStaffForSchedule || ''}
+                    onChange={(e) => setSelectedStaffForSchedule(e.target.value || null)}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[180px]"
+                  >
+                    <option value=""></option>
+                    {companyStaff.map((staff) => (
+                      <option key={staff.id} value={staff.id}>{staff.full_name}</option>
+                    ))}
+                  </select>
+                </div>
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => {
@@ -2565,6 +2580,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   onClick={() => {
                     setIsScheduleModalOpen(false)
                     setHoveredStaffId(null)
+                    setSelectedStaffForSchedule(null)
                   }}
                   className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-all duration-200"
                 >
@@ -2687,36 +2703,34 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                             return (
                               <td key={dayIndex} className={`px-2 py-3 text-center align-top border-r border-white last:border-r-0 w-36 ${getStoreColor(location)}`}>
                                 <div className="flex flex-col gap-2">
-                                  {/* Staff Dropdown */}
-                                   <select 
-                                     className="w-full text-xs border-0 bg-gray-100 hover:bg-gray-200 focus:bg-white focus:outline-none rounded px-2 py-1 transition-all duration-200 shadow-sm"
-                                    value=""
-                                    onChange={async (e) => {
-                                      if (e.target.value) {
-                                        await addStaffToSchedule(e.target.value, dayKey, location.id)
-                                        e.target.value = ""
-                                      }
-                                    }}
-                                    disabled={saving}
-                                  >
-                                    <option value="">+</option>
-                                    {getStaffForLocation(location.id).map((staff) => {
-                                      // Check if staff is already scheduled to ANY branch on this day
-                                      const alreadyScheduledToAnyBranch = Object.entries(schedule).some(([branchId, daySchedules]) => {
+                                  {/* Click-to-add zone - uses main staff selector */}
+                                  {(() => {
+                                    const staffForLocation = getStaffForLocation(location.id)
+                                    const currentInCell = schedule[location.id]?.[dayKey]
+                                    const staffIdsInCell = Array.isArray(currentInCell) ? currentInCell : (currentInCell ? [currentInCell] : [])
+                                    const canAddSelected = selectedStaffForSchedule && 
+                                      staffForLocation.some(s => s.id === selectedStaffForSchedule) &&
+                                      !Object.entries(schedule).some(([branchId, daySchedules]) => {
                                         const staffList = daySchedules[dayKey]
-                                        return Array.isArray(staffList) ? staffList.includes(staff.id) : staffList === staff.id
-                                      })
-                                      
-                                      // Don't show staff who are already scheduled to any branch
-                                      if (alreadyScheduledToAnyBranch) return null
-                                      
-                                      return (
-                                        <option key={staff.id} value={staff.id}>
-                                          {staff.full_name}
-                                        </option>
-                                      )
-                                    })}
-                                  </select>
+                                        return Array.isArray(staffList) ? staffList.includes(selectedStaffForSchedule) : staffList === selectedStaffForSchedule
+                                      }) &&
+                                      !staffIdsInCell.includes(selectedStaffForSchedule)
+                                    const selectedStaffName = selectedStaffForSchedule ? companyStaff.find(s => s.id === selectedStaffForSchedule)?.full_name : null
+                                    if (!canAddSelected) return null
+                                    return (
+                                      <div
+                                        onClick={async () => {
+                                          if (selectedStaffForSchedule) {
+                                            await addStaffToSchedule(selectedStaffForSchedule, dayKey, location.id)
+                                          }
+                                        }}
+                                        className={`w-full text-xs rounded px-2 py-1.5 transition-all duration-200 cursor-pointer border border-dashed bg-blue-50 border-blue-300 hover:bg-blue-100 text-blue-700 ${saving ? 'pointer-events-none opacity-60' : ''}`}
+                                        title={`Click to add ${selectedStaffName}`}
+                                      >
+                                        + {selectedStaffName}
+                                      </div>
+                                    )
+                                  })()}
                                   
                                   {/* Scheduled Staff List */}
                                   <div className="flex flex-col gap-2">
@@ -2842,6 +2856,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   onClick={() => {
                     setIsScheduleModalOpen(false)
                     setHoveredStaffId(null)
+                    setSelectedStaffForSchedule(null)
                   }}
                   className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-all duration-200 font-medium"
                 >
