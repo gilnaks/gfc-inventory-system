@@ -228,7 +228,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
         setFulfilledOrders(fulfilledData)
         
         // Calculate receivable from fulfilled orders
-        const receivable = fulfilledData.reduce((total, order) => total + (order.total_amount || 0), 0)
+        const receivable = fulfilledData.reduce((total, order) => total + getOrderTotalAmount(order), 0)
         setTotalReceivable(receivable)
       }
     } catch (error) {
@@ -362,6 +362,18 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     return Math.ceil(completedOrders.length / completedOrdersPerPage)
   }
 
+  // Show 1-10 page buttons by default; sliding window when more pages exist
+  const getVisiblePageNumbers = () => {
+    const total = getTotalCompletedPages()
+    const maxVisibleButtons = 10
+    if (total <= maxVisibleButtons) {
+      return Array.from({ length: total }, (_, i) => i + 1)
+    }
+    const windowStart = Math.floor((completedOrdersPage - 1) / maxVisibleButtons) * maxVisibleButtons + 1
+    const windowEnd = Math.min(windowStart + maxVisibleButtons - 1, total)
+    return Array.from({ length: windowEnd - windowStart + 1 }, (_, i) => windowStart + i)
+  }
+
   const handleCompletedPageChange = (page: number) => {
     setCompletedOrdersPage(page)
   }
@@ -374,13 +386,25 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
     return order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
   }
 
-  // Memoized revenue calculations
+  // Compute total from order_details (matches order creation & logistics formula)
+  const getOrderTotalAmount = useCallback((order: PaidOrder) => {
+    const subtotal = order.order_details?.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) || 0
+    if (order.delivery_type === 'delivery') {
+      return subtotal >= 10000 ? subtotal : subtotal + 500
+    }
+    if (order.delivery_type === 'pickup') {
+      return subtotal >= 10000 ? subtotal * 0.95 : subtotal
+    }
+    return subtotal
+  }, [])
+
+  // Memoized revenue calculations (use computed amount from order_details to match logistics)
   const calculateTotalPaid = useMemo(() => {
-    return paidOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+    return paidOrders.reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }, [paidOrders])
 
   const calculateTotalCompleted = useMemo(() => {
-    return completedOrders.reduce((total, order) => total + (order.total_amount || 0), 0)
+    return completedOrders.reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }, [completedOrders])
 
   const calculateTotalRevenue = useMemo(() => {
@@ -395,20 +419,20 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
   const calculateMyChoiceCompanyOwnedRevenue = useMemo(() => {
     const paidMyChoice = paidOrders
       .filter(order => isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
     const completedMyChoice = completedOrders
       .filter(order => isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
     return paidMyChoice + completedMyChoice
   }, [paidOrders, completedOrders])
 
   const calculateFranchiseRevenue = useMemo(() => {
     const paidFranchise = paidOrders
       .filter(order => !isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
     const completedFranchise = completedOrders
       .filter(order => !isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
     return paidFranchise + completedFranchise
   }, [paidOrders, completedOrders])
 
@@ -427,25 +451,25 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
   const calculateMyChoiceCompanyOwnedPaid = () => {
     return paidOrders
       .filter(order => isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }
 
   const calculateFranchisePaid = () => {
     return paidOrders
       .filter(order => !isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }
 
   const calculateMyChoiceCompanyOwnedReceivable = () => {
     return fulfilledOrders
       .filter(order => isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }
 
   const calculateFranchiseReceivable = () => {
     return fulfilledOrders
       .filter(order => !isMyChoiceCompanyOwned(order))
-      .reduce((total, order) => total + (order.total_amount || 0), 0)
+      .reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }
 
   const printTransferSheet = (order: PaidOrder) => {
@@ -805,7 +829,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               ` : ''}
               <div class="total-row grand-total">
                 <span class="total-label">Total Amount</span>
-                <span class="total-value">₱${order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                <span class="total-value">₱${getOrderTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
             </div>
             
@@ -1038,7 +1062,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-orange-600 align-middle">
-                      ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      ₱{getOrderTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
                       {(() => {
@@ -1164,7 +1188,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-green-600 align-middle">
-                      ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      ₱{getOrderTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
                       {(() => {
@@ -1318,7 +1342,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-green-600 align-middle">
-                      ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      ₱{getOrderTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
                       {(() => {
@@ -1394,7 +1418,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                   Previous
                 </button>
                 <div className="flex items-center space-x-1">
-                  {Array.from({ length: getTotalCompletedPages() }, (_, i) => i + 1).map((page) => (
+                  {getVisiblePageNumbers().map((page) => (
                     <button
                       key={page}
                       onClick={() => handleCompletedPageChange(page)}
@@ -1492,7 +1516,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                   </div>
                   <div>
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Total Amount</p>
-                    <p className="text-sm font-semibold text-gray-900 mt-1">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p className="text-sm font-semibold text-gray-900 mt-1">₱{getOrderTotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                   </div>
                 </div>
                 <div className="mt-4 pt-4 border-t border-gray-200">
@@ -1541,7 +1565,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
                       )}
                       <div className="flex justify-between items-center border-t pt-2">
                         <span className="text-sm font-semibold text-gray-900">Total Amount:</span>
-                        <span className="text-sm font-semibold text-green-600">₱{selectedOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <span className="text-sm font-semibold text-green-600">₱{getOrderTotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                       </div>
                     </div>
                   </div>
@@ -1685,7 +1709,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Deposit Slip
-                {selectedDepositSlipOrder && ` - ₱${selectedDepositSlipOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                {selectedDepositSlipOrder && ` - ₱${getOrderTotalAmount(selectedDepositSlipOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </h3>
               <button
                 onClick={() => {

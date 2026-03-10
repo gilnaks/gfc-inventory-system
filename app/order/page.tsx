@@ -976,7 +976,19 @@ export default function OrderPage() {
   }
 
   const getTotalAmount = (order: any) => {
-    return order.order_details.reduce((total: number, detail: any) => total + (detail.unit_price * detail.quantity), 0)
+    return order.order_details?.reduce((total: number, detail: any) => total + (detail.unit_price * detail.quantity), 0) || 0
+  }
+
+  // Full total with delivery fee / pickup discount (matches order creation & logistics)
+  const getOrderTotalAmount = (order: any) => {
+    const subtotal = getTotalAmount(order)
+    if (order.delivery_type === 'delivery') {
+      return subtotal >= 10000 ? subtotal : subtotal + 500
+    }
+    if (order.delivery_type === 'pickup') {
+      return subtotal >= 10000 ? subtotal * 0.95 : subtotal
+    }
+    return subtotal
   }
 
   // Get returnable pans products based on brand
@@ -2256,7 +2268,7 @@ export default function OrderPage() {
                             </p>
                           </div>
                           <div className="text-right">
-                            <p className="text-2xl font-bold text-orange-900">₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                            <p className="text-2xl font-bold text-orange-900">₱{getOrderTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                             <p className="text-sm text-orange-700">Balance Due</p>
                           </div>
                         </div>
@@ -3107,7 +3119,7 @@ export default function OrderPage() {
                             {order.status.charAt(0).toUpperCase() + order.status.slice(1)}
                           </span>
                           <p className="text-lg font-semibold text-gray-900 mt-1">
-                            ₱{order.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₱{getOrderTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </p>
                         </div>
                       </div>
@@ -3366,7 +3378,7 @@ export default function OrderPage() {
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Deposit Slip
-                {selectedDepositSlipOrder && ` - ₱${selectedDepositSlipOrder.total_amount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                {selectedDepositSlipOrder && ` - ₱${getOrderTotalAmount(selectedDepositSlipOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               </h3>
               <button
                 onClick={() => {
