@@ -257,6 +257,26 @@ export type RawMaterial = {
   supplier?: Supplier
 }
 
+export type FactoryMaterialRequest = {
+  id: string
+  material_id: string
+  quantity: number
+  status: 'pending' | 'released' | 'cancelled'
+  notes?: string
+  request_date: string
+  released_at?: string
+  created_at?: string
+  material?: RawMaterial
+}
+
+export type FactoryDailyStaff = {
+  id: string
+  work_date: string
+  staff_registration_id: string
+  created_at?: string
+  staff_registrations?: { id: string; full_name: string }
+}
+
 export type MaterialStockMovement = {
   id: string
   material_id: string
@@ -279,5 +299,34 @@ export type MaterialStockAlert = {
   alert_date: string
   is_resolved: boolean
   resolved_date?: string
+  created_at?: string
+}
+
+// =============================================
+// PRODUCTION SCHEDULE TYPES
+// =============================================
+
+export type ProductionSchedule = {
+  id: string
+  product_id: string
+  schedule_date: string
+  quantity_required: number
+  batch_number: string
+  allow_override: boolean
+  created_at?: string
+  updated_at?: string
+  product?: Product
+  brand?: Brand
+}
+
+export type ProductionStickerLog = {
+  id: string
+  product_id: string
+  schedule_id?: string
+  batch_number: string
+  manufacture_date: string
+  serial_number?: string
+  produced_at?: string
+  released_at?: string
   created_at?: string
 }

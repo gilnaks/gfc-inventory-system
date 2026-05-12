@@ -1,15 +1,18 @@
 'use client'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Product, Brand } from '../../lib/supabase'
-import { Plus, Edit, Trash2, Save, X, Package, Eye, FileText } from 'lucide-react'
+import { Plus, Edit, Trash2, Save, X, Package, Eye, FileText, Calendar } from 'lucide-react'
+import { ProductionScheduleManager } from './ProductionScheduleManager'
 import { getPhilippinesDate } from '../../lib/timezone'
 
 interface ProductManagerProps {
   selectedBrand: Brand | null
   theme?: string
+  /** When true, hides production controls, add-product entry points, and row actions (dashboard guest). */
+  guestMode?: boolean
 }
 
-export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManagerProps) {
+export function ProductManager({ selectedBrand, theme = 'blue', guestMode = false }: ProductManagerProps) {
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(false)
   const [showAddForm, setShowAddForm] = useState(false)
@@ -37,6 +40,16 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
   const [loadingReports, setLoadingReports] = useState(false)
   const [selectedReport, setSelectedReport] = useState<any | null>(null)
   const [deletingItem, setDeletingItem] = useState<string | null>(null)
+  const [showProductionSchedule, setShowProductionSchedule] = useState(false)
+
+  useEffect(() => {
+    if (guestMode) {
+      setEditingProduct(null)
+      setProductionInputMode(false)
+      setProductionValues({})
+      setShowAddForm(false)
+    }
+  }, [guestMode])
 
   useEffect(() => {
     if (selectedBrand) {
@@ -641,6 +654,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
             Manage finished goods and stock levels for {selectedBrand.name}
           </p>
         </div>
+        {!guestMode && (
         <div className="flex space-x-3">
           <button
             onClick={() => {
@@ -684,6 +698,13 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
             </button>
           )}
           <button
+            onClick={() => setShowProductionSchedule(true)}
+            className="flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors bg-indigo-600 hover:bg-indigo-700"
+          >
+            <Calendar className="h-4 w-4" />
+            <span>Production Schedule</span>
+          </button>
+          <button
             onClick={() => {
               setShowProductionReports(true)
               fetchProductionReports()
@@ -713,6 +734,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
             <span>Add Product</span>
           </button>
         </div>
+        )}
       </div>
 
       {/* Add Product Modal */}
@@ -903,7 +925,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                 <table className="w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      {[...Array(11)].map((_, i) => (
+                      {[...Array(guestMode ? 10 : 11)].map((_, i) => (
                         <th key={i} className="px-6 py-3 text-left">
                           <div className="h-4 bg-gray-200 rounded w-16 animate-pulse"></div>
                         </th>
@@ -913,7 +935,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                   <tbody className="bg-white divide-y divide-gray-200">
                     {[...Array(3)].map((_, rowIndex) => (
                       <tr key={rowIndex}>
-                        {[...Array(11)].map((_, cellIndex) => (
+                        {[...Array(guestMode ? 10 : 11)].map((_, cellIndex) => (
                           <td key={cellIndex} className="px-6 py-2 whitespace-nowrap">
                             <div className="h-4 bg-gray-200 rounded w-20 animate-pulse"></div>
                           </td>
@@ -929,7 +951,11 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
       ) : products.length === 0 ? (
         <div className="text-center py-8 text-gray-500">
           <p>No products found for {selectedBrand.name}</p>
-          <p className="text-sm">Click "Add Product" to create your first product</p>
+          <p className="text-sm">
+            {guestMode
+              ? 'Products will appear here once an administrator adds them.'
+              : 'Click "Add Product" to create your first product'}
+          </p>
         </div>
       ) : (
         <div className="space-y-6">
@@ -974,9 +1000,11 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
                     Available
                   </th>
+                  {!guestMode && (
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
                     Actions
                   </th>
+                  )}
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -1126,6 +1154,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         product.available_stock || 0
                       )}
                     </td>
+                    {!guestMode && (
                     <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
                       <div className="flex space-x-2">
                         {editingProduct?.id === (product.product_id || product.id) ? (
@@ -1179,6 +1208,7 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
                         )}
                       </div>
                     </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -1187,6 +1217,14 @@ export function ProductManager({ selectedBrand, theme = 'blue' }: ProductManager
             </div>
           ))}
         </div>
+      )}
+
+      {/* Production Schedule Modal */}
+      {showProductionSchedule && (
+        <ProductionScheduleManager
+          onClose={() => setShowProductionSchedule(false)}
+          theme={theme}
+        />
       )}
 
       {/* Production Reports Modal */}

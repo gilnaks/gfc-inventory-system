@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
-import { ShoppingCart, Package, CheckCircle, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X } from 'lucide-react'
+import { ShoppingCart, Package, CheckCircle, Check, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
 
 interface Location {
@@ -26,6 +26,7 @@ interface CustomerOrder {
   created_at: string
   updated_at: string
   returnable_pans_image_url?: string
+  deposit_slip_url?: string
   location: Location
   brand: Brand
   order_details: OrderDetail[]
@@ -78,6 +79,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const [showReturnablePansModal, setShowReturnablePansModal] = useState(false)
   const [selectedReturnablePansImage, setSelectedReturnablePansImage] = useState<string | null>(null)
   const [selectedReturnablePansOrder, setSelectedReturnablePansOrder] = useState<CustomerOrder | null>(null)
+  const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
+  const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
+  const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<CustomerOrder | null>(null)
 
   // Helper function to get franchise icon color based on theme
   const getFranchiseIconColor = () => {
@@ -1074,11 +1078,12 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   }, [getOrdersByStatus, itemsPerPage])
 
   // Reusable table component for orders
-  const OrderTable = ({ orders, showPagination = false, currentPage = 1, onPageChange = () => {} }: {
+  const OrderTable = ({ orders, showPagination = false, currentPage = 1, onPageChange = () => {}, showDepositSlipColumn = false }: {
     orders: CustomerOrder[]
     showPagination?: boolean
     currentPage?: number
     onPageChange?: (page: number) => void
+    showDepositSlipColumn?: boolean
   }) => {
     if (orders.length === 0) {
       return (
@@ -1116,6 +1121,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Total Amount
                 </th>
+                {showDepositSlipColumn && (
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Deposit Slip
+                </th>
+                )}
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Actions
                 </th>
@@ -1226,6 +1236,25 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-green-600">
                     ₱{getTotalAmount(order).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </td>
+                  {showDepositSlipColumn && (
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {order.deposit_slip_url ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedDepositSlipImage(order.deposit_slip_url!)
+                          setSelectedDepositSlipOrder(order)
+                          setShowDepositSlipModal(true)
+                        }}
+                        className="text-blue-600 hover:text-blue-800 hover:underline font-medium cursor-pointer"
+                      >
+                        View
+                      </button>
+                    ) : (
+                      <span className="text-gray-400">No slip</span>
+                    )}
+                  </td>
+                  )}
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     <div className="flex space-x-2">
                       <button
@@ -1311,6 +1340,36 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
                           ) : (
                             <Package className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
+
+                      {order.status === 'paid' && (
+                        <button
+                          onClick={() => {
+                            if (!confirm('Are you sure you want to mark this order as complete?')) {
+                              return
+                            }
+                            updateOrderStatus(order.id, 'complete')
+                          }}
+                          disabled={updatingOrder === order.id}
+                          className={`p-1 rounded transition-all duration-200 ease-in-out ${
+                            updatingOrder === order.id
+                              ? 'text-gray-400 cursor-not-allowed'
+                              : theme === 'green'
+                                ? 'text-green-600 hover:text-green-900 hover:bg-green-50'
+                                : theme === 'red'
+                                  ? 'text-red-600 hover:text-red-900 hover:bg-red-50'
+                                  : theme === 'yellow'
+                                    ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-50'
+                                    : 'text-blue-600 hover:text-blue-900 hover:bg-blue-50'
+                          }`}
+                          title="Mark Complete"
+                        >
+                          {updatingOrder === order.id ? (
+                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+                          ) : (
+                            <Check className="h-4 w-4" />
                           )}
                         </button>
                       )}
@@ -2511,7 +2570,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 Paid Orders ({getOrdersByStatus('paid').length})
               </h4>
             </div>
-            <OrderTable orders={getOrdersByStatus('paid')} />
+            <OrderTable orders={getOrdersByStatus('paid')} showDepositSlipColumn />
           </div>
 
           {/* Complete Orders - Paginated */}
@@ -2702,6 +2761,34 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 <div className="bg-white border rounded-lg p-4">
                   <h4 className="text-sm font-semibold text-gray-900 mb-2">Notes</h4>
                   <p className="text-sm text-gray-700">{selectedOrder.notes}</p>
+                </div>
+              )}
+
+              {selectedOrder.status === 'paid' && (
+                <div className="bg-white border rounded-lg p-4">
+                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Deposit Slip</h4>
+                  {selectedOrder.deposit_slip_url ? (
+                    <div className="space-y-3">
+                      <img
+                        src={selectedOrder.deposit_slip_url}
+                        alt="Deposit slip"
+                        className="max-h-40 rounded border border-gray-200 object-contain"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedDepositSlipImage(selectedOrder.deposit_slip_url!)
+                          setSelectedDepositSlipOrder(selectedOrder)
+                          setShowDepositSlipModal(true)
+                        }}
+                        className="text-sm text-blue-600 hover:text-blue-800 font-medium"
+                      >
+                        View full size
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-500">No deposit slip uploaded</p>
+                  )}
                 </div>
               )}
 
@@ -3118,6 +3205,40 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 src={selectedReturnablePansImage}
                 alt="Returnable pans"
                 className="max-h-[70vh] w-auto rounded-lg border transition-transform duration-300 ease-in-out hover:scale-[2] cursor-zoom-in"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deposit Slip Image Modal */}
+      {showDepositSlipModal && selectedDepositSlipImage && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">
+                Deposit Slip
+                {selectedDepositSlipOrder &&
+                  ` - ₱${getTotalAmount(selectedDepositSlipOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDepositSlipModal(false)
+                  setSelectedDepositSlipImage(null)
+                  setSelectedDepositSlipOrder(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            <div className="text-center flex-1 flex items-center justify-center overflow-auto">
+              <img
+                src={selectedDepositSlipImage}
+                alt="Deposit slip"
+                className="max-h-[70vh] w-auto rounded-lg border"
               />
             </div>
           </div>

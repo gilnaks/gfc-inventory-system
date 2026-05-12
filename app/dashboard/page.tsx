@@ -15,11 +15,21 @@ import { BrandsProvider } from '../contexts/BrandsContext'
 import { Brand, supabase } from '../../lib/supabase'
 import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck, FileText, Users, Calculator, BarChart3, ClipboardList } from 'lucide-react'
 
+const DASHBOARD_GUEST_PASSCODE = '030199'
+
+const GUEST_RESTRICTED_TABS = ['billing', 'payroll', 'reports', 'purchasing'] as const
+type DashboardTab = 'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing'
+
+function isGuestRestrictedTab(tab: string): tab is (typeof GUEST_RESTRICTED_TABS)[number] {
+  return (GUEST_RESTRICTED_TABS as readonly string[]).includes(tab)
+}
+
 export default function DashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isGuestSession, setIsGuestSession] = useState(false)
   const [passcode, setPasscode] = useState('')
   const [selectedBrand, setSelectedBrand] = useState<Brand | null>(null)
-  const [activeTab, setActiveTab] = useState<'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing'>('products')
+  const [activeTab, setActiveTab] = useState<DashboardTab>('products')
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [initialLoading, setInitialLoading] = useState(true)
@@ -33,8 +43,11 @@ export default function DashboardPage() {
       const savedBrand = localStorage.getItem('dashboard_selected_brand')
       const savedTab = localStorage.getItem('dashboard_active_tab')
       
+      const guest = localStorage.getItem('dashboard_guest') === 'true'
+
       if (savedAuth === 'true') {
         setIsAuthenticated(true)
+        setIsGuestSession(guest)
       }
       
       if (savedBrand) {
@@ -45,8 +58,14 @@ export default function DashboardPage() {
         }
       }
       
-      if (savedTab && ['products', 'orders', 'branches', 'billing', 'logistics', 'dsir', 'staff', 'payroll', 'reports', 'purchasing'].includes(savedTab)) {
-        setActiveTab(savedTab as 'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing')
+      const allTabs: DashboardTab[] = ['products', 'orders', 'branches', 'billing', 'logistics', 'dsir', 'staff', 'payroll', 'reports', 'purchasing']
+      if (savedTab && allTabs.includes(savedTab as DashboardTab)) {
+        if (guest && isGuestRestrictedTab(savedTab)) {
+          setActiveTab('products')
+          localStorage.setItem('dashboard_active_tab', 'products')
+        } else {
+          setActiveTab(savedTab as DashboardTab)
+        }
       }
       
       // Add a minimum loading time to prevent flash
@@ -61,7 +80,16 @@ export default function DashboardPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
-    
+
+    if (passcode === DASHBOARD_GUEST_PASSCODE) {
+      setIsAuthenticated(true)
+      setIsGuestSession(true)
+      localStorage.setItem('dashboard_authenticated', 'true')
+      localStorage.setItem('dashboard_guest', 'true')
+      setError('')
+      return
+    }
+
     try {
       const { data, error } = await supabase
         .rpc('validate_admin_credentials', { input_passcode: passcode })
@@ -74,7 +102,9 @@ export default function DashboardPage() {
       
       if (data) {
         setIsAuthenticated(true)
+        setIsGuestSession(false)
         localStorage.setItem('dashboard_authenticated', 'true')
+        localStorage.removeItem('dashboard_guest')
         setError('')
       } else {
         setError('Invalid passcode. Please try again.')
@@ -88,11 +118,13 @@ export default function DashboardPage() {
 
   const handleLogout = () => {
     setIsAuthenticated(false)
+    setIsGuestSession(false)
     setPasscode('')
     setSelectedBrand(null)
     setActiveTab('products')
     setInitialLoading(false)
     localStorage.removeItem('dashboard_authenticated')
+    localStorage.removeItem('dashboard_guest')
     localStorage.removeItem('dashboard_selected_brand')
     localStorage.removeItem('dashboard_active_tab')
   }
@@ -114,6 +146,12 @@ export default function DashboardPage() {
   useEffect(() => {
     localStorage.setItem('dashboard_active_tab', activeTab)
   }, [activeTab])
+
+  useEffect(() => {
+    if (isGuestSession && isGuestRestrictedTab(activeTab)) {
+      setActiveTab('products')
+    }
+  }, [isGuestSession, activeTab])
 
   // Get brand-specific color theme
   const getBrandTheme = (brand: Brand | null) => {
@@ -167,13 +205,13 @@ export default function DashboardPage() {
               <Lock className="h-6 w-6 text-blue-600" />
             </div>
             <h2 className="text-2xl font-bold text-gray-900">Admin Dashboard</h2>
-            <p className="text-gray-600 mt-2">Enter passcode to access product management</p>
+            <p className="text-gray-600 mt-2">Enter admin or guest passcode to access product management</p>
           </div>
           
           <form onSubmit={handleLogin} className="space-y-6">
             <div>
               <label htmlFor="passcode" className="block text-sm font-medium text-gray-700 mb-2">
-                Admin Passcode
+                Passcode
               </label>
               <input
                 type="password"
@@ -249,8 +287,8 @@ export default function DashboardPage() {
                 <BrandSelector onBrandChange={setSelectedBrand} />
               </div>
               <div className="flex items-center space-x-1 text-xs text-gray-500">
-                <div className="w-1.5 h-1.5 bg-green-500 rounded-full"></div>
-                <span>Admin</span>
+                <div className={`w-1.5 h-1.5 rounded-full ${isGuestSession ? 'bg-amber-500' : 'bg-green-500'}`}></div>
+                <span>{isGuestSession ? 'Guest access' : 'Admin access'}</span>
               </div>
             </div>
           </div>
@@ -278,8 +316,8 @@ export default function DashboardPage() {
                 )}
               </div>
               <div className="flex items-center space-x-1 text-sm text-gray-500">
-                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                <span>Admin Access</span>
+                <div className={`w-2 h-2 rounded-full ${isGuestSession ? 'bg-amber-500' : 'bg-green-500'}`}></div>
+                <span>{isGuestSession ? 'Guest access' : 'Admin access'}</span>
               </div>
             </div>
             
@@ -338,6 +376,7 @@ export default function DashboardPage() {
                   <span>Orders</span>
                 </div>
               </button>
+              {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('billing')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
@@ -354,6 +393,7 @@ export default function DashboardPage() {
                   <span>Billing</span>
                 </div>
               </button>
+              )}
               <button
                 onClick={() => setActiveTab('logistics')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
@@ -402,6 +442,7 @@ export default function DashboardPage() {
                   <span>Staff Manager</span>
                 </div>
               </button>
+              {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('payroll')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
@@ -418,6 +459,8 @@ export default function DashboardPage() {
                   <span>Payroll</span>
                 </div>
               </button>
+              )}
+              {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('reports')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
@@ -434,6 +477,8 @@ export default function DashboardPage() {
                   <span>Reports</span>
                 </div>
               </button>
+              )}
+              {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('purchasing')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
@@ -450,6 +495,7 @@ export default function DashboardPage() {
                   <span>Procurement</span>
                 </div>
               </button>
+              )}
               <button
                 onClick={() => setActiveTab('branches')}
                 className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
@@ -477,7 +523,7 @@ export default function DashboardPage() {
         <div className="bg-white rounded-lg shadow-sm border">
           {activeTab === 'products' && selectedBrand && (
             <div className="p-4 sm:p-6">
-              <ProductManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} />
+              <ProductManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} guestMode={isGuestSession} />
             </div>
           )}
           
@@ -500,13 +546,13 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {activeTab === 'billing' && selectedBrand && (
+          {activeTab === 'billing' && !isGuestSession && selectedBrand && (
             <div className="p-4 sm:p-6">
               <BillingManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} />
             </div>
           )}
           
-          {!selectedBrand && activeTab === 'billing' && (
+          {!selectedBrand && activeTab === 'billing' && !isGuestSession && (
             <div className="p-4 sm:p-6 text-center py-12">
               <CreditCard className="h-12 w-12 text-gray-400 mx-auto mb-4" />
               <p className="text-gray-600">Please select a brand to manage billing</p>
@@ -528,7 +574,14 @@ export default function DashboardPage() {
 
           {activeTab === 'dsir' && selectedBrand && (
             <div className="p-4 sm:p-6">
-              <DSIRReportsViewer selectedBrand={selectedBrand} theme={currentTheme} />
+              <DSIRReportsViewer
+                selectedBrand={selectedBrand}
+                theme={currentTheme}
+                showEditItemsButton={!isGuestSession}
+                showDeleteReportButton={!isGuestSession}
+                showLast7DaysSummary={!isGuestSession}
+                dsirViewerReadOnly={isGuestSession}
+              />
             </div>
           )}
           
@@ -545,19 +598,19 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {activeTab === 'payroll' && (
+          {activeTab === 'payroll' && !isGuestSession && (
             <div className="p-4 sm:p-6">
               <PayrollManager />
             </div>
           )}
 
-          {activeTab === 'reports' && (
+          {activeTab === 'reports' && !isGuestSession && (
             <div className="p-4 sm:p-6">
               <ReportsManager selectedBrand={selectedBrand} theme={currentTheme} />
             </div>
           )}
 
-          {activeTab === 'purchasing' && (
+          {activeTab === 'purchasing' && !isGuestSession && (
             <div className="p-4 sm:p-6">
               <PurchasingManager selectedBrand={selectedBrand} theme={currentTheme} />
             </div>

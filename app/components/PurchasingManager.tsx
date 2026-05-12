@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { supabase, Brand, Supplier, PurchaseOrder, PurchaseOrderItem, POPayment, DeliveryReceipt, PurchaseRequisition, RawMaterial, MaterialStockMovement, POStatusHistory } from '../../lib/supabase'
+import { supabase, Brand, Supplier, PurchaseOrder, PurchaseOrderItem, POPayment, DeliveryReceipt, PurchaseRequisition, RawMaterial, MaterialStockMovement, POStatusHistory, FactoryMaterialRequest } from '../../lib/supabase'
 import { Package, History, Edit, Trash2, Clock } from 'lucide-react'
 
 interface PurchasingManagerProps {
@@ -68,6 +68,9 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   const [showMovementHistory, setShowMovementHistory] = useState(false)
   const [selectedMaterialForHistory, setSelectedMaterialForHistory] = useState<RawMaterial | null>(null)
   const [movementHistory, setMovementHistory] = useState<MaterialStockMovement[]>([])
+  const [factoryMaterialRequests, setFactoryMaterialRequests] = useState<FactoryMaterialRequest[]>([])
+  const [releasingRequestId, setReleasingRequestId] = useState<string | null>(null)
+  const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null)
   
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all')
@@ -90,6 +93,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     loadDeliveries()
     loadRequisitions()
     loadRawMaterials()
+    loadFactoryMaterialRequests()
   }, [selectedBrand])
   
   // Reset pagination when filters change
@@ -216,7 +220,81 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     
     if (data) setRawMaterials(data as RawMaterial[])
   }
-  
+
+  const loadFactoryMaterialRequests = async () => {
+    const { data } = await supabase
+      .from('factory_material_requests')
+      .select('*, material:raw_materials(id, material_name, sku, unit, current_stock, brand_id)')
+      .order('created_at', { ascending: false })
+      .limit(100)
+    if (data) setFactoryMaterialRequests(data as FactoryMaterialRequest[])
+  }
+
+  const releaseFactoryMaterialRequest = async (req: FactoryMaterialRequest) => {
+    const mat = rawMaterials.find((m) => m.id === req.material_id)
+    const stock = mat ? Number(mat.current_stock) : 0
+    const qty = Number(req.quantity)
+    if (stock < qty) {
+      alert(`Insufficient stock. Available: ${stock} ${mat?.unit || ''}`)
+      return
+    }
+    if (!confirm(`Release ${qty} ${mat?.unit || 'units'} of ${mat?.material_name || 'material'} to factory?`)) return
+    setReleasingRequestId(req.id)
+    try {
+      const { error: movErr } = await supabase.from('material_stock_movements').insert({
+        material_id: req.material_id,
+        movement_type: 'out',
+        quantity: qty,
+        reference_type: 'factory_request',
+        reference_id: req.id,
+        reference_number: `FMR-${req.id.slice(0, 8)}`,
+        notes: `Factory floor release${req.notes ? ` — ${req.notes}` : ''}`,
+        movement_date: new Date().toISOString().split('T')[0],
+        created_by: 'Procurement',
+      })
+      if (movErr) {
+        alert(movErr.message)
+        return
+      }
+      const { error: updErr } = await supabase
+        .from('factory_material_requests')
+        .update({ status: 'released', released_at: new Date().toISOString() })
+        .eq('id', req.id)
+      if (updErr) {
+        alert(updErr.message)
+        return
+      }
+      await loadRawMaterials()
+      await loadFactoryMaterialRequests()
+    } finally {
+      setReleasingRequestId(null)
+    }
+  }
+
+  const cancelFactoryMaterialRequest = async (req: FactoryMaterialRequest) => {
+    if (req.status !== 'pending') return
+    if (!confirm('Cancel this factory material request? It will be removed from the pending queue.')) return
+    setCancellingRequestId(req.id)
+    try {
+      const { data, error } = await supabase
+        .from('factory_material_requests')
+        .update({ status: 'cancelled' })
+        .eq('id', req.id)
+        .eq('status', 'pending')
+        .select('id')
+      if (error) {
+        alert(error.message)
+        return
+      }
+      if (!data?.length) {
+        alert('This request is no longer pending (it may have been released or cancelled already).')
+      }
+      await loadFactoryMaterialRequests()
+    } finally {
+      setCancellingRequestId(null)
+    }
+  }
+
   const loadMovementHistory = async (materialId: string) => {
     const { data, error } = await supabase
       .from('material_stock_movements')
@@ -1839,6 +1917,71 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
           {/* RAW MATERIALS TAB */}
           {activeTab === 'raw_materials' && (
             <div className="space-y-4">
+              <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-4">
+                <h2 className="text-base font-semibold text-amber-950">Factory material requests</h2>
+                <p className="text-xs text-amber-900/80 mt-1 mb-3">
+                  Production staff submit requests from <span className="font-medium">/factory</span>. Release deducts from raw
+                  materials inventory (same as stock out).
+                </p>
+                {factoryMaterialRequests.filter((r) => r.status === 'pending').length === 0 ? (
+                  <p className="text-sm text-amber-900/70">No pending factory requests.</p>
+                ) : (
+                  <div className="overflow-x-auto rounded-md border border-amber-200/80 bg-white">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-amber-100/60 text-left text-xs font-medium text-amber-950 uppercase">
+                        <tr>
+                          <th className="px-3 py-2">Material</th>
+                          <th className="px-3 py-2">Qty</th>
+                          <th className="px-3 py-2">Date</th>
+                          <th className="px-3 py-2">Notes</th>
+                          <th className="px-3 py-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-amber-100">
+                        {factoryMaterialRequests
+                          .filter((r) => r.status === 'pending')
+                          .map((req) => (
+                            <tr key={req.id} className="bg-white">
+                              <td className="px-3 py-2 font-medium text-gray-900">
+                                {req.material?.material_name || rawMaterials.find((m) => m.id === req.material_id)?.material_name || '—'}
+                              </td>
+                              <td className="px-3 py-2">
+                                {req.quantity} {req.material?.unit || rawMaterials.find((m) => m.id === req.material_id)?.unit || ''}
+                              </td>
+                              <td className="px-3 py-2 text-gray-600">{req.request_date}</td>
+                              <td className="px-3 py-2 text-gray-600 max-w-[200px] truncate" title={req.notes}>
+                                {req.notes || '—'}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <div className="flex flex-wrap justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => cancelFactoryMaterialRequest(req)}
+                                    disabled={
+                                      releasingRequestId === req.id || cancellingRequestId === req.id
+                                    }
+                                    className="px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                                  >
+                                    {cancellingRequestId === req.id ? 'Cancelling…' : 'Cancel'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => releaseFactoryMaterialRequest(req)}
+                                    disabled={releasingRequestId === req.id || cancellingRequestId === req.id}
+                                    className="px-3 py-1.5 text-xs font-medium rounded-md bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50"
+                                  >
+                                    {releasingRequestId === req.id ? 'Releasing…' : 'Release to factory'}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
               <div className="flex justify-between items-center">
                 <div>
                   <h2 className="text-lg font-semibold">Raw Materials Inventory</h2>

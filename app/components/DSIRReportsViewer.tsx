@@ -49,9 +49,23 @@ interface DSIRReportsViewerProps {
   selectedLocation?: Location
   theme?: string
   showEditItemsButton?: boolean
+  /** When false, hides report delete controls (dashboard guest). */
+  showDeleteReportButton?: boolean
+  /** When false, hides the Branch Last 7 Days Summary block and skips its calculation. */
+  showLast7DaysSummary?: boolean
+  /** When true, DSIR report body is view-only (dashboard guest). */
+  dsirViewerReadOnly?: boolean
 }
 
-export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, showEditItemsButton = true }: DSIRReportsViewerProps) {
+export function DSIRReportsViewer({
+  selectedBrand,
+  selectedLocation,
+  theme,
+  showEditItemsButton = true,
+  showDeleteReportButton = true,
+  showLast7DaysSummary = true,
+  dsirViewerReadOnly = false,
+}: DSIRReportsViewerProps) {
   const [reports, setReports] = useState<DSIRReport[]>([])
   const [selectedReport, setSelectedReport] = useState<DSIRReport | null>(null)
   const [loading, setLoading] = useState(true)
@@ -130,10 +144,6 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
     loadReports()
   }, [searchTerm, statusFilter, locationTypeFilter, dateFilter])
   
-  useEffect(() => {
-    calculateLast7DaysSummary()
-  }, [reports, selectedLocation])
-
   // Close report view when brand changes
   useEffect(() => {
     if (selectedReport) {
@@ -412,6 +422,14 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       console.error('Error calculating last 7 days summary:', error)
     }
   }, [reports, selectedLocation])
+
+  useEffect(() => {
+    if (!showLast7DaysSummary) {
+      setLast7DaysSummaryByLocation({})
+      return
+    }
+    calculateLast7DaysSummary()
+  }, [showLast7DaysSummary, calculateLast7DaysSummary])
 
   const loadReports = async (page = 1, append = false) => {
     if (page === 1) {
@@ -1169,7 +1187,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
               </div>
               <DSIRViewer 
                 report={selectedReport} 
-                showEditButton={true} 
+                showEditButton={!dsirViewerReadOnly}
+                forceReadOnly={dsirViewerReadOnly}
                 showDiscrepancyColumns={true}
                 showSalesDiscrepancyColumns={true}
                 showIceCreamDiscrepancyColumns={true}
@@ -1205,7 +1224,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                 </div>
                 <DSIRViewer 
                   report={secondReport} 
-                  showEditButton={true} 
+                  showEditButton={!dsirViewerReadOnly}
+                  forceReadOnly={dsirViewerReadOnly}
                   showDiscrepancyColumns={true}
                   showSalesDiscrepancyColumns={true}
                   showIceCreamDiscrepancyColumns={true}
@@ -1225,7 +1245,8 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         ) : (
           <DSIRViewer 
             report={selectedReport} 
-            showEditButton={true} 
+            showEditButton={!dsirViewerReadOnly}
+            forceReadOnly={dsirViewerReadOnly}
             showDiscrepancyColumns={true}
             showSalesDiscrepancyColumns={true}
             showIceCreamDiscrepancyColumns={true}
@@ -1264,7 +1285,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         <div className="flex space-x-2 justify-end">
           <div className="h-8 w-8 bg-gray-200 rounded"></div>
           <div className="h-8 w-8 bg-gray-200 rounded"></div>
-          <div className="h-8 w-8 bg-gray-200 rounded"></div>
+          {showDeleteReportButton && <div className="h-8 w-8 bg-gray-200 rounded"></div>}
         </div>
       </td>
     </tr>
@@ -1286,6 +1307,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
         </div>
 
         {/* Last 7 Days Summary Skeleton */}
+        {showLast7DaysSummary && (
         <div className="bg-white rounded-lg shadow-sm border p-4">
           <div className="animate-pulse">
             <div className="h-5 bg-gray-200 rounded w-48 mb-3"></div>
@@ -1306,6 +1328,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
             </div>
           </div>
         </div>
+        )}
 
         {/* Filters Skeleton */}
         <div className="flex flex-col lg:flex-row space-y-4 lg:space-y-0 lg:space-x-4 lg:items-center">
@@ -1391,6 +1414,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
       </div>
 
       {/* Last 7 Days Summary */}
+      {showLast7DaysSummary && (
       <div className="bg-white rounded-lg shadow-sm border p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center space-x-4">
@@ -1456,6 +1480,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
           </div>
         )}
       </div>
+      )}
 
       {/* Filters */}
       <div className="flex flex-col lg:flex-row space-y-4 lg:space-y-0 lg:space-x-4 lg:items-center">
@@ -1674,6 +1699,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                                   <RotateCcw className="h-4 w-4" />
                                 </button>
                               )}
+                              {showDeleteReportButton && (
                               <button
                                 onClick={() => deleteReport(report.id)}
                                 disabled={deleting === report.id}
@@ -1682,6 +1708,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                               >
                                 <Trash2 className="h-4 w-4" />
                               </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1772,6 +1799,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                               <RotateCcw className="h-4 w-4" />
                             </button>
                           )}
+                          {showDeleteReportButton && (
                           <button
                             onClick={() => deleteReport(report.id)}
                             disabled={deleting === report.id}
@@ -1780,6 +1808,7 @@ export function DSIRReportsViewer({ selectedBrand, selectedLocation, theme, show
                           >
                             <Trash2 className="h-4 w-4" />
                           </button>
+                          )}
                         </div>
                       </div>
                     </div>

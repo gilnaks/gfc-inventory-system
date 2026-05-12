@@ -101,6 +101,8 @@ interface DSIRViewerProps {
   currentStaffName?: string
   onReportSubmitted?: () => void
   showEditButton?: boolean
+  /** When true, no edits or draft actions (e.g. dashboard guest). */
+  forceReadOnly?: boolean
   showDiscrepancyColumns?: boolean
   showSalesDiscrepancyColumns?: boolean
   showIceCreamDiscrepancyColumns?: boolean
@@ -112,7 +114,8 @@ export function DSIRViewer({
   onReportUpdate, 
   currentStaffName, 
   onReportSubmitted, 
-  showEditButton = false, 
+  showEditButton = false,
+  forceReadOnly = false,
   showDiscrepancyColumns = false,
   showSalesDiscrepancyColumns,
   showIceCreamDiscrepancyColumns,
@@ -160,8 +163,8 @@ export function DSIRViewer({
   const debouncedSaveRef = useRef<NodeJS.Timeout | null>(null)
   const isSwitchingFields = useRef<boolean>(false)
 
-  // Check if report is read-only (submitted or reviewed)
-  const isReadOnly = report?.status === 'submitted' || report?.status === 'reviewed'
+  // Submitted/reviewed are read-only for normal users; forceReadOnly locks all statuses (guest).
+  const isReadOnly = forceReadOnly || report?.status === 'submitted' || report?.status === 'reviewed'
 
   // Check if sales reconciliation has any values
   const hasSalesReconData = () => {
@@ -1070,7 +1073,7 @@ export function DSIRViewer({
 
   const saveEditingWithValue = async (fieldId: string, value: string) => {
     try {
-      console.log('saveEditingWithValue called:', fieldId, 'value:', value)
+      if (isReadOnly) return
       // Parse field ID to determine what to update
       let section, itemIndex, field
       
@@ -1237,6 +1240,7 @@ export function DSIRViewer({
   }
 
   const saveEditing = async (fieldId: string) => {
+    if (isReadOnly) return
     try {
       // Prevent saving if we're already editing a different field
       if (editingField && editingField !== fieldId) {
@@ -1432,7 +1436,7 @@ export function DSIRViewer({
   // Save editing without clearing the editing state (used when switching fields)
   const saveEditingWithoutClearing = async (fieldId: string) => {
     try {
-      // Prevent saving if we're already editing a different field
+      if (isReadOnly) return
       if (editingField && editingField !== fieldId) {
         return
       }
@@ -1643,6 +1647,7 @@ export function DSIRViewer({
   }
 
   const saveDraft = async (showSuccessMessage = true) => {
+    if (forceReadOnly) return
     if (!report?.id) {
       console.error('Cannot save: No report ID')
       return
@@ -2333,6 +2338,7 @@ export function DSIRViewer({
   }
 
   const submitReport = async () => {
+    if (forceReadOnly) return
     if (!report?.id) return
     
     setSubmitting(true)
@@ -3639,7 +3645,7 @@ export function DSIRViewer({
           </div>
 
           {/* Action Buttons Section */}
-          {report?.status === 'draft' && (
+          {report?.status === 'draft' && !forceReadOnly && (
             <div className="border border-black">
               <div className="bg-gray-100 px-2 py-1 border-b border-black">
                 <span className="font-bold text-sm">ACTIONS</span>
