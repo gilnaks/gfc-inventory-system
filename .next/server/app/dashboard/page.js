@@ -95,7 +95,7 @@
 
   body {
     margin: 0;
-    padding: 8px;
+    padding: 10px 0.25in 8px 8px;
     background: #fff;
     color: #000;
     line-height: 1.4;
@@ -118,7 +118,7 @@
     padding: 10px 12px;
     background: #fff;
     color: #000;
-    border-bottom: 3px solid #000;
+    border-bottom: 1px solid #000;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -148,7 +148,7 @@
   .order-info {
     padding: 8px 12px;
     background: #fff;
-    border-bottom: 2px solid #000;
+    border-bottom: 1px solid #000;
   }
 
   .info-grid {
@@ -195,7 +195,7 @@
   .status-badge {
     display: inline-block;
     padding: 2px 6px;
-    border: 2px solid #000;
+    border: 1px solid #000;
     font-size: 12px;
     font-weight: 900;
     text-transform: uppercase;
@@ -246,7 +246,7 @@
     display: grid;
     gap: 6px;
     padding: 6px 0;
-    border-bottom: 3px solid #000;
+    border-bottom: 1px solid #000;
     margin-bottom: 4px;
     background: #fff;
     font-weight: 900;
@@ -350,14 +350,14 @@
   .checkbox {
     width: 12px;
     height: 12px;
-    border: 2px solid #000;
+    border: 1px solid #000;
     background: #fff;
   }
 
   .items-section .item-checkbox {
     width: 14px;
     height: 14px;
-    border: 2px solid #000;
+    border: 1px solid #000;
     background: #fff;
     flex-shrink: 0;
   }
@@ -429,8 +429,8 @@
   .total-section {
     padding: 8px 12px;
     background: #fff;
-    border-top: 3px solid #000;
-    border-bottom: 3px solid #000;
+    border-top: 1px solid #000;
+    border-bottom: 1px solid #000;
     font-weight: 900;
     margin-top: auto;
     flex-shrink: 0;
@@ -452,7 +452,7 @@
     flex-direction: column;
     align-items: stretch;
     justify-content: flex-start;
-    border-left: 3px solid #000;
+    border-left: 1px solid #000;
     padding-left: 16px;
     min-width: 220px;
     width: 100%;
@@ -488,7 +488,7 @@
   }
 
   .total-remarks-area {
-    border: 2px solid #000;
+    border: 1px solid #000;
     min-height: 88px;
     padding: 6px 8px;
     background: #fff;
@@ -539,7 +539,7 @@
   }
 
   .grand-total {
-    border-top: 3px solid #000;
+    border-top: 1px solid #000;
     padding-top: 6px;
     margin-top: 6px;
   }
@@ -578,7 +578,7 @@
   .notes {
     padding: 8px 12px;
     background: #fff;
-    border: 2px solid #000;
+    border: 1px solid #000;
     margin: 0 12px 8px;
   }
 
@@ -588,7 +588,7 @@
     margin-bottom: 4px;
     font-size: 14px;
     text-transform: uppercase;
-    border-bottom: 2px solid #000;
+    border-bottom: 1px solid #000;
     padding-bottom: 4px;
   }
 
@@ -613,7 +613,11 @@
   /* Cols 1–2: prepared/checked/delivered/received; cols 3–4: departure/arrival/time/empty pans */
   .signatories-row-top,
   .signatories-row-bottom {
-    grid-template-columns: 1.2fr 1.2fr 0.5fr 0.5fr;
+    grid-template-columns: 1fr 1fr 0.5fr 0.5fr;
+  }
+
+  .signatories-row .signatory-item:nth-child(3) {
+    margin-left: 20px;
   }
 
   .signatories-row-bottom:last-child {
@@ -632,7 +636,7 @@
   }
 
   .signatory-line {
-    border-bottom: 2px solid #000;
+    border-bottom: 1px solid #000;
     height: 20px;
     margin-bottom: 4px;
   }
@@ -644,7 +648,7 @@
   }
 
   @page {
-    margin: 0;
+    margin: 10px 0.25in 0 0;
     size: auto;
   }
 
@@ -652,7 +656,7 @@
     html,
     body {
       margin: 0 !important;
-      padding: 8px !important;
+      padding: 10px 0.25in 8px 8px !important;
       height: 100%;
       font-family: Courier, 'Courier New', 'Liberation Mono', 'DejaVu Sans Mono', Consolas, monospace !important;
       -webkit-font-smoothing: none !important;
