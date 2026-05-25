@@ -1499,10 +1499,6 @@ export default function OrderPage() {
                   <span class="info-label">Logistics</span>
                   <span class="info-value">${order.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}</span>
                 </div>
-                <div class="info-item">
-                  <span class="info-label">Status</span>
-                  <span class="info-value">${order.status}</span>
-                </div>
               </div>
             </div>
             

@@ -2,7 +2,10 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
 import { ShoppingCart, Package, CheckCircle, Check, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X } from 'lucide-react'
-import { formatPhilippinesDateTime } from '../../lib/timezone'
+import { formatPhilippinesDateTime, formatPhilippinesTransferSheetDate } from '../../lib/timezone'
+import { TRANSFER_SHEET_PRINT_STYLES } from '../../lib/transferSheetPrintStyles'
+import { renderTransferSheetItemsBlock } from '../../lib/transferSheetPrintItems'
+import { renderTransferSheetTotalsSection } from '../../lib/transferSheetPrintTotals'
 
 interface Location {
   id: string
@@ -1522,6 +1525,25 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const printReceipt = () => {
     if (!selectedOrder) return
 
+    const sortedDetails = [...selectedOrder.order_details].sort((a, b) => {
+      const categoryA =
+        a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
+      const categoryB =
+        b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
+      return categoryA.localeCompare(categoryB)
+    })
+
+    const itemsHtml = renderTransferSheetItemsBlock(
+      sortedDetails.map((detail) => ({
+        name: detail.products.name,
+        sku: detail.products.sku,
+        unit: detail.products.unit,
+        quantity: detail.quantity,
+        unitPrice: detail.unit_price,
+      })),
+      { showPrices: true }
+    )
+
     const printWindow = window.open('', '_blank')
     if (printWindow) {
       printWindow.document.write(`
@@ -1529,344 +1551,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         <html>
         <head>
           <title>Receipt - Order ${selectedOrder.id.slice(0, 8)}</title>
-          <style>
-            
-            * { box-sizing: border-box; }
-            body { 
-              font-family: Arial, sans-serif; 
-              margin: 0; 
-              padding: 10px; 
-              background: white;
-              color: black;
-              line-height: 1.4;
-            }
-            
-            .receipt-container {
-              max-width: 100%;
-              width: 100%;
-              margin: 0;
-              background: white;
-              box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-              border-radius: 8px;
-              overflow: hidden;
-              display: flex;
-              flex-direction: column;
-              min-height: 100vh;
-            }
-            
-            .header { 
-              text-align: center; 
-              padding: 12px 20px;
-              background: white;
-              color: black;
-              border-bottom: 2px solid black;
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-            }
-            
-            .company-name { 
-              font-size: 23px; 
-              font-weight: bold; 
-              color: black;
-            }
-            
-            .receipt-title { 
-              font-size: 15px; 
-              font-weight: normal; 
-              color: black;
-            }
-            
-            .generated-date {
-              font-size: 10px;
-              color: #6b7280;
-              text-align: center;
-              flex: 1;
-            }
-            
-            .order-info { 
-              padding: 8px 12px; 
-              background: white;
-              border-bottom: 1px solid black;
-            }
-            
-            .info-grid {
-              display: grid;
-              grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-              gap: 4px 12px;
-            }
-            
-            .info-item {
-              display: flex;
-              flex-direction: column;
-            }
-            
-            .info-label { 
-              font-weight: normal; 
-              color: #666;
-              font-size: 12px;
-              text-transform: uppercase;
-              margin-bottom: 1px;
-            }
-            
-            .info-value { 
-              font-weight: normal; 
-              color: black;
-              font-size: 13px;
-            }
-            
-            .status-badge {
-              display: inline-block;
-              padding: 2px 6px;
-              border: 1px solid black;
-              font-size: 11px;
-              font-weight: normal;
-              text-transform: uppercase;
-            }
-            
-            .status-pending { background: white; color: black; }
-            .status-approved { background: white; color: black; }
-            .status-fulfilled { background: black; color: white; }
-            .status-cancelled { background: white; color: black; }
-            
-            .items { 
-              padding: 8px 12px;
-              flex: 1;
-            }
-            
-            .items-multi-column {
-              display: grid;
-              grid-template-columns: 1fr 1fr;
-              gap: 20px;
-            }
-            
-            .items-column {
-              display: flex;
-              flex-direction: column;
-            }
-            
-            .items-title {
-              font-size: 13px;
-              font-weight: bold;
-              margin-bottom: 6px;
-              color: black;
-              text-transform: uppercase;
-            }
-            
-            .items-header {
-              display: grid;
-              grid-template-columns: 30px 2fr 1fr 1fr 1fr;
-              gap: 8px;
-              padding: 4px 0;
-              border-bottom: 1px solid black;
-              margin-bottom: 4px;
-            }
-            
-            .header-cell {
-              font-size: 11px;
-              font-weight: bold;
-              color: black;
-              text-transform: uppercase;
-            }
-            
-            .header-checkbox { text-align: center; }
-            .header-item { text-align: left; }
-            .header-qty { text-align: center; }
-            .header-price { text-align: center; }
-            .header-total { text-align: right; }
-            
-            .item-checkbox {
-              text-align: center;
-              display: flex;
-              justify-content: center;
-              align-items: center;
-            }
-            
-            .checkbox {
-              width: 10px;
-              height: 10px;
-              border: 1px solid black;
-              background: white;
-              cursor: pointer;
-            }
-            
-            .item-row {
-              display: grid;
-              grid-template-columns: 20px 2fr 1fr 1fr 1fr;
-              gap: 4px;
-              align-items: center;
-              padding: 1px 0;
-              border-bottom: 1px solid #ccc;
-              font-size: 9px;
-              min-height: 16px;
-            }
-            
-            .item-row:last-child {
-              border-bottom: none;
-            }
-            
-            .item-name {
-              font-weight: normal;
-              color: black;
-              margin-bottom: 1px;
-              font-size: 12px;
-            }
-            
-            .item-details {
-              font-size: 10px;
-              color: #666;
-            }
-            
-            .item-quantity {
-              text-align: center;
-              font-weight: normal;
-              color: black;
-              font-size: 12px;
-            }
-            
-            .item-unit-price {
-              text-align: center;
-              font-weight: normal;
-              color: black;
-              font-size: 12px;
-            }
-            
-            .item-price {
-              text-align: right;
-              font-weight: bold;
-              color: black;
-              font-size: 12px;
-            }
-            
-            .total-section { 
-              padding: 8px 12px;
-              background: white;
-              border-top: 1px solid black;
-            }
-            
-            .total-row {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              margin-bottom: 4px;
-            }
-            
-            .total-label {
-              font-weight: normal;
-              color: black;
-              font-size: 12px;
-            }
-            
-            .total-value {
-              font-weight: normal;
-              color: black;
-              font-size: 12px;
-            }
-            
-            .grand-total {
-              border-top: 1px solid black;
-              padding-top: 4px;
-              margin-top: 4px;
-            }
-            
-            .grand-total .total-label {
-              font-size: 13px;
-              font-weight: bold;
-            }
-            
-            .grand-total .total-value {
-              font-size: 14px;
-              font-weight: bold;
-              color: black;
-            }
-            
-            .footer { 
-              text-align: center; 
-              padding: 6px 12px;
-              background: black;
-              color: white;
-              margin-top: auto;
-            }
-            
-            .footer-text {
-              font-size: 11px;
-              margin-bottom: 2px;
-            }
-            
-            .footer-date {
-              font-size: 10px;
-            }
-            
-            .notes {
-              padding: 6px 12px;
-              background: white;
-              border: 1px solid black;
-              margin: 0 12px 8px;
-            }
-            
-            .notes-title {
-              font-weight: bold;
-              color: black;
-              margin-bottom: 2px;
-              font-size: 11px;
-            }
-            
-            .notes-text {
-              color: black;
-              font-size: 11px;
-            }
-            
-            .signatories {
-              margin-top: 20px;
-              padding-top: 15px;
-              border-top: 1px solid #ddd;
-            }
-            
-            .signatories-row {
-              display: grid;
-              grid-template-columns: 1fr 1fr 1fr 0.5fr;
-              gap: 15px;
-              margin-bottom: 15px;
-            }
-            
-            .signatory-item {
-              text-align: center;
-            }
-            
-            .signatory-item.returned-pans {
-              min-width: 80px;
-            }
-            
-            .signatory-label {
-              font-size: 11px;
-              color: #333;
-              margin-bottom: 25px;
-              font-weight: 500;
-            }
-            
-            .signatory-line {
-              border-bottom: 1px solid #333;
-              height: 20px;
-              margin-bottom: 5px;
-            }
-            
-            .signatory-line.small {
-              height: 20px;
-              width: 60px;
-              margin: 0 auto 5px auto;
-            }
-            
-            .signatory-name {
-              font-size: 10px;
-              color: #666;
-              font-style: italic;
-            }
-            
-            @media print { 
-              body { margin: 0; padding: 0; }
-              .receipt-container { box-shadow: none; }
-            }
-          </style>
+          <style>${TRANSFER_SHEET_PRINT_STYLES}</style>
         </head>
         <body>
           <div class="receipt-container">
@@ -1877,22 +1562,18 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             </div>
             
             <div class="order-info">
-              <div class="info-grid">
+              <div class="info-grid info-grid-cols-4">
                 <div class="info-item">
                   <span class="info-label">Order ID</span>
                   <span class="info-value">${selectedOrder.id.slice(0, 8)}</span>
                 </div>
                 <div class="info-item">
                   <span class="info-label">Date (PST)</span>
-                  <span class="info-value">${formatPhilippinesDateTime(selectedOrder.created_at, { dateStyle: 'short' })}</span>
+                  <span class="info-value">${formatPhilippinesTransferSheetDate(selectedOrder.created_at)}</span>
                 </div>
-                <div class="info-item">
+                <div class="info-item info-item-location">
                   <span class="info-label">Location</span>
                   <span class="info-value">${selectedOrder.location?.name || 'N/A'}</span>
-                </div>
-                <div class="info-item">
-                  <span class="info-label">Status</span>
-                  <span class="info-value">${selectedOrder.status}</span>
                 </div>
                 <div class="info-item">
                   <span class="info-label">Logistics</span>
@@ -1901,151 +1582,37 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               </div>
             </div>
             
-            <div class="items ${selectedOrder.order_details.length > 15 ? 'items-multi-column' : ''}">
-              ${selectedOrder.order_details.length > 15 ? `
-                <div class="items-column">
-                  <div class="items-header">
-                    <div class="header-cell header-checkbox">✓</div>
-                    <div class="header-cell header-item">Item</div>
-                    <div class="header-cell header-qty">Quantity</div>
-                    <div class="header-cell header-price">Price</div>
-                    <div class="header-cell header-total">Total</div>
-                  </div>
-                  ${selectedOrder.order_details.sort((a, b) => {
-                    const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
-                    const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
-                    return categoryA.localeCompare(categoryB)
-                  }).slice(0, Math.ceil(selectedOrder.order_details.length / 2)).map(detail => `
-                    <div class="item-row">
-                      <div class="item-checkbox">
-                        <div class="checkbox"></div>
-                      </div>
-                      <div>
-                        <div class="item-name">${detail.products.name}</div>
-                        <div class="item-details">
-                          ${detail.products.sku ? `SKU: ${detail.products.sku}` : ''}
-                        </div>
-                      </div>
-                      <div class="item-quantity">${detail.quantity} ${detail.products.unit}</div>
-                      <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                      <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    </div>
-                  `).join('')}
-                </div>
-                <div class="items-column">
-                  <div class="items-header">
-                    <div class="header-cell header-checkbox">✓</div>
-                    <div class="header-cell header-item">Item</div>
-                    <div class="header-cell header-qty">Quantity</div>
-                    <div class="header-cell header-price">Price</div>
-                    <div class="header-cell header-total">Total</div>
-                  </div>
-                  ${selectedOrder.order_details.sort((a, b) => {
-                    const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
-                    const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
-                    return categoryA.localeCompare(categoryB)
-                  }).slice(Math.ceil(selectedOrder.order_details.length / 2)).map(detail => `
-                    <div class="item-row">
-                      <div class="item-checkbox">
-                        <div class="checkbox"></div>
-                      </div>
-                      <div>
-                        <div class="item-name">${detail.products.name}</div>
-                        <div class="item-details">
-                          ${detail.products.sku ? `SKU: ${detail.products.sku}` : ''}
-                        </div>
-                      </div>
-                      <div class="item-quantity">${detail.quantity} ${detail.products.unit}</div>
-                      <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                      <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    </div>
-                  `).join('')}
-                </div>
-              ` : `
-                <div class="items-header">
-                  <div class="header-cell header-checkbox">✓</div>
-                  <div class="header-cell header-item">Item</div>
-                  <div class="header-cell header-qty">Quantity</div>
-                  <div class="header-cell header-price">Price</div>
-                  <div class="header-cell header-total">Total</div>
-                </div>
-                ${selectedOrder.order_details.sort((a, b) => {
-                  const categoryA = a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
-                  const categoryB = b.products?.category && b.products.category.trim() !== '' ? b.products.category : 'Uncategorized'
-                  return categoryA.localeCompare(categoryB)
-                }).map(detail => `
-                  <div class="item-row">
-                    <div class="item-checkbox">
-                      <div class="checkbox"></div>
-                    </div>
-                    <div>
-                      <div class="item-name">${detail.products.name}</div>
-                      <div class="item-details">
-                        ${detail.products.sku ? `SKU: ${detail.products.sku}` : ''}
-                      </div>
-                    </div>
-                    <div class="item-quantity">${detail.quantity} ${detail.products.unit}</div>
-                    <div class="item-unit-price">₱${detail.unit_price.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    <div class="item-price">₱${(detail.unit_price * detail.quantity).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                  </div>
-                `).join('')}
-              `}
-            </div>
+            ${itemsHtml}
             
-            ${selectedOrder.notes ? `
-              <div class="notes">
-                <div class="notes-title">Notes</div>
-                <div class="notes-text">${selectedOrder.notes}</div>
-              </div>
-            ` : ''}
-            
-            <div class="total-section">
-              ${getCategoryTotals(selectedOrder).map(categoryTotal => `
-                <div class="total-row">
-                  <span class="total-label">${categoryTotal.category}: ${categoryTotal.totalQuantity} items</span>
-                  <span class="total-value">₱${categoryTotal.totalAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                </div>
-              `).join('')}
-              <div class="total-row">
-                <span class="total-label">Subtotal</span>
-                <span class="total-value">₱${getSubtotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-              </div>
-              ${selectedOrder.delivery_type === 'delivery' ? `
-                <div class="total-row">
-                  <span class="total-label">Delivery Fee</span>
-                  <span class="total-value">${getSubtotalAmount(selectedOrder) >= 10000 ? 'FREE (Order over ₱10k)' : '+₱500.00'}</span>
-                </div>
-              ` : ''}
-              ${selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) >= 10000 ? `
-                <div class="total-row">
-                  <span class="total-label">Pickup Discount (5%)</span>
-                  <span class="total-value">-₱${(getSubtotalAmount(selectedOrder) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                </div>
-              ` : ''}
-              ${selectedOrder.delivery_type === 'pickup' && getSubtotalAmount(selectedOrder) < 10000 ? `
-                <div class="total-row">
-                  <span class="total-label">Pickup Discount</span>
-                  <span class="total-value">Not available (Order under ₱10k)</span>
-                </div>
-              ` : ''}
-              ${selectedOrder.delivery_type === 'none' ? `
-                <div class="total-row">
-                  <span class="total-label">Logistics</span>
-                  <span class="total-value">None (No discount, no delivery fee)</span>
-                </div>
-              ` : ''}
-              <div class="total-row grand-total">
-                <span class="total-label">Total Amount</span>
-                <span class="total-value">₱${getTotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-              </div>
-            </div>
+            ${renderTransferSheetTotalsSection({
+              categoryTotals: getCategoryTotals(selectedOrder),
+              subtotal: getSubtotalAmount(selectedOrder),
+              deliveryType: selectedOrder.delivery_type,
+              grandTotal: getTotalAmount(selectedOrder),
+              remarks: selectedOrder.notes,
+              showLogisticsNone: true,
+            })}
             
             <div class="signatories">
-              <div class="signatories-row">
+              <div class="signatories-row signatories-row-top">
                 <div class="signatory-item">
                   <div class="signatory-label">Prepared by:</div>
                   <div class="signatory-line"></div>
                 </div>
+                <div class="signatory-item">
+                  <div class="signatory-label">Checked by:</div>
+                  <div class="signatory-line"></div>
+                </div>
+                <div class="signatory-item">
+                  <div class="signatory-label">Departure:</div>
+                  <div class="signatory-line"></div>
+                </div>
+                <div class="signatory-item">
+                  <div class="signatory-label">Arrival:</div>
+                  <div class="signatory-line"></div>
+                </div>
+              </div>
+              <div class="signatories-row signatories-row-bottom">
                 <div class="signatory-item">
                   <div class="signatory-label">Delivered by:</div>
                   <div class="signatory-line"></div>
@@ -2054,9 +1621,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   <div class="signatory-label">Received by:</div>
                   <div class="signatory-line"></div>
                 </div>
-                <div class="signatory-item returned-pans">
-                  <div class="signatory-label">Returned pans:</div>
-                  <div class="signatory-line small"></div>
+                <div class="signatory-item">
+                  <div class="signatory-label">Time:</div>
+                  <div class="signatory-line"></div>
+                </div>
+                <div class="signatory-item">
+                  <div class="signatory-label">Empty pans:</div>
+                  <div class="signatory-line"></div>
                 </div>
               </div>
             </div>

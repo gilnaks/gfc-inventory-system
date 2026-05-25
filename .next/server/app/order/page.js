@@ -380,10 +380,6 @@ ${s.join("\n")}`),z(!1);return}let r=new Set([...A.order_details?.map(e=>e.produ
                   <span class="info-label">Logistics</span>
                   <span class="info-value">${"delivery"===e.delivery_type?"Delivery":"Pickup"}</span>
                 </div>
-                <div class="info-item">
-                  <span class="info-label">Status</span>
-                  <span class="info-value">${e.status}</span>
-                </div>
               </div>
             </div>
             

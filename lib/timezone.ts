@@ -61,6 +61,16 @@ export function formatPhilippinesDateTime(date: string | Date, options?: Intl.Da
   })
 }
 
+/** Transfer sheet / print: e.g. Dec 02, 2026 (Philippines time) */
+export function formatPhilippinesTransferSheetDate(date: string | Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: PHILIPPINES_TIMEZONE,
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+  }).format(new Date(date))
+}
+
 /**
  * Get the start of day in Philippines timezone
  */
