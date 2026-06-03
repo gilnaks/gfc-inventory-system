@@ -1,6 +1,7 @@
 'use client'
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react'
 import { supabase } from '../../lib/supabase'
+import { TRANSFER_SHEET_DSIR_QR_PREFIX } from '../../lib/transferSheetDsirQr'
 
 interface DSIRReport {
   id: string
@@ -109,6 +110,15 @@ interface DSIRViewerProps {
   showMaterialsDiscrepancyColumns?: boolean
 }
 
+interface DsIrTransferScanPayload {
+  type: 'dsir_ice_cream_transfer_v1'
+  items: Array<{ flavor: string; arrival: number }>
+}
+
+function normalizeCategoryKey(category: string | null | undefined): string {
+  return (category || '').trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
 export function DSIRViewer({ 
   report, 
   onReportUpdate, 
@@ -137,7 +147,9 @@ export function DSIRViewer({
 
   // Predefined items - loaded from database
   const [predefinedSalesItems, setPredefinedSalesItems] = useState<Array<{name: string, price: number | null}>>([])
-  const [predefinedIceCreamFlavors, setPredefinedIceCreamFlavors] = useState<Array<{name: string, price: number | null}>>([])
+  const [predefinedIceCreamFlavors, setPredefinedIceCreamFlavors] = useState<
+    Array<{name: string; category: string; price: number | null}>
+  >([])
   const [predefinedMaterials, setPredefinedMaterials] = useState<Array<{name: string, price: number | null}>>([])
   const [predefinedDenominations, setPredefinedDenominations] = useState<Array<{name: string, price: number | null}>>([])
 
@@ -152,6 +164,7 @@ export function DSIRViewer({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [saving, setSaving] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [transferScanValue, setTransferScanValue] = useState('')
   
   // Legacy editing state (keeping for compatibility with existing UI)
   const [editingField, setEditingField] = useState<string | null>(null)
@@ -198,6 +211,60 @@ export function DSIRViewer({
       isReadOnly ? 'cursor-default' : 'cursor-pointer hover:bg-gray-100'
     }`
   }
+
+  const applyTransferSheetScan = useCallback((rawScanValue: string) => {
+    const raw = rawScanValue.trim()
+    if (!raw.startsWith(TRANSFER_SHEET_DSIR_QR_PREFIX)) {
+      alert('Invalid transfer QR format.')
+      return
+    }
+
+    const jsonPart = raw.slice(TRANSFER_SHEET_DSIR_QR_PREFIX.length)
+    let parsed: DsIrTransferScanPayload
+    try {
+      parsed = JSON.parse(jsonPart) as DsIrTransferScanPayload
+    } catch {
+      alert('Unable to parse transfer QR data.')
+      return
+    }
+
+    if (parsed.type !== 'dsir_ice_cream_transfer_v1' || !Array.isArray(parsed.items)) {
+      alert('Unsupported transfer QR payload.')
+      return
+    }
+
+    let appliedCount = 0
+    const nextFormData: Record<string, any> = {}
+
+    for (const row of parsed.items) {
+      const flavor = String(row.flavor || '').trim().toUpperCase()
+      const arrivalToAdd = Math.max(0, Math.floor(Number(row.arrival) || 0))
+      if (!flavor || arrivalToAdd <= 0) continue
+
+      const existingItem = iceCreamInventory.find((item) => item.flavor.trim().toUpperCase() === flavor)
+      const predefinedIndex = predefinedIceCreamFlavors.findIndex(
+        (item) => item.name.trim().toUpperCase() === flavor
+      )
+      const itemId = existingItem?.id || (predefinedIndex >= 0 ? `new-${predefinedIndex}` : null)
+      if (!itemId) continue
+
+      const fieldId = `icecream-${itemId}-arrival`
+      nextFormData[fieldId] = arrivalToAdd
+      appliedCount += 1
+    }
+
+    if (appliedCount === 0) {
+      alert('No matching DSIR ice cream flavors found from scanned transfer QR.')
+      return
+    }
+
+    setFormData((prev: Record<string, any>) => ({
+      ...prev,
+      ...nextFormData,
+    }))
+    setHasUnsavedChanges(true)
+    alert(`Transfer QR applied to ${appliedCount} flavor(s). Save draft to persist.`)
+  }, [iceCreamInventory, predefinedIceCreamFlavors, formData])
 
   // Helper function to handle cell clicks
   const handleCellClick = (e: React.MouseEvent, fieldId: string, currentValue: any) => {
@@ -568,6 +635,16 @@ export function DSIRViewer({
     return 0
   }
 
+  const sortBySecondWord = (aName: string, bName: string) => {
+    const aWords = aName.trim().split(/\s+/)
+    const bWords = bName.trim().split(/\s+/)
+    const aSecond = aWords[1] || aWords[0] || ''
+    const bSecond = bWords[1] || bWords[0] || ''
+    const bySecond = sortAlphanumeric(aSecond, bSecond)
+    if (bySecond !== 0) return bySecond
+    return sortAlphanumeric(aName, bName)
+  }
+
   const loadPredefinedItems = useCallback(async () => {
     try {
       // Get brand ID from report location
@@ -593,18 +670,63 @@ export function DSIRViewer({
         }
       }
 
-      // Group items by category and sort them
+      // Group predefined items by category and sort them.
       const sales = (data?.filter(item => item.category === 'sales' && filterByLocation(item)) || [])
-        .sort((a, b) => sortAlphanumeric(a.name, b.name))
-      const iceCream = (data?.filter(item => item.category === 'ice_cream' && filterByLocation(item)) || [])
-        .sort((a, b) => sortAlphanumeric(a.name, b.name))
+        .sort((a, b) => sortBySecondWord(a.name, b.name))
       const materials = (data?.filter(item => item.category === 'materials' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
       const denominations = (data?.filter(item => item.category === 'denominations' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
 
+      // Section B uses Inventory tab products (category: ice cream), not dsir_predefined_items.
+      const { data: inventoryProducts, error: inventoryError } = await supabase
+        .from('products')
+        .select('name, category')
+        .eq('brand_id', (report?.location as any)?.brand_id)
+        .order('name')
+
+      if (inventoryError) throw inventoryError
+
+      const { data: categorySortRows, error: categorySortError } = await supabase
+        .from('product_category_sort')
+        .select('category_name, sort_index')
+        .eq('brand_id', (report?.location as any)?.brand_id)
+
+      if (categorySortError) throw categorySortError
+
+      const categorySortMap = new Map<string, number>()
+      for (const row of categorySortRows || []) {
+        categorySortMap.set(normalizeCategoryKey(row.category_name), Number(row.sort_index) || 0)
+      }
+
+      const eligibleInventoryProducts = (inventoryProducts || []).filter((product: any) => {
+        const key = normalizeCategoryKey(product.category)
+        const categoryIndex = key ? categorySortMap.get(key) : undefined
+        return categoryIndex !== 0
+      })
+
+      const groupedUnique = new Map<string, { name: string; category: string }>()
+      for (const product of eligibleInventoryProducts) {
+        const name = String(product.name || '').trim().toUpperCase()
+        if (!name) continue
+        if (!groupedUnique.has(name)) {
+          groupedUnique.set(name, {
+            name,
+            category: String(product.category || 'UNCATEGORIZED').trim().toUpperCase(),
+          })
+        }
+      }
+
+      const sectionBIceCreamNames = Array.from(groupedUnique.values())
+        .sort((a, b) => {
+          const byCategory = sortAlphanumeric(a.category, b.category)
+          if (byCategory !== 0) return byCategory
+          return sortAlphanumeric(a.name, b.name)
+        })
+        .map((item) => ({ ...item, price: null as number | null }))
+
       setPredefinedSalesItems(sales)
-      setPredefinedIceCreamFlavors(iceCream)
+      setPredefinedIceCreamFlavors(sectionBIceCreamNames)
       setPredefinedMaterials(materials)
       setPredefinedDenominations(denominations)
     } catch (error) {
@@ -614,12 +736,7 @@ export function DSIRViewer({
         {name: 'BIG CUP', price: 90}, {name: 'SMALL CUP', price: 80}, {name: 'WATER', price: 0}, 
         {name: 'CHOCO-COATED', price: 0}, {name: '500ML', price: 0}, {name: '1 PAN', price: 500}
       ])
-      setPredefinedIceCreamFlavors([
-        {name: 'BUBBLEGUM', price: null}, {name: 'COOKIE BITS', price: null}, {name: 'COOKIE MON', price: null}, 
-        {name: 'COFFEE', price: null}, {name: 'CHOCOLATE', price: null}, {name: 'DURIAN', price: null}, 
-        {name: 'MANGO', price: null}, {name: 'MELON', price: null}, {name: 'MATCHA', price: null}, 
-        {name: 'STRAWBERRY', price: null}, {name: 'UBE', price: null}, {name: 'UBE QUEZO', price: null}, {name: 'UNICORN', price: null}
-      ])
+      setPredefinedIceCreamFlavors([])
       setPredefinedMaterials([
         {name: 'DSR FORM', price: null}, {name: 'SPOONS', price: null}, {name: 'TISSUE', price: null}, 
         {name: 'GLOVES', price: null}, {name: 'TRASHBAG', price: null}, {name: 'SOAP', price: null}, {name: 'POPSICLE STICKS', price: null}
@@ -2795,7 +2912,37 @@ export function DSIRViewer({
           <div className="border border-black">
             <div className="bg-gray-100 px-2 py-1 border-b border-black">
               <span className="font-bold text-sm">B. ICE CREAM INVENTORY</span>
-                      </div>
+            </div>
+            {!isReadOnly && (
+              <div className="px-2 py-2 border-b border-black bg-white">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={transferScanValue}
+                    onChange={(e) => setTransferScanValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        applyTransferSheetScan(transferScanValue)
+                        setTransferScanValue('')
+                      }
+                    }}
+                    placeholder="Scan transfer-sheet QR for ice cream arrivals"
+                    className="flex-1 border border-gray-300 px-2 py-1 text-xs rounded"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      applyTransferSheetScan(transferScanValue)
+                      setTransferScanValue('')
+                    }}
+                    className="px-2 py-1 text-xs bg-black text-white rounded"
+                  >
+                    Apply QR
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full text-xs" style={{tableLayout: 'fixed'}}>
                 <thead>
@@ -2812,11 +2959,22 @@ export function DSIRViewer({
                 </thead>
                 <tbody>
                   {predefinedIceCreamFlavors.map((flavorObj, flavorIndex) => {
+                    const previousFlavor = flavorIndex > 0 ? predefinedIceCreamFlavors[flavorIndex - 1] : null
+                    const showCategoryHeader =
+                      flavorIndex === 0 || previousFlavor?.category !== flavorObj.category
                     const item = iceCreamInventory.find(i => i.flavor === flavorObj.name)
                     const itemId = item?.id || `new-${flavorIndex}`
                     
                     return (
-                    <tr key={flavorObj.name} className="border-b border-gray-300">
+                    <Fragment key={`${flavorObj.category}-${flavorObj.name}`}>
+                      {showCategoryHeader && (
+                        <tr className="border-b border-black bg-gray-100">
+                          <td colSpan={showIceCreamDiff ? 6 : 5} className="px-2 py-1 text-left font-semibold">
+                            {flavorObj.category}
+                          </td>
+                        </tr>
+                      )}
+                    <tr className="border-b border-gray-300">
                         <td className="border-r border-black px-1 py-1 sticky left-0 bg-white z-10 w-28 break-words">{flavorObj.name}</td>
                         <td className="border-r border-black px-1 py-1 text-center w-10">
                           {editingField === `icecream-${itemId}-beginning` ? (
@@ -2960,6 +3118,7 @@ export function DSIRViewer({
                               </div>
                         </td>
                   </tr>
+                  </Fragment>
                     )
                   })}
                   <tr className="border-t-2 border-black font-semibold">

@@ -104,6 +104,20 @@ interface DSIRFormProps {
   onReportUpdate: (report: DSIRReport) => void
 }
 
+function normalizeCategoryKey(category: string | null | undefined): string {
+  return (category || '').trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+function sortBySecondWord(aName: string, bName: string): number {
+  const aWords = aName.trim().split(/\s+/)
+  const bWords = bName.trim().split(/\s+/)
+  const aSecond = aWords[1] || aWords[0] || ''
+  const bSecond = bWords[1] || bWords[0] || ''
+  const bySecond = aSecond.localeCompare(bSecond)
+  if (bySecond !== 0) return bySecond
+  return aName.localeCompare(bName)
+}
+
 export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -183,11 +197,44 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
       }
 
       // Group items by category
-      const sales = data?.filter(item => item.category === 'sales' && filterByLocation(item)).map(item => ({
+      const sales = (data?.filter(item => item.category === 'sales' && filterByLocation(item)).map(item => ({
         name: item.name,
         price: item.price || 0
-      })) || []
-      const iceCream = data?.filter(item => item.category === 'ice_cream' && filterByLocation(item)).map(item => item.name) || []
+      })) || []).sort((a, b) => sortBySecondWord(a.name, b.name))
+      const { data: inventoryProducts, error: inventoryError } = await supabase
+        .from('products')
+        .select('name, category')
+        .eq('brand_id', report.location.brand_id)
+        .order('name')
+
+      if (inventoryError) throw inventoryError
+
+      const { data: categorySortRows, error: categorySortError } = await supabase
+        .from('product_category_sort')
+        .select('category_name, sort_index')
+        .eq('brand_id', report.location.brand_id)
+
+      if (categorySortError) throw categorySortError
+
+      const categorySortMap = new Map<string, number>()
+      for (const row of categorySortRows || []) {
+        categorySortMap.set(normalizeCategoryKey(row.category_name), Number(row.sort_index) || 0)
+      }
+
+      const eligibleInventoryProducts = (inventoryProducts || []).filter((product: any) => {
+        const key = normalizeCategoryKey(product.category)
+        const categoryIndex = key ? categorySortMap.get(key) : undefined
+        return categoryIndex !== 0
+      })
+
+      const allInventoryNames = Array.from(
+        new Set(
+          eligibleInventoryProducts
+            .map((product: any) => String(product.name || '').trim().toUpperCase())
+            .filter((name: string) => name.length > 0)
+        )
+      )
+      const iceCream = allInventoryNames
       const materials = data?.filter(item => item.category === 'materials' && filterByLocation(item)).map(item => item.name) || []
       const denominations = data?.filter(item => item.category === 'denominations' && filterByLocation(item)).map(item => ({
         name: item.name,
@@ -211,7 +258,7 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
         { name: '500ML', price: 0 },
         { name: '1 PAN', price: 500 }
       ])
-      setPredefinedIceCreamFlavors(['BUBBLEGUM', 'COOKIE BITS', 'COOKIE MON', 'COFFEE', 'CHOCOLATE', 'DURIAN', 'MANGO', 'MELON', 'MATCHA', 'STRAWBERRY', 'UBE', 'UBE QUEZO', 'UNICORN'])
+      setPredefinedIceCreamFlavors([])
       setPredefinedMaterials(['DSR FORM', 'SPOONS', 'TISSUE', 'GLOVES', 'TRASHBAG', 'SOAP', 'POPSICLE STICKS'])
       setPredefinedDenominations([
         { name: '1,000', value: 1000 },

@@ -1,11 +1,34 @@
 'use client'
-import { useState, useEffect } from 'react'
-import { supabase, Brand, Supplier, PurchaseOrder, PurchaseOrderItem, POPayment, DeliveryReceipt, PurchaseRequisition, RawMaterial, MaterialStockMovement, POStatusHistory, FactoryMaterialRequest } from '../../lib/supabase'
-import { Package, History, Edit, Trash2, Clock } from 'lucide-react'
+import { Fragment, useMemo, useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import { supabase, Brand, Supplier, PurchaseOrder, PurchaseOrderItem, POPayment, DeliveryReceipt, PurchaseRequisition, PurchaseRequisitionItem, RawMaterial, MaterialStockMovement, POStatusHistory, FactoryMaterialRequest, Product, type FactoryInventoryKind } from '../../lib/supabase'
+import {
+  isFactoryInventoryKind,
+  FACTORY_INVENTORY_KINDS,
+  FACTORY_INVENTORY_KIND_LABELS,
+  mergeRawMaterialCategoryOptions,
+} from '../../lib/factory-inventory'
+import {
+  FACTORY_REQUEST_MATERIAL_SELECT,
+  factoryRequestQtyToStockUnits,
+  formatFactoryRequestQtyDisplay,
+  formatFactoryReleaseConfirmMessage,
+  formatFactoryReleaseInsufficientStockMessage,
+  formatStockAsPurchaseWithRemainder,
+  formatStockUnitTotal,
+  resolveFactoryRequestMaterial,
+  type FactoryBomUom,
+  type FactoryRequestUom,
+  isFactoryBomUom,
+} from '../../lib/raw-material-uom'
+import { useBrands } from '../contexts/BrandsContext'
+import { Package, History, Edit, Trash2, Clock, Boxes, Info, Search, Tag, ClipboardCheck } from 'lucide-react'
+import { MaterialsCycleCountPanel } from './MaterialsCycleCountPanel'
 
 interface PurchasingManagerProps {
   selectedBrand?: Brand | null
   theme?: string
+  currentUsername?: string
 }
 
 type Tab = 'suppliers' | 'requisitions' | 'purchase_orders' | 'transactions' | 'raw_materials'
@@ -24,7 +47,367 @@ type POFormData = {
   notes: string
 }
 
-export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingManagerProps) {
+function ownerBrandSlugMapFromBrands(brands: Brand[]) {
+  return brands.reduce<Record<string, string>>((acc, brand) => {
+    acc[brand.name] = brand.slug
+    return acc
+  }, {})
+}
+
+function getOwnerThemeClasses(owner: string, ownerBrandSlugMap: Record<string, string>) {
+  const slug = ownerBrandSlugMap[owner]
+  if (slug === 'mychoice') {
+    return {
+      chip: 'bg-green-50 text-green-800 border-green-100',
+      chipButton: 'hover:bg-green-100 text-green-600 hover:text-green-900',
+      option: 'hover:bg-green-50 text-green-900',
+      groupHeader: 'bg-green-50/90 text-green-900',
+      accentBorder: 'border-l-green-500',
+      badge: 'bg-green-100 text-green-800',
+    }
+  }
+  if (slug === 'gelatofilipino') {
+    return {
+      chip: 'bg-red-50 text-red-800 border-red-100',
+      chipButton: 'hover:bg-red-100 text-red-600 hover:text-red-900',
+      option: 'hover:bg-red-50 text-red-900',
+      groupHeader: 'bg-red-50/90 text-red-900',
+      accentBorder: 'border-l-red-500',
+      badge: 'bg-red-100 text-red-800',
+    }
+  }
+  if (slug === 'mang-sorbetes') {
+    return {
+      chip: 'bg-yellow-50 text-yellow-800 border-yellow-100',
+      chipButton: 'hover:bg-yellow-100 text-yellow-600 hover:text-yellow-900',
+      option: 'hover:bg-yellow-50 text-yellow-900',
+      groupHeader: 'bg-yellow-50/90 text-yellow-900',
+      accentBorder: 'border-l-yellow-500',
+      badge: 'bg-yellow-100 text-yellow-800',
+    }
+  }
+  return {
+    chip: 'bg-blue-50 text-blue-800 border-blue-100',
+    chipButton: 'hover:bg-blue-100 text-blue-600 hover:text-blue-900',
+    option: 'hover:bg-gray-100 text-gray-900',
+    groupHeader: 'bg-slate-50 text-slate-800',
+    accentBorder: 'border-l-slate-400',
+    badge: 'bg-slate-200 text-slate-700',
+  }
+}
+
+function materialMatchesSearch(material: RawMaterial, query: string) {
+  const haystack = [
+    material.material_name,
+    material.sku,
+    material.category,
+    material.supplier?.name,
+    ...(material.owner ?? []),
+    material.notes,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  return haystack.includes(query)
+}
+
+function derivePaymentTimingFromTerms(
+  terms: string
+): 'before_delivery' | 'after_delivery' | 'partial' {
+  const normalized = terms.toLowerCase()
+  return normalized.includes('upon order') || normalized.includes('before')
+    ? 'before_delivery'
+    : normalized.includes('cod') || normalized.includes('after')
+      ? 'after_delivery'
+      : 'after_delivery'
+}
+
+function derivePaymentMethodFromTerms(terms: string): 'cash' | 'check' | 'bank_transfer' {
+  const normalized = terms.toLowerCase()
+  if (normalized.includes('cod') || normalized.includes('cash')) return 'cash'
+  if (normalized.includes('check') || normalized.includes('cheque')) return 'check'
+  return 'bank_transfer'
+}
+
+const PO_NUMBER_INPUT_NO_SPINNER =
+  '[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none'
+
+function parseWholeQuantityInput(value: string) {
+  const parsed = parseInt(value, 10)
+  if (Number.isNaN(parsed) || parsed < 0) return 0
+  return parsed
+}
+
+function getPurchaseUnit(material: Partial<RawMaterial>) {
+  return material.uom_purchase_unit?.trim() || material.unit || ''
+}
+
+function getStockUnitsPerPurchase(material: Partial<RawMaterial>) {
+  const value = Math.floor(Number(material.uom_stock_per_purchase) || 1)
+  return value > 0 ? value : 1
+}
+
+function factoryRequestHasSufficientStock(
+  req: FactoryMaterialRequest,
+  rawMaterials: RawMaterial[]
+): boolean {
+  const mat = resolveFactoryRequestMaterial(req, rawMaterials)
+  if (!mat) return false
+  const stock = Number(mat.current_stock) || 0
+  const stockOut = factoryRequestQtyToStockUnits(Number(req.quantity), mat)
+  return stock >= stockOut
+}
+
+function FactoryRequestInventoryStockCell({
+  req,
+  rawMaterials,
+}: {
+  req: FactoryMaterialRequest
+  rawMaterials: RawMaterial[]
+}) {
+  const mat = resolveFactoryRequestMaterial(req, rawMaterials)
+  if (!mat) return <span className="text-gray-400">—</span>
+
+  const stockUnits = Math.max(0, Number(mat.current_stock) || 0)
+  const stockOut = factoryRequestQtyToStockUnits(Number(req.quantity), mat)
+  const inStock = stockUnits > 0
+  const sufficient = stockUnits >= stockOut
+
+  return (
+    <div>
+      <span
+        className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${
+          !inStock
+            ? 'bg-red-100 text-red-800'
+            : sufficient
+              ? 'bg-emerald-100 text-emerald-800'
+              : 'bg-amber-100 text-amber-900'
+        }`}
+      >
+        {!inStock ? 'Out of stock' : sufficient ? 'In stock' : 'Insufficient'}
+      </span>
+      <div className="text-[11px] text-gray-600 tabular-nums mt-0.5 whitespace-nowrap">
+        {formatStockAsPurchaseWithRemainder(stockUnits, mat)}
+      </div>
+      <div className="text-[10px] text-gray-400 tabular-nums whitespace-nowrap">
+        {formatStockUnitTotal(stockUnits, mat)}
+      </div>
+    </div>
+  )
+}
+
+function getStockUnitCost(material: Partial<RawMaterial>) {
+  const purchaseCost = Number(material.unit_cost) || 0
+  return purchaseCost / getStockUnitsPerPurchase(material)
+}
+
+/** Hide materials owned only by other brands (not shared with selected brand). */
+function isExclusiveToOtherBrands(
+  owners: string[],
+  selectedBrandName: string,
+  brandNames: Set<string>
+) {
+  const trimmed = owners.map((o) => o.trim()).filter(Boolean)
+  if (trimmed.length === 0) return false
+  if (trimmed.includes(selectedBrandName)) return false
+  const brandOwners = trimmed.filter((o) => brandNames.has(o))
+  if (brandOwners.length === 0) return false
+  return true
+}
+
+type RawMaterialOwnerGroup = {
+  owner: string
+  totalCount: number
+  totalValue: number
+  categories: { category: string; materials: RawMaterial[] }[]
+}
+
+function sortMaterialsByName(list: RawMaterial[]) {
+  return [...list].sort((a, b) => a.material_name.localeCompare(b.material_name))
+}
+
+function groupMaterialsByCategory(materials: RawMaterial[]) {
+  const groups: Record<string, RawMaterial[]> = {}
+  for (const material of materials) {
+    const category = material.category?.trim() || 'Uncategorized'
+    if (!groups[category]) groups[category] = []
+    groups[category].push(material)
+  }
+  return Object.entries(groups)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([category, items]) => ({
+      category,
+      materials: sortMaterialsByName(items),
+    }))
+}
+
+function groupRawMaterialsByOwner(
+  materials: RawMaterial[],
+  selectedBrand: Brand,
+  brands: Brand[]
+): RawMaterialOwnerGroup[] {
+  const brandNames = new Set(brands.map((b) => b.name))
+  const selectedName = selectedBrand.name
+
+  const visible = materials.filter((m) => {
+    const owners = (m.owner ?? []).map((o) => o.trim()).filter(Boolean)
+    return !isExclusiveToOtherBrands(owners, selectedName, brandNames)
+  })
+
+  const groups: Record<string, RawMaterial[]> = {}
+  for (const material of visible) {
+    const owners = (material.owner ?? []).map((o) => o.trim()).filter(Boolean)
+    // Hide exclusive brand owner groups that aren't the selected brand.
+    // - Brand owners: only group under selected brand (if included)
+    // - Non-brand owners: keep as-is
+    const brandOwners = owners.filter((o) => brandNames.has(o))
+    const customOwners = owners.filter((o) => !brandNames.has(o))
+    const keys =
+      owners.length === 0
+        ? ['No owner']
+        : [
+            ...customOwners,
+            ...(brandOwners.includes(selectedName) ? [selectedName] : []),
+          ].length > 0
+          ? [...customOwners, ...(brandOwners.includes(selectedName) ? [selectedName] : [])]
+          : ['No owner']
+    for (const owner of keys) {
+      if (!groups[owner]) groups[owner] = []
+      if (!groups[owner].some((m) => m.id === material.id)) {
+        groups[owner].push(material)
+      }
+    }
+  }
+
+  const customOwners = Object.keys(groups)
+    .filter((k) => k !== 'No owner' && !brandNames.has(k))
+    .sort((a, b) => a.localeCompare(b))
+
+  const ownerOrder = [
+    selectedName,
+    ...customOwners,
+    'No owner',
+  ]
+
+  const ordered: RawMaterialOwnerGroup[] = []
+  const seen = new Set<string>()
+  const pushOwnerGroup = (owner: string) => {
+    const ownerMaterials = groups[owner]
+    if (!ownerMaterials?.length || seen.has(owner)) return
+    seen.add(owner)
+    ordered.push({
+      owner,
+      totalCount: ownerMaterials.length,
+      totalValue: ownerMaterials.reduce(
+        (sum, material) => sum + Number(material.current_stock || 0) * getStockUnitCost(material),
+        0
+      ),
+      categories: groupMaterialsByCategory(ownerMaterials),
+    })
+  }
+
+  for (const key of ownerOrder) pushOwnerGroup(key)
+  for (const key of Object.keys(groups).sort((a, b) => a.localeCompare(b))) {
+    pushOwnerGroup(key)
+  }
+  return ordered
+}
+
+function HoverTooltipIcon({
+  label,
+  ariaLabel,
+  tooltipClassName = 'max-w-xs',
+  children,
+}: {
+  label: string
+  ariaLabel: string
+  tooltipClassName?: string
+  children: React.ReactNode
+}) {
+  const [tooltip, setTooltip] = useState<{ x: number; y: number } | null>(null)
+
+  const showTooltip = (e: React.FocusEvent<HTMLSpanElement> | React.MouseEvent<HTMLSpanElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setTooltip({ x: rect.left + rect.width / 2, y: rect.top })
+  }
+
+  return (
+    <>
+      <span
+        className="shrink-0 inline-flex rounded focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+        onMouseEnter={showTooltip}
+        onMouseLeave={() => setTooltip(null)}
+        onFocus={showTooltip}
+        onBlur={() => setTooltip(null)}
+        tabIndex={0}
+        role="img"
+        aria-label={ariaLabel}
+      >
+        {children}
+      </span>
+      {tooltip &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className={`fixed z-[9999] pointer-events-none -translate-x-1/2 -translate-y-full rounded-md bg-gray-900 px-2.5 py-1.5 text-xs font-medium text-white shadow-lg ${tooltipClassName}`}
+            style={{ left: tooltip.x, top: tooltip.y - 6 }}
+          >
+            {label}
+          </div>,
+          document.body
+        )}
+    </>
+  )
+}
+
+function MultiOwnerIndicator({ owners }: { owners: string[] }) {
+  const label = owners.join(', ')
+  return (
+    <HoverTooltipIcon label={label} ariaLabel={`Owners: ${label}`}>
+      <Boxes className="h-4 w-4 text-gray-500 cursor-help" />
+    </HoverTooltipIcon>
+  )
+}
+
+function MaterialUnitHierarchyIndicator({ material }: { material: RawMaterial }) {
+  const purchaseUnit = getPurchaseUnit(material) || '(purchase unit)'
+  const stockUnit = material.unit || '(stock unit)'
+  const baseUnit = material.uom_base_unit?.trim() || '(base unit)'
+  const stockPerPurchase = getStockUnitsPerPurchase(material)
+  const basePerStock = Math.max(1, Math.floor(Number(material.uom_base_per_unit) || 1))
+  const basePerPurchase = stockPerPurchase * basePerStock
+  const purchaseCost = Number(material.unit_cost) || 0
+  const stockCost = purchaseCost / stockPerPurchase
+  const baseCost = stockCost / basePerStock
+
+  const notes = material.notes?.trim()
+  const label = [
+    `Units:`,
+    `1 ${purchaseUnit} = ${stockPerPurchase} ${stockUnit}`,
+    `1 ${stockUnit} = ${basePerStock} ${baseUnit}`,
+    `1 ${purchaseUnit} = ${basePerPurchase} ${baseUnit}`,
+    ``,
+    `Costing:`,
+    `Purchase: ₱${purchaseCost.toLocaleString()} / ${purchaseUnit}`,
+    `Stock: ₱${stockCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })} / ${stockUnit}`,
+    `Base: ₱${baseCost.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 })} / ${baseUnit}`,
+    ...(notes ? ['', 'Notes:', notes] : []),
+  ].join('\n')
+
+  return (
+    <HoverTooltipIcon
+      label={label}
+      ariaLabel={`Unit hierarchy and costing for ${material.material_name}`}
+      tooltipClassName="max-w-sm whitespace-pre-wrap"
+    >
+      <Info className="h-4 w-4 text-gray-500 cursor-help" />
+    </HoverTooltipIcon>
+  )
+}
+
+export function PurchasingManager({ selectedBrand, theme = 'blue', currentUsername = '' }: PurchasingManagerProps) {
+  const movementCreatedBy = currentUsername.trim() || 'Procurement'
+  const { brands } = useBrands()
   const [activeTab, setActiveTab] = useState<Tab>('raw_materials')
   
   // Suppliers state
@@ -58,6 +441,8 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   const [showPRModal, setShowPRModal] = useState(false)
   const [convertingPR, setConvertingPR] = useState<PurchaseRequisition | null>(null)
   const [showConvertPRModal, setShowConvertPRModal] = useState(false)
+  const [showPRDetailsModal, setShowPRDetailsModal] = useState(false)
+  const [selectedPRForDetails, setSelectedPRForDetails] = useState<PurchaseRequisition | null>(null)
   
   // Raw Materials Inventory state
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([])
@@ -69,9 +454,15 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   const [selectedMaterialForHistory, setSelectedMaterialForHistory] = useState<RawMaterial | null>(null)
   const [movementHistory, setMovementHistory] = useState<MaterialStockMovement[]>([])
   const [factoryMaterialRequests, setFactoryMaterialRequests] = useState<FactoryMaterialRequest[]>([])
+  const [inventoryProducts, setInventoryProducts] = useState<Product[]>([])
   const [releasingRequestId, setReleasingRequestId] = useState<string | null>(null)
   const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null)
-  
+  const [highlightedMaterialId, setHighlightedMaterialId] = useState<string | null>(null)
+  const [rawMaterialsSearch, setRawMaterialsSearch] = useState('')
+  const [rawMaterialsLoading, setRawMaterialsLoading] = useState(false)
+  const [showCycleCountPanel, setShowCycleCountPanel] = useState(false)
+  const inventoryRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({})
+
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
@@ -94,12 +485,21 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     loadRequisitions()
     loadRawMaterials()
     loadFactoryMaterialRequests()
+    loadInventoryProducts()
   }, [selectedBrand])
   
   // Reset pagination when filters change
   useEffect(() => {
     setCurrentPOPage(1)
   }, [statusFilter, searchTerm])
+
+  useEffect(() => {
+    if (!highlightedMaterialId || activeTab !== 'raw_materials') return
+    inventoryRowRefs.current[highlightedMaterialId]?.scrollIntoView({
+      block: 'nearest',
+      behavior: 'smooth',
+    })
+  }, [highlightedMaterialId, activeTab])
   
   // Calculate supplier lead times when suppliers tab is active
   useEffect(() => {
@@ -126,12 +526,44 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       .select(`
         *,
         supplier:suppliers(*),
-        items:purchase_order_items(*, material:raw_materials(*)),
+        requisition:purchase_requisitions(id, pr_number),
         payments:po_payments(*)
       `)
       .order('created_at', { ascending: false })
     
-    if (data) setPurchaseOrders(data as PurchaseOrder[])
+    if (error) {
+      console.error('Error loading purchase orders:', error)
+      return
+    }
+
+    const poList = (data || []) as PurchaseOrder[]
+    if (poList.length === 0) {
+      setPurchaseOrders([])
+      return
+    }
+
+    const poIds = poList.map(po => po.id)
+    const { data: itemsData, error: itemsError } = await supabase
+      .from('purchase_order_items')
+      .select('*, material:raw_materials(*)')
+      .in('po_id', poIds)
+
+    if (itemsError) {
+      console.error('Error loading purchase order items:', itemsError)
+    }
+
+    const itemsByPoId: Record<string, PurchaseOrderItem[]> = {}
+    ;(itemsData || []).forEach((item) => {
+      if (!itemsByPoId[item.po_id]) itemsByPoId[item.po_id] = []
+      itemsByPoId[item.po_id].push(item as PurchaseOrderItem)
+    })
+
+    const purchaseOrdersWithItems = poList.map((po) => ({
+      ...po,
+      items: itemsByPoId[po.id] || []
+    }))
+
+    setPurchaseOrders(purchaseOrdersWithItems as PurchaseOrder[])
   }
   
   const loadPayments = async () => {
@@ -139,7 +571,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       .from('po_payments')
       .select(`
         *,
-        purchase_order:purchase_orders(po_number, supplier:suppliers(name))
+        purchase_order:purchase_orders(po_number, status, supplier:suppliers(id, name))
       `)
       .order('payment_date', { ascending: false })
     
@@ -150,7 +582,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     // Get all POs
     const { data: pos } = await supabase
       .from('purchase_orders')
-      .select('id, po_number, supplier_id')
+      .select('id, po_number, supplier_id, status')
     
     if (!pos || pos.length === 0) {
       setDeliveries([])
@@ -192,7 +624,9 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
         ...delivery,
         purchase_order: {
           po_number: po?.po_number || '',
+          status: po?.status || 'draft',
           supplier: {
+            id: supplier?.id || '',
             name: supplier?.name || ''
           }
         }
@@ -212,45 +646,107 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   }
   
   const loadRawMaterials = async () => {
+    setRawMaterialsLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('raw_materials')
+        .select('*, supplier:suppliers(*)')
+        .order('supplier_id', { ascending: true, nullsFirst: false })
+        .order('material_name')
+
+      if (error) {
+        console.error('Error loading raw materials:', error)
+        return
+      }
+
+      if (data) setRawMaterials(data as RawMaterial[])
+    } finally {
+      setRawMaterialsLoading(false)
+    }
+  }
+
+  const loadInventoryProducts = async () => {
+    if (!selectedBrand?.id) {
+      setInventoryProducts([])
+      return
+    }
+
     const { data, error } = await supabase
-      .from('raw_materials')
-      .select('*, supplier:suppliers(*)')
-      .order('supplier_id', { ascending: true, nullsFirst: false })
-      .order('material_name')
-    
-    if (data) setRawMaterials(data as RawMaterial[])
+      .from('inventory_summary')
+      .select('product_id, product_name, sku, unit, category, brand_id')
+      .eq('brand_id', selectedBrand.id)
+      .order('category', { ascending: true })
+      .order('product_name', { ascending: true })
+
+    if (error) {
+      console.error('Error loading inventory products for raw material linking:', error)
+      setInventoryProducts([])
+      return
+    }
+
+    if (data) {
+      const mappedProducts: Product[] = data
+        .filter((row) => Boolean(row.product_id))
+        .map((row) => ({
+          id: row.product_id,
+          product_id: row.product_id,
+          brand_id: row.brand_id,
+          product_name: row.product_name,
+          sku: row.sku || undefined,
+          unit: row.unit,
+          category: row.category || undefined,
+        }))
+      setInventoryProducts(mappedProducts)
+    }
   }
 
   const loadFactoryMaterialRequests = async () => {
     const { data } = await supabase
       .from('factory_material_requests')
-      .select('*, material:raw_materials(id, material_name, sku, unit, current_stock, brand_id)')
+      .select(`*, material:raw_materials(${FACTORY_REQUEST_MATERIAL_SELECT})`)
       .order('created_at', { ascending: false })
       .limit(100)
     if (data) setFactoryMaterialRequests(data as FactoryMaterialRequest[])
   }
 
   const releaseFactoryMaterialRequest = async (req: FactoryMaterialRequest) => {
-    const mat = rawMaterials.find((m) => m.id === req.material_id)
+    const mat = resolveFactoryRequestMaterial(req, rawMaterials)
     const stock = mat ? Number(mat.current_stock) : 0
-    const qty = Number(req.quantity)
-    if (stock < qty) {
-      alert(`Insufficient stock. Available: ${stock} ${mat?.unit || ''}`)
+    const requestQty = Number(req.quantity)
+    const stockOut = mat ? factoryRequestQtyToStockUnits(requestQty, mat) : requestQty
+    if (stock < stockOut) {
+      alert(
+        mat
+          ? formatFactoryReleaseInsufficientStockMessage(requestQty, mat)
+          : 'Insufficient stock.'
+      )
       return
     }
-    if (!confirm(`Release ${qty} ${mat?.unit || 'units'} of ${mat?.material_name || 'material'} to factory?`)) return
+    if (
+      !confirm(
+        mat
+          ? formatFactoryReleaseConfirmMessage(
+              requestQty,
+              mat,
+              mat.material_name || req.material?.material_name || 'material'
+            )
+          : `Release ${requestQty} to factory?`
+      )
+    ) {
+      return
+    }
     setReleasingRequestId(req.id)
     try {
       const { error: movErr } = await supabase.from('material_stock_movements').insert({
         material_id: req.material_id,
         movement_type: 'out',
-        quantity: qty,
+        quantity: stockOut,
         reference_type: 'factory_request',
         reference_id: req.id,
         reference_number: `FMR-${req.id.slice(0, 8)}`,
-        notes: `Factory floor release${req.notes ? ` — ${req.notes}` : ''}`,
+        notes: `Factory floor release${req.requested_by ? ` — requested by ${req.requested_by}` : ''}`,
         movement_date: new Date().toISOString().split('T')[0],
-        created_by: 'Procurement',
+        created_by: movementCreatedBy,
       })
       if (movErr) {
         alert(movErr.message)
@@ -258,7 +754,11 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       }
       const { error: updErr } = await supabase
         .from('factory_material_requests')
-        .update({ status: 'released', released_at: new Date().toISOString() })
+        .update({
+          status: 'released',
+          released_at: new Date().toISOString(),
+          released_by: movementCreatedBy,
+        })
         .eq('id', req.id)
       if (updErr) {
         alert(updErr.message)
@@ -363,7 +863,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
   const viewPODetails = async (poId: string) => {
     const { data: po } = await supabase
       .from('purchase_orders')
-      .select('*, supplier:suppliers(*), items:purchase_order_items(*), payments:po_payments(*)')
+      .select('*, supplier:suppliers(*), requisition:purchase_requisitions(id, pr_number), items:purchase_order_items(*), payments:po_payments(*)')
       .eq('id', poId)
       .single()
     
@@ -372,16 +872,55 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       setShowPODetailsModal(true)
     }
   }
+
+  const viewPRDetails = async (prId: string) => {
+    const { data: pr, error } = await supabase
+      .from('purchase_requisitions')
+      .select('*, items:purchase_requisition_items(*)')
+      .eq('id', prId)
+      .single()
+
+    if (error) {
+      console.error('Error loading requisition details:', error)
+      alert(`Could not load requisition details: ${error.message}`)
+      return
+    }
+
+    if (pr) {
+      setSelectedPRForDetails(pr as PurchaseRequisition)
+      setShowPRDetailsModal(true)
+    }
+  }
+
+  const openReferencedRequisition = (prId: string) => {
+    setActiveTab('requisitions')
+    viewPRDetails(prId)
+  }
   
   // =============================================
   // PRINT FUNCTIONS
   // =============================================
   
-  const printPO = (po: PurchaseOrder) => {
-    const printWindow = window.open('', '', 'width=800,height=600')
+  const printPO = async (po: PurchaseOrder) => {
+    const printWindow = window.open('', '_blank')
     if (!printWindow) return
-    
-    const itemsTable = po.items?.map((item, index) => `
+
+    let printItems = po.items || []
+    if (printItems.length === 0) {
+      const { data: fetchedItems, error: fetchedItemsError } = await supabase
+        .from('purchase_order_items')
+        .select('*')
+        .eq('po_id', po.id)
+        .order('created_at', { ascending: true })
+
+      if (fetchedItemsError) {
+        console.error('Error loading PO items for print:', fetchedItemsError)
+      } else {
+        printItems = (fetchedItems || []) as PurchaseOrderItem[]
+      }
+    }
+
+    const itemsTable = printItems.map((item, index) => `
       <tr>
         <td style="padding: 6px 8px; border-bottom: 1px solid #e5e7eb;">${index + 1}</td>
         <td style="padding: 6px 8px; border-bottom: 1px solid #e5e7eb;">${item.product_description}</td>
@@ -390,7 +929,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
         <td style="padding: 6px 8px; border-bottom: 1px solid #e5e7eb; text-align: right;">₱${item.unit_price.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
         <td style="padding: 6px 8px; border-bottom: 1px solid #e5e7eb; text-align: right; font-weight: 600;">₱${(item.quantity * item.unit_price).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
       </tr>
-    `).join('') || ''
+    `).join('')
     
     const html = `
       <!DOCTYPE html>
@@ -398,36 +937,19 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       <head>
         <title>Purchase Order - ${po.po_number}</title>
         <style>
-          @media print {
-            @page { margin: 0.5cm; }
-            body { margin: 0; }
-            .print-button { display: none; }
-          }
           * { margin: 0; padding: 0; box-sizing: border-box; }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            font-size: 12px;
-            line-height: 1.4;
-            color: #1f2937;
-            padding: 15px;
-            max-width: 210mm;
-            margin: 0 auto;
-          }
           .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 20px;
             padding-bottom: 15px;
-            border-bottom: 3px solid #000;
-          }
-          .company-info {
-            flex: 1;
+            border-bottom: 2px solid #111827;
           }
           .company-name {
             font-size: 18px;
             font-weight: 700;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.4px;
           }
           .doc-info {
             text-align: right;
@@ -441,134 +963,117 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
             font-size: 14px;
             font-weight: 600;
           }
+          body {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            line-height: 1.4;
+            color: #111827;
+            padding: 0.5in 0.5in 0.5in 0.25in;
+            margin: 0;
+            background: #fff;
+          }
           .info-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-bottom: 15px;
+            gap: 12px;
+            margin-bottom: 14px;
           }
           .info-section {
-            background: #f9fafb;
+            border: 1px solid #d1d5db;
             padding: 10px;
-            border-radius: 4px;
+            background: #fff;
           }
           .section-title {
-            font-weight: 600;
+            font-weight: 700;
             font-size: 11px;
             text-transform: uppercase;
-            color: #6b7280;
             margin-bottom: 6px;
+            border-bottom: 1px solid #e5e7eb;
+            padding-bottom: 3px;
+            color: #374151;
           }
-          .info-line {
-            display: flex;
-            margin-bottom: 3px;
-            font-size: 11px;
-          }
+          .info-line { margin-bottom: 4px; }
           .info-label {
-            min-width: 90px;
             color: #6b7280;
+            font-size: 11px;
+            margin-right: 4px;
           }
-          .info-value {
-            font-weight: 500;
-          }
+          .info-value { font-weight: 600; }
           table {
             width: 100%;
             border-collapse: collapse;
-            margin: 15px 0;
+            margin: 12px 0;
           }
-          thead {
-            background: #f3f4f6;
+          th, td {
+            border: 1px solid #d1d5db;
+            padding: 7px 6px;
           }
           th {
-            padding: 8px 6px;
-            text-align: left;
+            background: #f3f4f6;
             font-size: 10px;
-            font-weight: 600;
             text-transform: uppercase;
-            border-bottom: 2px solid #d1d5db;
+            font-weight: 700;
           }
-          td {
-            padding: 6px;
-            font-size: 11px;
-          }
+          td { font-size: 11px; }
           .text-right { text-align: right; }
           .text-center { text-align: center; }
           .totals {
-            margin-top: 15px;
-            padding-top: 10px;
-            border-top: 2px dashed #d1d5db;
+            margin-top: 10px;
+            margin-left: auto;
+            width: 300px;
+            border: 1px solid #d1d5db;
+            padding: 10px;
           }
           .total-row {
             display: flex;
             justify-content: space-between;
-            margin-bottom: 4px;
-            font-size: 11px;
+            margin-bottom: 5px;
           }
           .grand-total {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px;
-            background: #f3f4f6;
-            border-radius: 4px;
-            margin-top: 8px;
-          }
-          .grand-total-label {
+            border-top: 1px solid #d1d5db;
+            margin-top: 6px;
+            padding-top: 6px;
             font-weight: 700;
             font-size: 13px;
           }
-          .grand-total-amount {
-            font-weight: 700;
-            font-size: 16px;
+          .notes {
+            margin-top: 10px;
+            border: 1px solid #d1d5db;
+            padding: 10px;
           }
           .signatures {
             display: flex;
-            gap: 40px;
-            margin-top: 30px;
+            gap: 24px;
+            margin-top: 38px;
+            page-break-inside: avoid;
           }
-          .signature-box {
-            flex: 1;
-          }
+          .signature-box { flex: 1; }
           .signature-line {
-            border-top: 1px solid #000;
-            margin-top: 30px;
+            border-top: 1px solid #111827;
+            margin-top: 28px;
             padding-top: 4px;
-            font-size: 10px;
+            font-size: 11px;
           }
           .signature-label {
-            font-size: 9px;
+            font-size: 10px;
             color: #6b7280;
             text-transform: uppercase;
-            margin-top: 2px;
           }
-          .print-button {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            padding: 8px 16px;
-            background: #2563eb;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-          }
-          .print-button:hover { background: #1d4ed8; }
           .footer {
             text-align: center;
-            margin-top: 20px;
-            padding-top: 10px;
+            margin-top: 14px;
+            padding-top: 8px;
             border-top: 1px solid #e5e7eb;
             font-size: 9px;
-            color: #9ca3af;
+            color: #6b7280;
           }
+          @page { size: letter; margin: 0.5in 0.5in 0.5in 0.25in; }
+          @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
         </style>
       </head>
       <body>
-        <button class="print-button" onclick="window.print()">Print</button>
-        
         <div class="header">
-          <div class="company-info">
+          <div>
             <div class="company-name">GILNAKS FOOD CORPORATION</div>
           </div>
           <div class="doc-info">
@@ -576,133 +1081,71 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
             <div class="po-number">${po.po_number}</div>
           </div>
         </div>
-        
+
         <div class="info-grid">
           <div class="info-section">
             <div class="section-title">Purchase Order Details</div>
-            <div class="info-line">
-              <span class="info-label">Order Date:</span>
-              <span class="info-value">${new Date(po.order_date).toLocaleDateString()}</span>
-            </div>
-            <div class="info-line">
-              <span class="info-label">Expected:</span>
-              <span class="info-value">${po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString() : 'TBD'}</span>
-            </div>
-            <div class="info-line">
-              <span class="info-label">Prepared by:</span>
-              <span class="info-value">${po.purchasing_agent}</span>
-            </div>
-            ${po.approved_by ? `
-            <div class="info-line">
-              <span class="info-label">Approved by:</span>
-              <span class="info-value">${po.approved_by}</span>
-            </div>
-            ` : ''}
+            <div class="info-line"><span class="info-label">Order Date:</span><span class="info-value">${new Date(po.order_date).toLocaleDateString()}</span></div>
+            <div class="info-line"><span class="info-label">Expected Delivery:</span><span class="info-value">${po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString() : 'TBD'}</span></div>
+            <div class="info-line"><span class="info-label">Prepared by:</span><span class="info-value">${po.purchasing_agent || 'N/A'}</span></div>
+            ${po.approved_by ? `<div class="info-line"><span class="info-label">Approved by:</span><span class="info-value">${po.approved_by}</span></div>` : ''}
+            <div class="info-line"><span class="info-label">Status:</span><span class="info-value">${(po.status || 'draft').replace('_', ' ')}</span></div>
           </div>
-          
           <div class="info-section">
             <div class="section-title">Payment Information</div>
-            <div class="info-line">
-              <span class="info-label">Terms:</span>
-              <span class="info-value">${po.payment_terms || 'Net 30 days'}</span>
-            </div>
-            <div class="info-line">
-              <span class="info-label">Method:</span>
-              <span class="info-value">${po.payment_method?.replace('_', ' ') || 'N/A'}</span>
-            </div>
+            <div class="info-line"><span class="info-label">Terms:</span><span class="info-value">${po.payment_terms || 'Net 30 days'}</span></div>
+            <div class="info-line"><span class="info-label">Method:</span><span class="info-value">${po.payment_method?.replace('_', ' ') || 'N/A'}</span></div>
+            <div class="info-line"><span class="info-label">Timing:</span><span class="info-value">${po.payment_timing?.replace('_', ' ') || 'N/A'}</span></div>
           </div>
         </div>
-        
+
         <div class="info-grid">
           <div class="info-section">
-            <div class="section-title">Supplier</div>
-            <div class="info-line">
-              <span class="info-label">Name:</span>
-              <span class="info-value" style="font-weight: 600;">${po.supplier?.name || ''}</span>
-            </div>
-            ${po.supplier?.contact_person ? `
-            <div class="info-line">
-              <span class="info-label">Contact:</span>
-              <span class="info-value">${po.supplier.contact_person}</span>
-            </div>
-            ` : ''}
-            ${po.supplier?.phone ? `
-            <div class="info-line">
-              <span class="info-label">Phone:</span>
-              <span class="info-value">${po.supplier.phone}</span>
-            </div>
-            ` : ''}
-            ${po.supplier?.address ? `
-            <div class="info-line">
-              <span class="info-label">Address:</span>
-              <span class="info-value">${po.supplier.address}</span>
-            </div>
-            ` : ''}
+            <div class="section-title">Supplier / Billing Address</div>
+            <div class="info-line"><span class="info-label">Name:</span><span class="info-value">${po.supplier?.name || 'N/A'}</span></div>
+            ${po.supplier?.contact_person ? `<div class="info-line"><span class="info-label">Contact:</span><span class="info-value">${po.supplier.contact_person}</span></div>` : ''}
+            ${po.supplier?.phone ? `<div class="info-line"><span class="info-label">Phone:</span><span class="info-value">${po.supplier.phone}</span></div>` : ''}
+            ${po.supplier?.address ? `<div class="info-line"><span class="info-label">Address:</span><span class="info-value">${po.supplier.address}</span></div>` : `<div class="info-line"><span class="info-label">Address:</span><span class="info-value">N/A</span></div>`}
           </div>
-          
-          ${po.delivery_address ? `
           <div class="info-section">
-            <div class="section-title">Delivery Information</div>
-            <div class="info-line">
-              <span class="info-label">Address:</span>
-              <span class="info-value">${po.delivery_address}</span>
-            </div>
-            ${po.delivery_contact ? `
-            <div class="info-line">
-              <span class="info-label">Contact:</span>
-              <span class="info-value">${po.delivery_contact}</span>
-            </div>
-            ` : ''}
-            ${po.delivery_phone ? `
-            <div class="info-line">
-              <span class="info-label">Phone:</span>
-              <span class="info-value">${po.delivery_phone}</span>
-            </div>
-            ` : ''}
+            <div class="section-title">Delivery Address</div>
+            <div class="info-line"><span class="info-label">Address:</span><span class="info-value">${po.delivery_address || 'N/A'}</span></div>
+            <div class="info-line"><span class="info-label">Contact:</span><span class="info-value">${po.delivery_contact || 'N/A'}</span></div>
+            <div class="info-line"><span class="info-label">Phone:</span><span class="info-value">${po.delivery_phone || 'N/A'}</span></div>
           </div>
-          ` : ''}
         </div>
-        
+
         <table>
           <thead>
             <tr>
-              <th style="width: 30px;">#</th>
+              <th style="width: 34px;">#</th>
               <th>Product Description</th>
-              <th style="width: 60px;" class="text-center">Qty</th>
-              <th style="width: 50px;" class="text-center">Unit</th>
-              <th style="width: 100px;" class="text-right">Unit Price</th>
-              <th style="width: 110px;" class="text-right">Amount</th>
+              <th style="width: 62px;" class="text-center">Qty</th>
+              <th style="width: 64px;" class="text-center">Unit</th>
+              <th style="width: 110px;" class="text-right">Unit Price</th>
+              <th style="width: 120px;" class="text-right">Amount</th>
             </tr>
           </thead>
           <tbody>
             ${itemsTable}
           </tbody>
         </table>
-        
+
         <div class="totals">
           ${po.tax_amount > 0 ? `
-          <div class="total-row">
-            <span style="color: #6b7280;">Subtotal</span>
-            <span style="font-weight: 600;">₱${po.subtotal.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
-          </div>
-          <div class="total-row">
-            <span style="color: #6b7280;">Tax</span>
-            <span style="font-weight: 600;">₱${po.tax_amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
-          </div>
+          <div class="total-row"><span>Subtotal</span><span>₱${po.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
+          <div class="total-row"><span>Tax</span><span>₱${po.tax_amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
           ` : ''}
-          <div class="grand-total">
-            <span class="grand-total-label">TOTAL AMOUNT</span>
-            <span class="grand-total-amount">₱${po.total_amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
-          </div>
+          <div class="total-row grand-total"><span>TOTAL AMOUNT</span><span>₱${po.total_amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
         </div>
-        
+
         ${po.notes ? `
-        <div class="info-section" style="margin-top: 15px;">
+        <div class="notes">
           <div class="section-title">Notes</div>
-          <div style="font-size: 11px; line-height: 1.5;">${po.notes}</div>
+          <div>${po.notes}</div>
         </div>
         ` : ''}
-        
+
         <div class="signatures">
           <div class="signature-box">
             <div class="signature-line">${po.purchasing_agent || ''}</div>
@@ -711,13 +1154,27 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
           <div class="signature-box">
             <div class="signature-line">${po.approved_by || ''}</div>
             <div class="signature-label">Approved by</div>
-            ${po.approved_date ? `<div class="signature-label">${new Date(po.approved_date).toLocaleDateString()}</div>` : ''}
+          </div>
+          <div class="signature-box">
+            <div class="signature-line">${po.approved_date ? new Date(po.approved_date).toLocaleDateString() : ''}</div>
+            <div class="signature-label">Approved Date</div>
           </div>
         </div>
-        
+
         <div class="footer">
           Generated on ${new Date().toLocaleString()}
         </div>
+        
+        <script>
+          window.addEventListener('afterprint', function () {
+            window.close();
+          });
+          window.addEventListener('load', function () {
+            setTimeout(function () {
+              window.print();
+            }, 150);
+          });
+        </script>
       </body>
       </html>
     `
@@ -1026,7 +1483,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     loadPurchaseOrders()
     loadRawMaterials() // Reload materials to see updated stock
     
-    alert('✅ Delivery recorded successfully! Raw materials inventory has been updated.')
+    alert('✅ Delivery recorded successfully! Materials inventory has been updated.')
   }
   
   // =============================================
@@ -1073,6 +1530,33 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
     )
   }
   
+  const ownerBrandSlugMap = useMemo(() => ownerBrandSlugMapFromBrands(brands), [brands])
+
+  const rawMaterialsByOwner = useMemo(() => {
+    if (!selectedBrand) return [] as RawMaterialOwnerGroup[]
+    const query = rawMaterialsSearch.trim().toLowerCase()
+    const filtered = query
+      ? rawMaterials.filter((m) => materialMatchesSearch(m, query))
+      : rawMaterials
+    return groupRawMaterialsByOwner(filtered, selectedBrand, brands)
+  }, [rawMaterials, selectedBrand, brands, rawMaterialsSearch])
+
+  const rawMaterialsInventoryStats = useMemo(() => {
+    let total = 0
+    let low = 0
+    let out = 0
+    for (const group of rawMaterialsByOwner) {
+      for (const cat of group.categories) {
+        for (const m of cat.materials) {
+          total++
+          if (m.current_stock <= 0) out++
+          else if (m.current_stock <= m.minimum_stock) low++
+        }
+      }
+    }
+    return { total, low, out }
+  }, [rawMaterialsByOwner])
+
   // =============================================
   // RENDER FUNCTIONS
   // =============================================
@@ -1096,7 +1580,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       {/* Header */}
       <div>
         <h1 className="text-xl font-semibold text-gray-900">Procurement</h1>
-        <p className="text-sm text-gray-600">Track raw materials, manage suppliers and purchase orders</p>
+        <p className="text-sm text-gray-600">Track materials inventory, manage suppliers and purchase orders</p>
       </div>
       
       {/* Tabs */}
@@ -1111,7 +1595,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              Raw Materials
+              Materials Inventory
             </button>
             <button
               onClick={() => setActiveTab('purchase_orders')}
@@ -1234,6 +1718,18 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                             <span className="text-gray-500">Payment:</span>
                             <span className="ml-2">{po.payment_timing.replace('_', ' ')}</span>
                           </div>
+                          {po.pr_id && (
+                            <div>
+                              <span className="text-gray-500">Reference PR:</span>
+                              <button
+                                type="button"
+                                onClick={() => openReferencedRequisition(po.pr_id!)}
+                                className="ml-2 text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                              >
+                                {po.requisition?.pr_number || po.pr_id}
+                              </button>
+                            </div>
+                          )}
                           {po.expected_delivery_date && (
                             <div>
                               <span className="text-gray-500">Expected:</span>
@@ -1506,6 +2002,18 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                           <p className="text-sm text-gray-600">{supplier.contact_person}</p>
                         )}
                         
+                        {typeof supplier.lead_time_days === 'number' && supplier.lead_time_days > 0 && (
+                          <div className="mt-2 mb-1">
+                            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-lg">
+                              <Clock size={14} className="text-blue-600" />
+                              <div className="text-xs">
+                                <span className="font-semibold text-blue-900">{supplier.lead_time_days} days</span>
+                                <span className="text-blue-700"> configured lead time</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Lead Time Badge */}
                         {leadTime && (
                           <div className="mt-2 mb-1">
@@ -1513,7 +2021,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                               <Clock size={14} className="text-green-600" />
                               <div className="text-xs">
                                 <span className="font-semibold text-green-900">{leadTime.avgDays} days</span>
-                                <span className="text-green-700"> avg lead time</span>
+                                <span className="text-green-700"> average lead time</span>
                                 <span className="text-green-600 ml-1">({leadTime.completedPOs} POs)</span>
                               </div>
                             </div>
@@ -1582,7 +2090,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 {/* Group by Supplier */}
                 {(() => {
                   // Create supplier groups
-                  const supplierGroups: { [key: string]: { name: string; pos: { [key: string]: { poNumber: string; payments: any[]; deliveries: any[] } } } } = {}
+                  const supplierGroups: { [key: string]: { name: string; pos: { [key: string]: { poNumber: string; status?: string; payments: any[]; deliveries: any[] } } } } = {}
                   
                   // Group payments by supplier and PO
                   payments.forEach((payment: any) => {
@@ -1595,7 +2103,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                       supplierGroups[supplierId] = { name: supplierName, pos: {} }
                     }
                     if (!supplierGroups[supplierId].pos[poId]) {
-                      supplierGroups[supplierId].pos[poId] = { poNumber, payments: [], deliveries: [] }
+                      supplierGroups[supplierId].pos[poId] = { poNumber, status: payment.purchase_order?.status, payments: [], deliveries: [] }
+                    }
+                    if (!supplierGroups[supplierId].pos[poId].status && payment.purchase_order?.status) {
+                      supplierGroups[supplierId].pos[poId].status = payment.purchase_order.status
                     }
                     supplierGroups[supplierId].pos[poId].payments.push(payment)
                   })
@@ -1611,7 +2122,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                       supplierGroups[supplierId] = { name: supplierName, pos: {} }
                     }
                     if (!supplierGroups[supplierId].pos[poId]) {
-                      supplierGroups[supplierId].pos[poId] = { poNumber, payments: [], deliveries: [] }
+                      supplierGroups[supplierId].pos[poId] = { poNumber, status: delivery.purchase_order?.status, payments: [], deliveries: [] }
+                    }
+                    if (!supplierGroups[supplierId].pos[poId].status && delivery.purchase_order?.status) {
+                      supplierGroups[supplierId].pos[poId].status = delivery.purchase_order.status
                     }
                     supplierGroups[supplierId].pos[poId].deliveries.push(delivery)
                   })
@@ -1639,7 +2153,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                           <div key={poId} className="border border-gray-200 rounded-md p-3">
                             {/* PO Number and View Button */}
                             <div className="flex justify-between items-center mb-3 pb-2 border-b border-gray-200">
-                              <h4 className="font-semibold text-gray-900">{poData.poNumber}</h4>
+                              <div className="flex items-center gap-2">
+                                <h4 className="font-semibold text-gray-900">{poData.poNumber}</h4>
+                                {poData.status && getStatusBadge(poData.status)}
+                              </div>
                               <button
                                 onClick={() => viewPODetails(poId)}
                                 className="px-3 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
@@ -1795,7 +2312,10 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
               
               <div className="space-y-3">
                 {requisitions.map((pr) => (
-                  <div key={pr.id} className="border rounded-lg p-4 hover:bg-gray-50">
+                  (() => {
+                    const linkedPO = purchaseOrders.find((po) => po.pr_id === pr.id)
+                    return (
+                  <div id={`pr-${pr.id}`} key={pr.id} className="border rounded-lg p-4 hover:bg-gray-50">
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-2">
@@ -1837,10 +2357,28 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                               <span className="ml-2">{pr.purpose}</span>
                             </div>
                           )}
+                          {linkedPO && (
+                            <div>
+                              <span className="text-gray-500">Linked PO:</span>
+                              <button
+                                type="button"
+                                onClick={() => viewPODetails(linkedPO.id)}
+                                className="ml-2 text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                              >
+                                {linkedPO.po_number}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                       
                       <div className="flex gap-2">
+                        <button
+                          onClick={() => viewPRDetails(pr.id)}
+                          className="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                        >
+                          View Details
+                        </button>
                         {pr.status === 'draft' && (
                           <button
                             onClick={async () => {
@@ -1902,6 +2440,8 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                       </div>
                     </div>
                   </div>
+                    )
+                  })()
                 ))}
                 
                 {requisitions.length === 0 && (
@@ -1914,13 +2454,13 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
             </div>
           )}
           
-          {/* RAW MATERIALS TAB */}
+          {/* MATERIALS INVENTORY TAB */}
           {activeTab === 'raw_materials' && (
             <div className="space-y-4">
               <div className="rounded-lg border border-amber-200 bg-amber-50/80 p-4">
                 <h2 className="text-base font-semibold text-amber-950">Factory material requests</h2>
                 <p className="text-xs text-amber-900/80 mt-1 mb-3">
-                  Production staff submit requests from <span className="font-medium">/factory</span>. Release deducts from raw
+                  Production staff submit requests from <span className="font-medium">/factory</span>. Release deducts from
                   materials inventory (same as stock out).
                 </p>
                 {factoryMaterialRequests.filter((r) => r.status === 'pending').length === 0 ? (
@@ -1933,7 +2473,8 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                           <th className="px-3 py-2">Material</th>
                           <th className="px-3 py-2">Qty</th>
                           <th className="px-3 py-2">Date</th>
-                          <th className="px-3 py-2">Notes</th>
+                          <th className="px-3 py-2">Requested by</th>
+                          <th className="px-3 py-2">Inventory</th>
                           <th className="px-3 py-2 text-right">Action</th>
                         </tr>
                       </thead>
@@ -1941,16 +2482,43 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                         {factoryMaterialRequests
                           .filter((r) => r.status === 'pending')
                           .map((req) => (
-                            <tr key={req.id} className="bg-white">
+                            <tr
+                              key={req.id}
+                              className={`cursor-default transition-colors ${
+                                highlightedMaterialId === req.material_id
+                                  ? 'bg-amber-100'
+                                  : 'bg-white hover:bg-amber-50/80'
+                              }`}
+                              onMouseEnter={() => setHighlightedMaterialId(req.material_id)}
+                              onMouseLeave={() => setHighlightedMaterialId(null)}
+                            >
                               <td className="px-3 py-2 font-medium text-gray-900">
                                 {req.material?.material_name || rawMaterials.find((m) => m.id === req.material_id)?.material_name || '—'}
                               </td>
                               <td className="px-3 py-2">
-                                {req.quantity} {req.material?.unit || rawMaterials.find((m) => m.id === req.material_id)?.unit || ''}
+                                {(() => {
+                                  const mat = resolveFactoryRequestMaterial(req, rawMaterials)
+                                  if (!mat) return req.quantity
+                                  const { primary, stockNote } = formatFactoryRequestQtyDisplay(
+                                    Number(req.quantity),
+                                    mat
+                                  )
+                                  return (
+                                    <div>
+                                      <span className="tabular-nums">{primary}</span>
+                                      {stockNote ? (
+                                        <div className="text-[11px] text-gray-500">{stockNote}</div>
+                                      ) : null}
+                                    </div>
+                                  )
+                                })()}
                               </td>
                               <td className="px-3 py-2 text-gray-600">{req.request_date}</td>
-                              <td className="px-3 py-2 text-gray-600 max-w-[200px] truncate" title={req.notes}>
-                                {req.notes || '—'}
+                              <td className="px-3 py-2 text-gray-600 whitespace-nowrap">
+                                {req.requested_by?.trim() || '—'}
+                              </td>
+                              <td className="px-3 py-2">
+                                <FactoryRequestInventoryStockCell req={req} rawMaterials={rawMaterials} />
                               </td>
                               <td className="px-3 py-2 text-right">
                                 <div className="flex flex-wrap justify-end gap-2">
@@ -1967,7 +2535,16 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                                   <button
                                     type="button"
                                     onClick={() => releaseFactoryMaterialRequest(req)}
-                                    disabled={releasingRequestId === req.id || cancellingRequestId === req.id}
+                                    disabled={
+                                      releasingRequestId === req.id ||
+                                      cancellingRequestId === req.id ||
+                                      !factoryRequestHasSufficientStock(req, rawMaterials)
+                                    }
+                                    title={
+                                      !factoryRequestHasSufficientStock(req, rawMaterials)
+                                        ? 'Insufficient warehouse stock'
+                                        : undefined
+                                    }
                                     className="px-3 py-1.5 text-xs font-medium rounded-md bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50"
                                   >
                                     {releasingRequestId === req.id ? 'Releasing…' : 'Release to factory'}
@@ -1982,174 +2559,398 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
                 )}
               </div>
 
-              <div className="flex justify-between items-center">
-                <div>
-                  <h2 className="text-lg font-semibold">Raw Materials Inventory</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">Track purchased materials and stock levels</p>
+              <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                <div className="px-4 py-4 sm:px-5 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <h2 className="text-lg font-semibold text-gray-900">Materials Inventory</h2>
+                      <p className="text-sm text-gray-500 mt-0.5">
+                        Grouped by owner and category for {selectedBrand.name}
+                      </p>
+                      <div className="flex flex-wrap gap-2 mt-3">
+                        <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700">
+                          {rawMaterialsInventoryStats.total} materials
+                        </span>
+                        {rawMaterialsInventoryStats.low > 0 && (
+                          <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-1 text-xs font-medium text-yellow-800">
+                            {rawMaterialsInventoryStats.low} low stock
+                          </span>
+                        )}
+                        {rawMaterialsInventoryStats.out > 0 && (
+                          <span className="inline-flex items-center rounded-full bg-red-100 px-2.5 py-1 text-xs font-medium text-red-800">
+                            {rawMaterialsInventoryStats.out} out of stock
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2 w-full lg:w-auto lg:min-w-[320px]">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                        <input
+                          type="search"
+                          value={rawMaterialsSearch}
+                          onChange={(e) => setRawMaterialsSearch(e.target.value)}
+                          placeholder="Search name, SKU, supplier…"
+                          className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowCycleCountPanel(true)}
+                        className="shrink-0 inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-700 border border-indigo-200 bg-white rounded-lg hover:bg-indigo-50 shadow-sm"
+                      >
+                        <ClipboardCheck className="h-4 w-4" />
+                        Cycle count
+                      </button>
+                      <button
+                        onClick={() => {
+                          setEditingMaterial(null)
+                          setShowMaterialModal(true)
+                        }}
+                        className="shrink-0 px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 shadow-sm"
+                      >
+                        + Add Material
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <button
-                  onClick={() => {
-                    setEditingMaterial(null)
-                    setShowMaterialModal(true)
-                  }}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-                >
-                  + Add Material
-                </button>
-              </div>
-              
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200 border rounded-lg">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Material Name
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Supplier
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Category
-                      </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Status
-                      </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Current Stock
-                      </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Min Stock
-                      </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Unit Cost
-                      </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Stock Value
-                      </th>
-                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase tracking-wider">
-                        Actions
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {rawMaterials.map((material) => {
-                      const stockStatus = 
-                        material.current_stock <= 0 ? 'out' :
-                        material.current_stock <= material.minimum_stock ? 'low' : 'normal'
-                      
-                      return (
-                        <tr key={material.id} className="bg-white hover:bg-blue-50 transition-all duration-200 hover:shadow-sm">
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <div className="text-sm font-medium text-gray-900">{material.material_name}</div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <div className="text-sm text-purple-600">
-                              {material.supplier ? material.supplier.name : '-'}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <div className="text-sm text-gray-500">
-                              {material.category || '-'}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <span className={`px-2 py-1 text-xs font-medium rounded ${
-                              stockStatus === 'out' ? 'bg-red-100 text-red-800' :
-                              stockStatus === 'low' ? 'bg-yellow-100 text-yellow-800' :
-                              'bg-green-100 text-green-800'
-                            }`}>
-                              {stockStatus === 'out' ? 'Out of Stock' :
-                               stockStatus === 'low' ? 'Low Stock' : 'In Stock'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-right">
-                            <div className="text-sm font-semibold text-gray-900">
-                              {material.current_stock} {material.unit}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-right">
-                            <div className="text-sm text-gray-600">
-                              {material.minimum_stock} {material.unit}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-right">
-                            <div className="text-sm text-gray-600">
-                              ₱{material.unit_cost.toLocaleString()}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-right">
-                            <div className="text-sm font-semibold text-blue-600">
-                              ₱{(material.current_stock * material.unit_cost).toLocaleString()}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap text-center">
-                            <div className="flex gap-2 justify-center">
-                              <button
-                                onClick={() => {
-                                  setSelectedMaterialForMovement(material)
-                                  setShowStockMovementModal(true)
-                                }}
-                                className="p-1.5 text-blue-600 hover:text-blue-800 rounded hover:bg-gray-100"
-                                title="Stock In/Out"
-                              >
-                                <Package size={16} />
-                              </button>
-                              <button
-                                onClick={async () => {
-                                  setSelectedMaterialForHistory(material)
-                                  await loadMovementHistory(material.id)
-                                  setShowMovementHistory(true)
-                                }}
-                                className="p-1.5 text-purple-600 hover:text-purple-800 rounded hover:bg-gray-100"
-                                title="History"
-                              >
-                                <History size={16} />
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setEditingMaterial(material)
-                                  setShowMaterialModal(true)
-                                }}
-                                className="p-1.5 text-gray-600 hover:text-gray-800 rounded hover:bg-gray-100"
-                                title="Edit"
-                              >
-                                <Edit size={16} />
-                              </button>
-                              <button
-                                onClick={async () => {
-                                  if (!confirm(`Delete "${material.material_name}"?\n\nThis will also delete all stock movement history.`)) return
-                                  
-                                  const { error } = await supabase
-                                    .from('raw_materials')
-                                    .delete()
-                                    .eq('id', material.id)
-                                  
-                                  if (error) {
-                                    alert(`Error deleting material: ${error.message}`)
-                                  } else {
-                                    loadRawMaterials()
-                                  }
-                                }}
-                                className="p-1.5 text-red-600 hover:text-red-800 rounded hover:bg-gray-100"
-                                title="Delete"
-                              >
-                                <Trash2 size={16} />
-                              </button>
-                            </div>
-                          </td>
+
+                {rawMaterialsLoading ? (
+                  <div className="overflow-x-auto animate-pulse">
+                    <table className="min-w-full">
+                      <thead className="bg-gray-50/80">
+                        <tr className="border-b border-gray-200">
+                          <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Material</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Supplier</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Status</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Purchase Unit</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Min</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Unit cost</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">Value</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Actions</th>
                         </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {Array.from({ length: 6 }).map((_, idx) => (
+                          <tr key={`raw-material-skeleton-${idx}`} className="bg-white">
+                            <td className="px-5 py-3">
+                              <div className="h-4 w-44 rounded bg-gray-200 mb-2"></div>
+                              <div className="h-3 w-24 rounded bg-gray-100"></div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="h-4 w-28 rounded bg-gray-200"></div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="h-5 w-20 rounded-full bg-gray-200"></div>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="h-4 w-16 rounded bg-gray-200 ml-auto"></div>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="h-4 w-12 rounded bg-gray-200 ml-auto"></div>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="h-4 w-16 rounded bg-gray-200 ml-auto"></div>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="h-4 w-20 rounded bg-gray-200 ml-auto"></div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="h-8 w-28 rounded bg-gray-200 ml-auto"></div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : rawMaterials.length === 0 ? (
+                  <div className="text-center py-14 px-4">
+                    <Package className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                    <p className="text-gray-600 font-medium">No materials added yet</p>
+                    <p className="text-sm text-gray-400 mt-1">Add your first material to start tracking</p>
+                  </div>
+                ) : rawMaterialsByOwner.length === 0 ? (
+                  <div className="text-center py-14 px-4">
+                    <Search className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                    <p className="text-gray-600 font-medium">
+                      {rawMaterialsSearch.trim()
+                        ? 'No materials match your search'
+                        : `No materials for ${selectedBrand.name}`}
+                    </p>
+                    <p className="text-sm text-gray-400 mt-1">
+                      {rawMaterialsSearch.trim()
+                        ? 'Try a different keyword or clear the search.'
+                        : 'Items owned exclusively by another brand are hidden here.'}
+                    </p>
+                    {rawMaterialsSearch.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => setRawMaterialsSearch('')}
+                        className="mt-3 text-sm font-medium text-blue-600 hover:text-blue-800"
+                      >
+                        Clear search
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full">
+                      <thead className="bg-gray-50/80 sticky top-0 z-[1]">
+                        <tr className="border-b border-gray-200">
+                          <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Material
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Supplier
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Status
+                          </th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Purchase Unit
+                          </th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Min
+                          </th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Unit cost
+                          </th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Value
+                          </th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {rawMaterialsByOwner.map(({ owner, totalCount, totalValue, categories }) => {
+                          const ownerTheme = getOwnerThemeClasses(owner, ownerBrandSlugMap)
+                          return (
+                            <Fragment key={`group-${owner}`}>
+                              <tr className={`${ownerTheme.groupHeader} border-y border-gray-200/80`}>
+                                <td colSpan={6} className="p-0">
+                                  <div
+                                    className={`flex items-center gap-2 px-5 py-2.5 border-l-4 ${ownerTheme.accentBorder}`}
+                                  >
+                                    <span className="text-sm font-semibold tracking-tight">{owner}</span>
+                                    <span
+                                      className={`shrink-0 text-xs font-medium px-2.5 py-0.5 rounded-full ${ownerTheme.badge}`}
+                                    >
+                                      {totalCount} {totalCount === 1 ? 'item' : 'items'}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td className="px-4 py-2.5 text-right whitespace-nowrap align-middle">
+                                  <div className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">
+                                    Total
+                                  </div>
+                                  <div className="text-sm font-semibold text-blue-700 tabular-nums">
+                                    ₱
+                                    {totalValue.toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })}
+                                  </div>
+                                </td>
+                                <td className="px-4 py-2.5" />
+                              </tr>
+                              {categories.map(({ category, materials }) => (
+                                <Fragment key={`${owner}-${category}`}>
+                                  <tr className="bg-gray-50/50">
+                                    <td colSpan={8} className="p-0">
+                                      <div className="flex items-center gap-2 px-5 py-2 ml-3 border-l-2 border-gray-200">
+                                        <Tag className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                                        <span className="text-xs font-semibold text-gray-600">{category}</span>
+                                        <span className="text-xs text-gray-400">
+                                          {materials.length} {materials.length === 1 ? 'material' : 'materials'}
+                                        </span>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                  {materials.map((material) => {
+                                    const stockStatus =
+                                      material.current_stock <= 0
+                                        ? 'out'
+                                        : material.current_stock <= material.minimum_stock
+                                          ? 'low'
+                                          : 'normal'
+                                    const isHighlighted = highlightedMaterialId === material.id
+                                    const purchaseStockDisplay = formatStockAsPurchaseWithRemainder(
+                                      material.current_stock,
+                                      material
+                                    )
+                                    const minimumStockDisplay = formatStockAsPurchaseWithRemainder(
+                                      material.minimum_stock,
+                                      material
+                                    )
+
+                                    return (
+                                      <tr
+                                        key={`${owner}-${category}-${material.id}`}
+                                        ref={(el) => {
+                                          inventoryRowRefs.current[material.id] = el
+                                        }}
+                                        className={`transition-colors ${
+                                          isHighlighted
+                                            ? 'bg-amber-100'
+                                            : 'bg-white hover:bg-amber-50/80'
+                                        }`}
+                                      >
+                                        <td className="px-5 py-3 whitespace-nowrap">
+                                          <div className="flex items-center gap-2 pl-3">
+                                            <div className="min-w-0">
+                                              <div className="text-sm font-medium text-gray-900 truncate max-w-[220px] sm:max-w-none">
+                                                {material.material_name}
+                                              </div>
+                                              {material.sku && (
+                                                <div className="text-xs text-gray-400 mt-0.5">{material.sku}</div>
+                                              )}
+                                            </div>
+                                            {(material.owner?.length ?? 0) > 1 && (
+                                              <MultiOwnerIndicator owners={material.owner!} />
+                                            )}
+                                            <MaterialUnitHierarchyIndicator material={material} />
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap">
+                                          <div className="text-sm text-gray-700">
+                                            {material.supplier ? (
+                                              <span className="text-purple-700 font-medium">
+                                                {material.supplier.name}
+                                              </span>
+                                            ) : (
+                                              <span className="text-gray-400">—</span>
+                                            )}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap">
+                                          <span
+                                            className={`inline-flex px-2.5 py-1 text-xs font-medium rounded-full ${
+                                              stockStatus === 'out'
+                                                ? 'bg-red-100 text-red-800'
+                                                : stockStatus === 'low'
+                                                  ? 'bg-amber-100 text-amber-900'
+                                                  : 'bg-emerald-100 text-emerald-800'
+                                            }`}
+                                          >
+                                            {stockStatus === 'out'
+                                              ? 'Out of stock'
+                                              : stockStatus === 'low'
+                                                ? 'Low stock'
+                                                : 'In stock'}
+                                          </span>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-right">
+                                          <div className="text-sm font-semibold text-gray-900 tabular-nums">
+                                            {purchaseStockDisplay}
+                                          </div>
+                                          <div className="text-[11px] text-gray-400 tabular-nums">
+                                            {formatStockUnitTotal(material.current_stock, material)}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-right">
+                                          <div className="text-sm text-gray-500 tabular-nums">
+                                            {minimumStockDisplay}
+                                          </div>
+                                          <div className="text-[11px] text-gray-400 tabular-nums">
+                                            {formatStockUnitTotal(material.minimum_stock, material)}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-right">
+                                          <div className="text-sm text-gray-600 tabular-nums">
+                                            ₱
+                                            {material.unit_cost.toLocaleString(undefined, {
+                                              minimumFractionDigits: 2,
+                                              maximumFractionDigits: 2,
+                                            })}
+                                          </div>
+                                          <div className="text-[11px] text-gray-400">
+                                            / {getPurchaseUnit(material)}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-right">
+                                          <div className="text-sm font-semibold text-blue-700 tabular-nums">
+                                            ₱
+                                            {(material.current_stock * getStockUnitCost(material)).toLocaleString(
+                                              undefined,
+                                              { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+                                            )}
+                                          </div>
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                                          <div className="inline-flex items-center gap-0.5">
+                                            <button
+                                              onClick={() => {
+                                                setSelectedMaterialForMovement(material)
+                                                setShowStockMovementModal(true)
+                                              }}
+                                              className="p-1.5 text-blue-600 hover:text-blue-800 rounded-md hover:bg-gray-100 transition-colors"
+                                              title="Stock In/Out"
+                                            >
+                                              <Package size={15} />
+                                            </button>
+                                            <button
+                                              onClick={async () => {
+                                                setSelectedMaterialForHistory(material)
+                                                await loadMovementHistory(material.id)
+                                                setShowMovementHistory(true)
+                                              }}
+                                              className="p-1.5 text-purple-600 hover:text-purple-800 rounded-md hover:bg-gray-100 transition-colors"
+                                              title="History"
+                                            >
+                                              <History size={15} />
+                                            </button>
+                                            <button
+                                              onClick={() => {
+                                                setEditingMaterial(material)
+                                                setShowMaterialModal(true)
+                                              }}
+                                              className="p-1.5 text-gray-600 hover:text-gray-800 rounded-md hover:bg-gray-100 transition-colors"
+                                              title="Edit"
+                                            >
+                                              <Edit size={15} />
+                                            </button>
+                                            <button
+                                              onClick={async () => {
+                                                if (
+                                                  !confirm(
+                                                    `Delete "${material.material_name}"?\n\nThis will also delete all stock movement history.`
+                                                  )
+                                                )
+                                                  return
+
+                                                const { error } = await supabase
+                                                  .from('raw_materials')
+                                                  .delete()
+                                                  .eq('id', material.id)
+
+                                                if (error) {
+                                                  alert(`Error deleting material: ${error.message}`)
+                                                } else {
+                                                  loadRawMaterials()
+                                                }
+                                              }}
+                                              className="p-1.5 text-red-600 hover:text-red-800 rounded-md hover:bg-gray-100 transition-colors"
+                                              title="Delete"
+                                            >
+                                              <Trash2 size={15} />
+                                            </button>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )
+                                  })}
+                                </Fragment>
+                              ))}
+                            </Fragment>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
-              
-              {rawMaterials.length === 0 && (
-                <div className="text-center py-12 bg-gray-50 rounded-md border border-gray-200">
-                  <p className="text-gray-500">No materials added yet</p>
-                  <p className="text-xs text-gray-400 mt-1">Add your first raw material to start tracking</p>
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -2206,6 +3007,27 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
         />
       )}
       
+      {showPRDetailsModal && selectedPRForDetails && (
+        (() => {
+          const linkedPO = purchaseOrders.find((po) => po.pr_id === selectedPRForDetails.id)
+          return (
+        <PRDetailsModal
+          pr={selectedPRForDetails}
+          linkedPO={linkedPO}
+          onOpenPurchaseOrder={(poId) => {
+            setShowPRDetailsModal(false)
+            setSelectedPRForDetails(null)
+            viewPODetails(poId)
+          }}
+          onClose={() => {
+            setShowPRDetailsModal(false)
+            setSelectedPRForDetails(null)
+          }}
+        />
+          )
+        })()
+      )}
+
       {showPRModal && (
         <PRModal
           brandId={selectedBrand?.id || ''}
@@ -2363,13 +3185,59 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
           material={editingMaterial}
           brandId={selectedBrand?.id || ''}
           suppliers={suppliers}
+          existingCategories={Array.from(new Set(
+            rawMaterials
+              .map((m) => m.category?.trim())
+              .filter((category): category is string => Boolean(category))
+          )).sort((a, b) => a.localeCompare(b))}
+          ownerOptions={Array.from(new Set([
+            ...brands.map((b) => b.name),
+            ...rawMaterials
+              .flatMap((m) => (m.owner ?? []).map((owner) => owner.trim()))
+              .filter((owner) => Boolean(owner)),
+          ])).sort((a, b) => a.localeCompare(b))}
+          ownerBrandSlugMap={ownerBrandSlugMap}
           onSave={async (materialData) => {
             // Parse string values to numbers
             const dataToSave = {
               ...materialData,
-              unit_cost: typeof materialData.unit_cost === 'string' ? parseFloat(materialData.unit_cost) || 0 : materialData.unit_cost,
-              minimum_stock: typeof materialData.minimum_stock === 'string' ? parseFloat(materialData.minimum_stock) || 0 : materialData.minimum_stock,
-              current_stock: typeof materialData.current_stock === 'string' ? parseFloat(materialData.current_stock) || 0 : materialData.current_stock
+              supplier_id: materialData.supplier_id?.trim() ? materialData.supplier_id : null,
+              unit_cost:
+                typeof materialData.unit_cost === 'string'
+                  ? parseWholeQuantityInput(materialData.unit_cost)
+                  : Math.max(0, Math.floor(Number(materialData.unit_cost) || 0)),
+              minimum_stock:
+                typeof materialData.minimum_stock === 'string'
+                  ? parseWholeQuantityInput(materialData.minimum_stock)
+                  : Math.max(0, Math.floor(Number(materialData.minimum_stock) || 0)),
+              current_stock:
+                typeof materialData.current_stock === 'string'
+                  ? parseWholeQuantityInput(materialData.current_stock)
+                  : Math.max(0, Math.floor(Number(materialData.current_stock) || 0)),
+              uom_base_per_unit:
+                typeof materialData.uom_base_per_unit === 'string'
+                  ? Math.max(1, parseWholeQuantityInput(materialData.uom_base_per_unit))
+                  : Math.max(1, Math.floor(Number(materialData.uom_base_per_unit) || 1)),
+              uom_stock_per_purchase:
+                typeof materialData.uom_stock_per_purchase === 'string'
+                  ? Math.max(1, parseWholeQuantityInput(materialData.uom_stock_per_purchase))
+                  : Math.max(1, Math.floor(Number(materialData.uom_stock_per_purchase) || 1)),
+              uom_base_unit: materialData.uom_base_unit || materialData.unit,
+              uom_purchase_unit: materialData.uom_purchase_unit || materialData.unit,
+              linked_product_id: editingMaterial?.linked_product_id || null,
+              factory_inventory_kind: isFactoryInventoryKind(materialData.factory_inventory_kind)
+                ? materialData.factory_inventory_kind
+                : null,
+              factory_request_uom: isFactoryInventoryKind(materialData.factory_inventory_kind)
+                ? materialData.factory_request_uom === 'purchase'
+                  ? 'purchase'
+                  : 'stock'
+                : null,
+              factory_bom_uom: isFactoryInventoryKind(materialData.factory_inventory_kind)
+                ? isFactoryBomUom(materialData.factory_bom_uom)
+                  ? materialData.factory_bom_uom
+                  : 'base'
+                : null,
             }
             
             if (editingMaterial) {
@@ -2404,13 +3272,97 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
         />
       )}
       
+      {showCycleCountPanel && selectedBrand && (
+        <MaterialsCycleCountPanel
+          selectedBrand={selectedBrand}
+          brands={brands}
+          rawMaterials={rawMaterials}
+          createdBy={movementCreatedBy}
+          onClose={() => setShowCycleCountPanel(false)}
+          onPosted={() => loadRawMaterials()}
+        />
+      )}
+
       {showStockMovementModal && selectedMaterialForMovement && (
         <StockMovementModal
           material={selectedMaterialForMovement}
           onSave={async (movementData) => {
+            const baseMovementData = { ...movementData }
+
+            if (
+              baseMovementData.movement_type === 'out' &&
+              selectedMaterialForMovement.linked_product_id
+            ) {
+              const transferQty = Number(baseMovementData.quantity) || 0
+              if (transferQty > 0) {
+                const { data: linkedProduct, error: linkedProductError } = await supabase
+                  .from('products')
+                  .select('id, name, initial_stock')
+                  .eq('id', selectedMaterialForMovement.linked_product_id)
+                  .single()
+
+                if (linkedProductError || !linkedProduct) {
+                  alert(
+                    `Error loading linked product inventory: ${linkedProductError?.message || 'Product not found'}`
+                  )
+                  return
+                }
+
+                const productInitial = Number(linkedProduct.initial_stock) || 0
+                const productFinal = productInitial + transferQty
+
+                const transferMovementData: Partial<MaterialStockMovement> = {
+                  ...baseMovementData,
+                  created_by: movementCreatedBy,
+                  reference_type: 'transfer_to_product_inventory',
+                  reference_id: linkedProduct.id,
+                  reference_number: linkedProduct.name || baseMovementData.reference_number,
+                  notes: [
+                    baseMovementData.notes?.trim(),
+                    `Transferred to product inventory: ${linkedProduct.name || 'Linked product'}`,
+                    `Product inventory stock: initial ${productInitial} -> final ${productFinal}`,
+                  ]
+                    .filter(Boolean)
+                    .join(' | '),
+                }
+
+                const { error: movementError } = await supabase
+                  .from('material_stock_movements')
+                  .insert([{ ...transferMovementData, material_id: selectedMaterialForMovement.id }])
+
+                if (movementError) {
+                  alert(`Error recording movement: ${movementError.message}`)
+                  return
+                }
+
+                const { error: transferError } = await supabase
+                  .from('products')
+                  .update({ initial_stock: productFinal })
+                  .eq('id', linkedProduct.id)
+
+                if (transferError) {
+                  alert(
+                    `Movement recorded, but transfer to product inventory failed: ${transferError.message}\n` +
+                    `Please adjust inventory manually.`
+                  )
+                }
+
+                setShowStockMovementModal(false)
+                setSelectedMaterialForMovement(null)
+                loadRawMaterials()
+                return
+              }
+            }
+
             const { error } = await supabase
               .from('material_stock_movements')
-              .insert([{ ...movementData, material_id: selectedMaterialForMovement.id }])
+              .insert([
+                {
+                  ...baseMovementData,
+                  material_id: selectedMaterialForMovement.id,
+                  created_by: movementCreatedBy,
+                },
+              ])
             
             if (error) {
               alert(`Error recording movement: ${error.message}`)
@@ -2443,6 +3395,7 @@ export function PurchasingManager({ selectedBrand, theme = 'blue' }: PurchasingM
       {showPODetailsModal && selectedPOForDetails && (
         <PODetailsModal
           po={selectedPOForDetails}
+          onOpenRequisition={openReferencedRequisition}
           onClose={() => {
             setShowPODetailsModal(false)
             setSelectedPOForDetails(null)
@@ -2474,6 +3427,7 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
     bank_name: supplier?.bank_name || '',
     bank_account_number: supplier?.bank_account_number || '',
     bank_account_name: supplier?.bank_account_name || '',
+    lead_time_days: supplier?.lead_time_days ?? 0,
     notes: supplier?.notes || '',
     is_active: supplier?.is_active ?? true
   })
@@ -2576,6 +3530,23 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
                 <option value="Payment after delivery">Payment after delivery</option>
               </select>
             </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Supplier Lead Time (days)</label>
+              <input
+                type="number"
+                min={0}
+                value={formData.lead_time_days}
+                onChange={(e) =>
+                  setFormData({
+                    ...formData,
+                    lead_time_days: Math.max(0, parseInt(e.target.value || '0', 10) || 0),
+                  })
+                }
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="0"
+              />
+            </div>
             
             <div>
               <label className="block text-sm font-medium mb-1">Payment Method</label>
@@ -2610,7 +3581,7 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
               />
             </div>
             
-            <div className="col-span-2">
+            <div>
               <label className="block text-sm font-medium mb-1">Account Name</label>
               <input
                 type="text"
@@ -2628,18 +3599,6 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 rows={3}
               />
-            </div>
-            
-            <div className="col-span-2">
-              <label className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={formData.is_active}
-                  onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
-                  className="mr-2"
-                />
-                <span className="text-sm font-medium">Active</span>
-              </label>
             </div>
             
             {/* Supplier Products List */}
@@ -2668,7 +3627,7 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
                             </div>
                             <div className="text-right ml-3">
                               <p className="font-semibold text-sm">₱{product.unit_cost.toLocaleString()}</p>
-                              <p className="text-xs text-gray-500">per {product.unit}</p>
+                              <p className="text-xs text-gray-500">per {getPurchaseUnit(product)}</p>
                             </div>
                           </div>
                           {product.current_stock > 0 && (
@@ -2684,19 +3643,30 @@ function SupplierModal({ supplier, brandId, onSave, onClose }: {
           </div>
         </div>
         
-        <div className="p-6 border-t flex justify-end gap-3 sticky bottom-0 bg-white">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => onSave(formData)}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-          >
-            Save Supplier
-          </button>
+        <div className="p-6 border-t flex items-center justify-between gap-3 sticky bottom-0 bg-white">
+          <label className="flex items-center">
+            <input
+              type="checkbox"
+              checked={formData.is_active}
+              onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
+              className="mr-2"
+            />
+            <span className="text-sm font-medium">Active</span>
+          </label>
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => onSave(formData)}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              Save Supplier
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2732,26 +3702,21 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
   
   const [catalog, setCatalog] = useState<RawMaterial[]>([])
   const [showCatalog, setShowCatalog] = useState(false)
+  const selectedSupplier = suppliers.find((s) => s.id === formData.supplier_id)
   
   // Load supplier catalog and payment terms when supplier changes
   useEffect(() => {
     if (formData.supplier_id) {
       loadSupplierCatalog(formData.supplier_id)
       // Auto-populate payment terms and method from supplier
-      const selectedSupplier = suppliers.find(s => s.id === formData.supplier_id)
       if (selectedSupplier && !po) { // Only auto-fill for new POs
         const updates: Partial<POFormData> = {}
         
         if (selectedSupplier.payment_terms) {
           const terms = selectedSupplier.payment_terms
           updates.payment_terms = terms
-          updates.payment_timing = terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
-                                    terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
-                                    'after_delivery'
-        }
-        
-        if (selectedSupplier.payment_method) {
-          updates.payment_method = selectedSupplier.payment_method
+          updates.payment_timing = derivePaymentTimingFromTerms(terms)
+          updates.payment_method = derivePaymentMethodFromTerms(terms)
         }
         
         if (Object.keys(updates).length > 0) {
@@ -2762,6 +3727,25 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
       setCatalog([])
     }
   }, [formData.supplier_id])
+
+  // Auto-calculate expected delivery date using supplier lead time (new POs only)
+  useEffect(() => {
+    if (po) return
+    if (!formData.supplier_id || !formData.order_date) return
+    const selectedSupplier = suppliers.find((s) => s.id === formData.supplier_id)
+    const leadDays = selectedSupplier?.lead_time_days ?? 0
+    if (!leadDays || leadDays <= 0) return
+
+    const base = new Date(formData.order_date)
+    if (Number.isNaN(base.getTime())) return
+    base.setDate(base.getDate() + leadDays)
+    const expected = base.toISOString().split('T')[0]
+
+    // Only fill when empty to avoid overwriting a user override
+    if (!formData.expected_delivery_date) {
+      setFormData((prev) => ({ ...prev, expected_delivery_date: expected }))
+    }
+  }, [po, formData.supplier_id, formData.order_date])
   
   const loadSupplierCatalog = async (supplierId: string) => {
     // Include materials linked to this supplier OR general materials (no supplier)
@@ -2790,7 +3774,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
     const newItem: Partial<PurchaseOrderItem> = {
       product_description: material.material_name,
       quantity: 1,
-      unit: material.unit,
+      unit: getPurchaseUnit(material),
       unit_price: material.unit_cost,
       material_id: material.id,
       material: material,
@@ -2841,7 +3825,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
     newItems[index] = {
       ...newItems[index],
       product_description: material.material_name,
-      unit: material.unit,
+      unit: getPurchaseUnit(material),
       unit_price: material.unit_cost,
       material_id: material.id,
       material: material,
@@ -2916,6 +3900,11 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                     </option>
                   ))}
                 </select>
+                {selectedSupplier?.lead_time_days && selectedSupplier.lead_time_days > 0 && (
+                  <p className="mt-1 text-xs text-blue-700">
+                    Estimated lead time: {selectedSupplier.lead_time_days} calendar day{selectedSupplier.lead_time_days === 1 ? '' : 's'}
+                  </p>
+                )}
               </div>
               
               <div>
@@ -2948,12 +3937,20 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
               </div>
               
               <div>
-                <label className="block text-sm font-medium mb-1">Expected Delivery</label>
+                <label className="block text-sm font-medium mb-1">
+                  Expected Delivery *
+                  {!formData.expected_delivery_date && <span className="text-red-500 text-xs ml-1">(required)</span>}
+                </label>
                 <input
                   type="date"
                   value={formData.expected_delivery_date}
                   onChange={(e) => setFormData({ ...formData, expected_delivery_date: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
+                    !formData.expected_delivery_date
+                      ? 'border-red-300 focus:ring-red-500'
+                      : 'focus:ring-blue-500'
+                  }`}
+                  required
                 />
               </div>
             </div>
@@ -2972,9 +3969,8 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                     setFormData({ 
                       ...formData, 
                       payment_terms: terms,
-                      payment_timing: terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
-                                      terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
-                                      'after_delivery'
+                      payment_timing: derivePaymentTimingFromTerms(terms),
+                      payment_method: derivePaymentMethodFromTerms(terms),
                     })
                   }}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -3006,16 +4002,6 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
           <div>
             <h3 className="font-medium mb-3">Delivery Information</h3>
             <div className="grid grid-cols-2 gap-4">
-              <div className="col-span-2">
-                <label className="block text-sm font-medium mb-1">Delivery Address</label>
-                <textarea
-                  value={formData.delivery_address}
-                  onChange={(e) => setFormData({ ...formData, delivery_address: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  rows={2}
-                />
-              </div>
-              
               <div>
                 <label className="block text-sm font-medium mb-1">Contact Person</label>
                 <input
@@ -3026,6 +4012,16 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                 />
               </div>
               
+              <div className="row-span-2">
+                <label className="block text-sm font-medium mb-1">Delivery Address</label>
+                <textarea
+                  value={formData.delivery_address}
+                  onChange={(e) => setFormData({ ...formData, delivery_address: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  rows={4}
+                />
+              </div>
+
               <div>
                 <label className="block text-sm font-medium mb-1">Contact Phone</label>
                 <input
@@ -3102,7 +4098,9 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                           {material.current_stock > 0 && (
                             <span>{material.current_stock} {material.unit}</span>
                           )}
-                          <span className="font-semibold">₱{material.unit_cost.toLocaleString()}/{material.unit}</span>
+                          <span className="font-semibold">
+                            ₱{material.unit_cost.toLocaleString()}/{getPurchaseUnit(material)}
+                          </span>
                         </div>
                       </div>
                     </button>
@@ -3167,12 +4165,13 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                             getAvailableProductsForRow(index).map((material) => (
                               <option key={material.id} value={material.id}>
                                 {material.material_name}
-                                {material.unit_cost > 0 && ` — ₱${material.unit_cost.toLocaleString()}/${material.unit}`}
+                                {material.unit_cost > 0 &&
+                                  ` — ₱${material.unit_cost.toLocaleString()}/${getPurchaseUnit(material)}`}
                               </option>
                             ))
                           ) : null}
                           {formData.supplier_id && getAvailableProductsForRow(index).length === 0 && catalog.length === 0 && (
-                            <option value="" disabled>No products — add materials in Raw Materials tab and link to this supplier</option>
+                            <option value="" disabled>No products — add materials in Materials Inventory and link to this supplier</option>
                           )}
                           {formData.supplier_id && getAvailableProductsForRow(index).length === 0 && catalog.length > 0 && (
                             <option value="" disabled>All products already added</option>
@@ -3188,10 +4187,13 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                         <input
                           type="number"
                           value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', parseFloat(e.target.value))}
+                          onChange={(e) =>
+                            updateItem(index, 'quantity', parseWholeQuantityInput(e.target.value))
+                          }
                           className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 text-center"
-                          min="0"
-                          step="0.01"
+                          min="1"
+                          step="1"
+                          inputMode="numeric"
                           required
                         />
                       </div>
@@ -3224,7 +4226,7 @@ function POModal({ po, items, setItems, suppliers, onSave, onClose, brandId }: {
                             type="number"
                             value={item.unit_price}
                             onChange={(e) => updateItem(index, 'unit_price', e.target.value)}
-                            className={`w-full pl-6 pr-2 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${
+                            className={`w-full pl-6 pr-2 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${PO_NUMBER_INPUT_NO_SPINNER} ${
                               (item as any).fromCatalog ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
                             }`}
                             placeholder="0.00"
@@ -3386,11 +4388,11 @@ function PaymentModal({ po, onSave, onClose }: {
               <input
                 type="number"
                 value={formData.amount}
-                onChange={(e) => setFormData({ ...formData, amount: parseFloat(e.target.value) })}
+                onChange={(e) => setFormData({ ...formData, amount: parseWholeQuantityInput(e.target.value) })}
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 min="0"
                 max={po.balance_amount}
-                step="0.01"
+                step="1"
                 required
               />
             </div>
@@ -3709,9 +4711,11 @@ function DeliveryModal({ po, onSave, onClose }: {
                           type="number"
                           min="0"
                           max={item.ordered_quantity}
-                          step="0.01"
+                          step="1"
                           value={item.quantity_received}
-                          onChange={(e) => updateDeliveryItem(index, 'quantity_received', parseFloat(e.target.value) || 0)}
+                          onChange={(e) =>
+                            updateDeliveryItem(index, 'quantity_received', parseWholeQuantityInput(e.target.value))
+                          }
                           className="w-full px-2 py-1 border rounded text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                       </td>
@@ -3730,7 +4734,7 @@ function DeliveryModal({ po, onSave, onClose }: {
               </table>
             </div>
             <p className="text-xs text-gray-500 mt-1">
-              💡 Items with 🔗 will automatically update raw materials inventory
+              💡 Items with 🔗 will automatically update materials inventory
             </p>
           </div>
         </div>
@@ -3982,10 +4986,11 @@ function PRModal({ brandId, onSave, onClose }: {
                         <input
                           type="number"
                           value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', parseFloat(e.target.value))}
+                          onChange={(e) => updateItem(index, 'quantity', parseWholeQuantityInput(e.target.value))}
                           className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 text-center"
-                          min="0"
-                          step="0.01"
+                          min="1"
+                          step="1"
+                          inputMode="numeric"
                           required
                         />
                       </div>
@@ -4014,11 +5019,12 @@ function PRModal({ brandId, onSave, onClose }: {
                           <input
                             type="number"
                             value={item.estimated_price}
-                            onChange={(e) => updateItem(index, 'estimated_price', e.target.value)}
+                            onChange={(e) => updateItem(index, 'estimated_price', parseWholeQuantityInput(e.target.value))}
                             className="w-full pl-6 pr-2 py-2 bg-white border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500"
                             placeholder="0.00"
                             min="0"
-                            step="0.01"
+                            step="1"
+                            inputMode="numeric"
                           />
                         </div>
                       </div>
@@ -4110,6 +5116,7 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
     delivery_phone: '',
     notes: pr.purpose || ''
   })
+  const selectedSupplier = suppliers.find((s) => s.id === formData.supplier_id)
   
   const [catalog, setCatalog] = useState<RawMaterial[]>([])
   const [showCatalog, setShowCatalog] = useState(false)
@@ -4118,20 +5125,14 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
     if (formData.supplier_id) {
       loadSupplierCatalog(formData.supplier_id)
       // Auto-populate payment terms and method from supplier
-      const selectedSupplier = suppliers.find(s => s.id === formData.supplier_id)
       if (selectedSupplier) {
         const updates: Partial<POFormData> = {}
         
         if (selectedSupplier.payment_terms) {
           const terms = selectedSupplier.payment_terms
           updates.payment_terms = terms
-          updates.payment_timing = terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
-                                    terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
-                                    'after_delivery'
-        }
-        
-        if (selectedSupplier.payment_method) {
-          updates.payment_method = selectedSupplier.payment_method
+          updates.payment_timing = derivePaymentTimingFromTerms(terms)
+          updates.payment_method = derivePaymentMethodFromTerms(terms)
         }
         
         if (Object.keys(updates).length > 0) {
@@ -4170,7 +5171,7 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
     const newItem: Partial<PurchaseOrderItem> = {
       product_description: material.material_name,
       quantity: 1,
-      unit: material.unit,
+      unit: getPurchaseUnit(material),
       unit_price: material.unit_cost,
       material_id: material.id,
       material: material,
@@ -4209,6 +5210,8 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
     formData.supplier_id.trim() !== '' &&
     formData.purchasing_agent && 
     formData.purchasing_agent.trim() !== '' &&
+    formData.expected_delivery_date &&
+    formData.expected_delivery_date.trim() !== '' &&
     areItemsValid
   
   return (
@@ -4273,6 +5276,11 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                     </option>
                   ))}
                 </select>
+                {selectedSupplier?.lead_time_days && selectedSupplier.lead_time_days > 0 && (
+                  <p className="mt-1 text-xs text-blue-700">
+                    Estimated lead time: {selectedSupplier.lead_time_days} calendar day{selectedSupplier.lead_time_days === 1 ? '' : 's'}
+                  </p>
+                )}
               </div>
               
               <div>
@@ -4286,12 +5294,20 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
               </div>
               
               <div>
-                <label className="block text-sm font-medium mb-1">Expected Delivery</label>
+                <label className="block text-sm font-medium mb-1">
+                  Expected Delivery *
+                  {!formData.expected_delivery_date && <span className="text-red-500 text-xs ml-1">(required)</span>}
+                </label>
                 <input
                   type="date"
                   value={formData.expected_delivery_date}
                   onChange={(e) => setFormData({ ...formData, expected_delivery_date: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 ${
+                    !formData.expected_delivery_date
+                      ? 'border-red-300 focus:ring-red-500'
+                      : 'focus:ring-blue-500'
+                  }`}
+                  required
                 />
               </div>
               
@@ -4307,9 +5323,8 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                     setFormData({ 
                       ...formData, 
                       payment_terms: terms,
-                      payment_timing: terms.includes('upon order') || terms.includes('before') ? 'before_delivery' : 
-                                      terms.includes('COD') || terms.includes('after') ? 'after_delivery' : 
-                                      'after_delivery'
+                      payment_timing: derivePaymentTimingFromTerms(terms),
+                      payment_method: derivePaymentMethodFromTerms(terms),
                     })
                   }}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -4399,7 +5414,9 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                           {material.current_stock > 0 && (
                             <span>{material.current_stock} {material.unit}</span>
                           )}
-                          <span className="font-semibold">₱{material.unit_cost.toLocaleString()}/{material.unit}</span>
+                          <span className="font-semibold">
+                            ₱{material.unit_cost.toLocaleString()}/{getPurchaseUnit(material)}
+                          </span>
                         </div>
                       </div>
                     </button>
@@ -4448,10 +5465,13 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                       <input
                         type="number"
                         value={item.quantity}
-                        onChange={(e) => updateItem(index, 'quantity', parseFloat(e.target.value))}
+                        onChange={(e) =>
+                          updateItem(index, 'quantity', parseWholeQuantityInput(e.target.value))
+                        }
                         className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 text-center"
-                        min="0"
-                        step="0.01"
+                        min="1"
+                        step="1"
+                        inputMode="numeric"
                         required
                       />
                     </div>
@@ -4477,13 +5497,13 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
                         <input
                           type="number"
                           value={item.unit_price}
-                          onChange={(e) => updateItem(index, 'unit_price', parseFloat(e.target.value))}
-                          className={`w-full pl-6 pr-2 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${
+                          onChange={(e) => updateItem(index, 'unit_price', parseWholeQuantityInput(e.target.value))}
+                          className={`w-full pl-6 pr-2 py-2 border border-gray-300 rounded text-sm focus:outline-none focus:border-blue-500 ${PO_NUMBER_INPUT_NO_SPINNER} ${
                             (item as any).fromCatalog ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'
                           }`}
                           readOnly={(item as any).fromCatalog}
                           min="0"
-                          step="0.01"
+                          step="1"
                           required
                         />
                       </div>
@@ -4556,40 +5576,148 @@ function ConvertPRtoPOModal({ pr, items, setItems, suppliers, brandId, onSave, o
 // MATERIAL MODAL
 // =============================================
 
-function MaterialModal({ material, brandId, suppliers, onSave, onClose }: {
+function MaterialModal({ material, brandId, suppliers, existingCategories, ownerOptions, ownerBrandSlugMap, onSave, onClose }: {
   material: RawMaterial | null
   brandId: string
   suppliers: Supplier[]
+  existingCategories: string[]
+  ownerOptions: string[]
+  ownerBrandSlugMap: Record<string, string>
   onSave: (material: Partial<RawMaterial>) => void
   onClose: () => void
 }) {
+  const [showCategoryDropdown, setShowCategoryDropdown] = useState(false)
+  const [showOwnerDropdown, setShowOwnerDropdown] = useState(false)
+  const [ownerInput, setOwnerInput] = useState('')
+  const initialStockPerPurchase = Math.max(
+    1,
+    parseWholeQuantityInput(String(material?.uom_stock_per_purchase || '1'))
+  )
   const [formData, setFormData] = useState({
     supplier_id: material?.supplier_id || '',
     material_name: material?.material_name || '',
     sku: material?.sku || '',
     category: material?.category || '',
-    unit: material?.unit || 'kg',
+    factory_inventory_kind:
+      material?.factory_inventory_kind && isFactoryInventoryKind(material.factory_inventory_kind)
+        ? material.factory_inventory_kind
+        : ('' as '' | FactoryInventoryKind),
+    factory_request_uom:
+      material?.factory_request_uom === 'purchase' ? 'purchase' : ('stock' as FactoryRequestUom),
+    factory_bom_uom:
+      material?.factory_bom_uom === 'stock'
+        ? 'stock'
+        : ('base' as FactoryBomUom),
+    owner: material?.owner || ([] as string[]),
+    unit: material?.unit || '',
+    uom_base_unit: material?.uom_base_unit || '',
+    uom_base_per_unit: material?.uom_base_per_unit || (1 as any),
+    uom_purchase_unit: material?.uom_purchase_unit || '',
+    uom_stock_per_purchase: material?.uom_stock_per_purchase || (1 as any),
     unit_cost: material?.unit_cost || ('' as any),
-    minimum_stock: material?.minimum_stock || ('' as any),
-    current_stock: material?.current_stock || ('' as any),
+    minimum_purchase_units:
+      material?.minimum_stock !== undefined && material?.minimum_stock !== null
+        ? Math.floor((material.minimum_stock || 0) / initialStockPerPurchase)
+        : ('' as any),
+    initial_purchase_units:
+      material?.current_stock !== undefined && material?.current_stock !== null
+        ? Math.floor((material.current_stock || 0) / initialStockPerPurchase)
+        : ('' as any),
     notes: material?.notes || '',
     is_active: material?.is_active ?? true
   })
   
-  const isValid = formData.material_name.trim() !== '' && formData.unit.trim() !== ''
-  
+  const hasWholeNumber = (value: string | number | null | undefined, min: number) => {
+    const parsed = parseWholeQuantityInput(String(value ?? ''))
+    return parsed >= min
+  }
+
+  const categoryOptions = useMemo(
+    () => mergeRawMaterialCategoryOptions(existingCategories),
+    [existingCategories]
+  )
+
+  const isValid =
+    formData.material_name.trim() !== '' &&
+    formData.owner.length > 0 &&
+    formData.category.trim() !== '' &&
+    formData.uom_purchase_unit.trim() !== '' &&
+    formData.unit.trim() !== '' &&
+    formData.uom_stock_per_purchase !== '' &&
+    hasWholeNumber(formData.uom_stock_per_purchase, 1) &&
+    formData.uom_base_unit.trim() !== '' &&
+    formData.uom_base_per_unit !== '' &&
+    hasWholeNumber(formData.uom_base_per_unit, 1) &&
+    formData.unit_cost !== '' &&
+    hasWholeNumber(formData.unit_cost, 0) &&
+    formData.minimum_purchase_units !== '' &&
+    hasWholeNumber(formData.minimum_purchase_units, 0) &&
+    (material
+      ? true
+      : formData.initial_purchase_units !== '' && hasWholeNumber(formData.initial_purchase_units, 0))
+
+  const addOwner = (value: string) => {
+    const next = value.trim()
+    if (!next || formData.owner.includes(next)) return false
+    setFormData({ ...formData, owner: [...formData.owner, next] })
+    setOwnerInput('')
+    return true
+  }
+
+  const filteredOwnerOptions = ownerOptions.filter((owner) => {
+    if (formData.owner.includes(owner)) return false
+    const q = ownerInput.trim().toLowerCase()
+    if (!q) return true
+    return owner.toLowerCase().includes(q)
+  })
+
+  const stockUnitLabel = formData.unit.trim() || '(stock unit)'
+  const purchaseUnitLabel = formData.uom_purchase_unit.trim() || '(purchase unit)'
+  const baseUnitLabel = formData.uom_base_unit.trim() || '(base unit)'
+  const stockPerPurchase = Math.max(1, parseWholeQuantityInput(String(formData.uom_stock_per_purchase || '1')))
+  const basePerStock = Math.max(1, parseWholeQuantityInput(String(formData.uom_base_per_unit || '1')))
+  const basePerPurchase = stockPerPurchase * basePerStock
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="p-6 border-b">
-          <h2 className="text-xl font-semibold">
-            {material ? 'Edit Material' : 'Add Material'}
-          </h2>
+      <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+        <div className="p-6 border-b shrink-0">
+          <div className="flex items-start justify-between gap-4">
+            <h2 className="text-xl font-semibold shrink-0">
+              {material ? 'Edit Material' : 'Add Material'}
+            </h2>
+            {formData.owner.length > 0 && (
+              <div className="flex flex-wrap justify-end gap-1.5 min-w-0">
+                {formData.owner.map((owner) => (
+                  <span
+                    key={owner}
+                    className={`inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-md text-xs font-medium border ${getOwnerThemeClasses(owner, ownerBrandSlugMap).chip}`}
+                  >
+                    {owner}
+                    <button
+                      type="button"
+                      className={`p-0.5 rounded ${getOwnerThemeClasses(owner, ownerBrandSlugMap).chipButton}`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        setFormData({
+                          ...formData,
+                          owner: formData.owner.filter((o) => o !== owner),
+                        })
+                      }}
+                      aria-label={`Remove owner ${owner}`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
         
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
           <div className="grid grid-cols-2 gap-4">
-            <div className="col-span-2">
+            <div>
               <label className="block text-sm font-medium mb-1">
                 Material Name *
               </label>
@@ -4601,13 +5729,91 @@ function MaterialModal({ material, brandId, suppliers, onSave, onClose }: {
                 required
               />
             </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Owner *</label>
+              <div className="owner-dropdown space-y-2">
+                <div className="flex gap-2">
+                  <div className="relative flex-1 min-w-0">
+                    {formData.owner.length > 0 && (
+                      <span
+                        className="absolute left-3 top-1/2 -translate-y-1/2 z-[1] text-sm font-medium text-gray-600 pointer-events-none tabular-nums"
+                        aria-hidden
+                      >
+                        {formData.owner.length} selected
+                      </span>
+                    )}
+                    <input
+                      type="text"
+                      value={ownerInput}
+                      onChange={(e) => {
+                        setOwnerInput(e.target.value)
+                        setShowOwnerDropdown(true)
+                      }}
+                      onFocus={() => setShowOwnerDropdown(true)}
+                      onBlur={() => {
+                        setTimeout(() => setShowOwnerDropdown(false), 150)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key !== 'Enter' && e.key !== ',') return
+                        e.preventDefault()
+                        addOwner(ownerInput)
+                      }}
+                      className={`w-full py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm ${
+                        formData.owner.length > 0 ? 'pl-[5.75rem] pr-3' : 'px-3'
+                      }`}
+                      placeholder={
+                        formData.owner.length > 0
+                          ? 'Type or pick another'
+                          : 'Type or pick an owner'
+                      }
+                      aria-label={
+                        formData.owner.length > 0
+                          ? `${formData.owner.length} owners selected. Type or pick another owner.`
+                          : 'Type or pick an owner'
+                      }
+                      required={formData.owner.length === 0}
+                    />
+                    {showOwnerDropdown && filteredOwnerOptions.length > 0 && (
+                      <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                        {filteredOwnerOptions.map((owner) => (
+                          <button
+                            key={owner}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              addOwner(owner)
+                              setShowOwnerDropdown(false)
+                            }}
+                        className={`w-full text-left px-3 py-2 text-sm ${getOwnerThemeClasses(owner, ownerBrandSlugMap).option}`}
+                          >
+                            {owner}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={!ownerInput.trim()}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => addOwner(ownerInput)}
+                    className="shrink-0 px-3 py-2 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
             
-            <div className="col-span-2">
-              <label className="block text-sm font-medium mb-1">Preferred Supplier</label>
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Preferred Supplier <span className="text-gray-400 font-normal">(optional)</span>
+              </label>
               <select
                 value={formData.supplier_id}
                 onChange={(e) => setFormData({ ...formData, supplier_id: e.target.value })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               >
                 <option value="">No Supplier / General</option>
                 {suppliers.filter(s => s.is_active).map((supplier) => (
@@ -4628,111 +5834,397 @@ function MaterialModal({ material, brandId, suppliers, onSave, onClose }: {
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            
-            <div>
-              <label className="block text-sm font-medium mb-1">Category</label>
-              <input
-                type="text"
-                value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium mb-1">Unit *</label>
-              <input
-                type="text"
-                value={formData.unit}
-                onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="kg, liters, pieces"
-                required
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium mb-1">Unit Cost (₱)</label>
-              <input
-                type="number"
-                value={formData.unit_cost}
-                onChange={(e) => setFormData({ ...formData, unit_cost: parseFloat(e.target.value) })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                min="0"
-                step="0.01"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium mb-1">Minimum Stock Level</label>
-              <input
-                type="number"
-                value={formData.minimum_stock}
-                onChange={(e) => setFormData({ ...formData, minimum_stock: e.target.value as any })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                min="0"
-                placeholder="0"
-                step="0.01"
-              />
-            </div>
-            
-            {!material && (
-              <div>
-                <label className="block text-sm font-medium mb-1">Initial Stock</label>
+
+            <div className="col-span-2 grid grid-cols-2 gap-3">
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Category *</label>
+                  <div className="relative category-dropdown">
+                    <input
+                      type="text"
+                      value={formData.category}
+                      onChange={(e) => {
+                        setFormData({ ...formData, category: e.target.value })
+                        setShowCategoryDropdown(true)
+                      }}
+                      onFocus={() => setShowCategoryDropdown(true)}
+                      onBlur={() => {
+                        setTimeout(() => setShowCategoryDropdown(false), 100)
+                      }}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="Enter or select category"
+                      required
+                    />
+                    {showCategoryDropdown && categoryOptions.length > 0 && (
+                      <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                        {categoryOptions.map((category) => (
+                          <button
+                            key={category}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setFormData({ ...formData, category })
+                              setShowCategoryDropdown(false)
+                            }}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-100 text-sm text-gray-900"
+                          >
+                            {category}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Purchase Unit *</label>
                   <input
+                    type="text"
+                    value={formData.uom_purchase_unit}
+                    onChange={(e) => setFormData({ ...formData, uom_purchase_unit: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="e.g. sack, box, case"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+                <div className="font-semibold mb-1">Unit Hierarchy</div>
+                <div>
+                  1 {purchaseUnitLabel} = {stockPerPurchase} {stockUnitLabel}
+                </div>
+                <div>
+                  1 {stockUnitLabel} = {basePerStock} {baseUnitLabel}
+                </div>
+                <div className="font-semibold mt-1">
+                  1 {purchaseUnitLabel} = {basePerPurchase} {baseUnitLabel}
+                </div>
+                <div className="mt-2 border-t border-blue-200 pt-2">
+                  <div>Cost per {purchaseUnitLabel}: ₱{(Number(formData.unit_cost) || 0).toLocaleString()}</div>
+                  <div>
+                    Cost per {stockUnitLabel}: ₱
+                    {((Number(formData.unit_cost) || 0) / stockPerPurchase).toLocaleString(undefined, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 4,
+                    })}
+                  </div>
+                  <div>
+                    Cost per {baseUnitLabel}: ₱
+                    {((Number(formData.unit_cost) || 0) / stockPerPurchase / basePerStock).toLocaleString(undefined, {
+                      minimumFractionDigits: 4,
+                      maximumFractionDigits: 6,
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="col-span-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <p className="text-sm font-medium text-gray-800 mb-1">Units Setup</p>
+              <p className="text-xs text-gray-500 mb-3">
+                Set Purchase Unit, Stock Unit, and Base Unit.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Stock Unit *</label>
+                  <input
+                    type="text"
+                    value={formData.unit}
+                    onChange={(e) => setFormData({ ...formData, unit: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="kg, liters, pieces"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Stock per Purchase Unit *</label>
+                  <input
+                    type="number"
+                    value={formData.uom_stock_per_purchase}
+                    onChange={(e) => setFormData({ ...formData, uom_stock_per_purchase: e.target.value as any })}
+                    className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    min="1"
+                    step="1"
+                    placeholder="e.g. 25"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Base Unit *</label>
+                  <input
+                    type="text"
+                    value={formData.uom_base_unit}
+                    onChange={(e) => setFormData({ ...formData, uom_base_unit: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="e.g. g, ml, pc"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Base per Stock Unit *</label>
+                  <input
+                    type="number"
+                    value={formData.uom_base_per_unit}
+                    onChange={(e) => setFormData({ ...formData, uom_base_per_unit: e.target.value as any })}
+                    className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    min="1"
+                    step="1"
+                    placeholder="e.g. 1000"
+                    required
+                  />
+                </div>
+              </div>
+            </div>
+            
+            <div className="col-span-2 grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">Purchase Unit Cost (₱) *</label>
+                <input
                   type="number"
-                  value={formData.current_stock}
-                  onChange={(e) => setFormData({ ...formData, current_stock: e.target.value as any })}
+                  value={formData.unit_cost}
+                  onChange={(e) => setFormData({ ...formData, unit_cost: parseWholeQuantityInput(e.target.value) })}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  min="0"
+                  step="1"
+                  required
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium mb-1">Minimum PU Level *</label>
+                <input
+                  type="number"
+                  value={formData.minimum_purchase_units}
+                  onChange={(e) => setFormData({ ...formData, minimum_purchase_units: e.target.value as any })}
                   className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                   min="0"
                   placeholder="0"
-                  step="0.01"
+                  step="1"
+                  required
                 />
               </div>
-            )}
-            
-            <div className="col-span-2">
-              <label className="block text-sm font-medium mb-1">Notes</label>
-              <textarea
-                value={formData.notes}
-                onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={3}
-              />
-            </div>
-            
-            <div className="col-span-2">
-              <label className="flex items-center">
+              
+              <div>
+                <label className="block text-sm font-medium mb-1">Initial Purchase Unit *</label>
                 <input
-                  type="checkbox"
-                  checked={formData.is_active}
-                  onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
-                  className="mr-2"
+                  type="number"
+                  value={formData.initial_purchase_units}
+                  onChange={(e) => setFormData({ ...formData, initial_purchase_units: e.target.value as any })}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  min="0"
+                  placeholder="0"
+                  step="1"
+                  required={!material}
+                  disabled={!!material}
                 />
-                <span className="text-sm font-medium">Active</span>
-              </label>
+              </div>
             </div>
+            
+            <div className="col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">Notes</label>
+                <textarea
+                  value={formData.notes}
+                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[7.25rem]"
+                  rows={3}
+                />
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Link to Factory</label>
+                  <select
+                    value={formData.factory_inventory_kind}
+                    onChange={(e) => {
+                      const value = e.target.value
+                      if (!value) {
+                        setFormData({
+                          ...formData,
+                          factory_inventory_kind: '',
+                          factory_request_uom: 'stock',
+                          factory_bom_uom: 'base',
+                        })
+                        return
+                      }
+                      setFormData({
+                        ...formData,
+                        factory_inventory_kind: value as FactoryInventoryKind,
+                        factory_request_uom: formData.factory_request_uom || 'stock',
+                        factory_bom_uom: formData.factory_bom_uom || 'base',
+                      })
+                    }}
+                    className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-sm ${
+                      formData.factory_inventory_kind ? 'text-gray-900' : 'text-gray-400'
+                    }`}
+                  >
+                    <option value="" className="text-gray-400">
+                      Not linked
+                    </option>
+                    {FACTORY_INVENTORY_KINDS.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {FACTORY_INVENTORY_KIND_LABELS[kind]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div
+                  className={`grid grid-cols-1 sm:grid-cols-2 gap-4 min-w-0 ${
+                    formData.factory_inventory_kind ? '' : 'opacity-50 pointer-events-none'
+                  }`}
+                >
+                  <fieldset disabled={!formData.factory_inventory_kind} className="min-w-0">
+                    <legend className="text-sm font-medium text-gray-800 mb-1.5">
+                      Factory request unit
+                    </legend>
+                    <div className="flex flex-col gap-2">
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="factory_request_uom"
+                          value="purchase"
+                          checked={formData.factory_request_uom === 'purchase'}
+                          disabled={!formData.factory_inventory_kind}
+                          onChange={() =>
+                            setFormData({ ...formData, factory_request_uom: 'purchase' })
+                          }
+                          className="text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>
+                          Purchase unit
+                          <span className="block text-xs text-gray-500">{purchaseUnitLabel}</span>
+                        </span>
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="factory_request_uom"
+                          value="stock"
+                          checked={formData.factory_request_uom === 'stock'}
+                          disabled={!formData.factory_inventory_kind}
+                          onChange={() =>
+                            setFormData({ ...formData, factory_request_uom: 'stock' })
+                          }
+                          className="text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>
+                          Stock unit
+                          <span className="block text-xs text-gray-500">{stockUnitLabel}</span>
+                        </span>
+                      </label>
+                    </div>
+                  </fieldset>
+                  <fieldset disabled={!formData.factory_inventory_kind} className="min-w-0">
+                    <legend className="text-sm font-medium text-gray-800 mb-1.5">
+                      Factory BOM unit
+                    </legend>
+                    <div className="flex flex-col gap-2">
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="factory_bom_uom"
+                          value="stock"
+                          checked={formData.factory_bom_uom === 'stock'}
+                          disabled={!formData.factory_inventory_kind}
+                          onChange={() =>
+                            setFormData({ ...formData, factory_bom_uom: 'stock' })
+                          }
+                          className="text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>
+                          Stock unit
+                          <span className="block text-xs text-gray-500">{stockUnitLabel}</span>
+                        </span>
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="factory_bom_uom"
+                          value="base"
+                          checked={formData.factory_bom_uom === 'base'}
+                          disabled={!formData.factory_inventory_kind}
+                          onChange={() =>
+                            setFormData({ ...formData, factory_bom_uom: 'base' })
+                          }
+                          className="text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>
+                          Base unit
+                          <span className="block text-xs text-gray-500">{baseUnitLabel}</span>
+                        </span>
+                      </label>
+                    </div>
+                  </fieldset>
+                </div>
+              </div>
+            </div>
+            
           </div>
         </div>
         
-        <div className="p-6 border-t flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 border rounded-lg hover:bg-gray-50"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => onSave(formData)}
-            className={`px-4 py-2 rounded-lg ${
-              isValid 
-                ? 'bg-blue-600 text-white hover:bg-blue-700' 
-                : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-            }`}
-            disabled={!isValid}
-          >
-            {material ? 'Update Material' : 'Add Material'}
-          </button>
+        <div className="p-6 border-t shrink-0 bg-white flex flex-wrap items-end justify-between gap-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.06)]">
+          <div className="flex flex-wrap items-end gap-6 min-w-0 flex-1">
+            <label className="flex items-center shrink-0 sm:mb-2">
+              <input
+                type="checkbox"
+                checked={formData.is_active}
+                onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
+                className="mr-2"
+              />
+              <span className="text-sm font-medium">Active</span>
+            </label>
+          </div>
+          <div className="flex gap-3 shrink-0">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                const stockPerPurchaseForSave = Math.max(
+                  1,
+                  parseWholeQuantityInput(String(formData.uom_stock_per_purchase || '1'))
+                )
+                const minimumPurchaseUnits = parseWholeQuantityInput(String(formData.minimum_purchase_units || '0'))
+                const initialPurchaseUnits = parseWholeQuantityInput(String(formData.initial_purchase_units || '0'))
+                const {
+                  minimum_purchase_units: _minimumPurchaseUnits,
+                  initial_purchase_units: _initialPurchaseUnits,
+                  ...materialPayload
+                } = formData
+
+                onSave({
+                  ...materialPayload,
+                  supplier_id: materialPayload.supplier_id?.trim()
+                    ? materialPayload.supplier_id
+                    : null,
+                  factory_inventory_kind: isFactoryInventoryKind(materialPayload.factory_inventory_kind)
+                    ? materialPayload.factory_inventory_kind
+                    : null,
+                  factory_request_uom: isFactoryInventoryKind(materialPayload.factory_inventory_kind)
+                    ? materialPayload.factory_request_uom === 'purchase'
+                      ? 'purchase'
+                      : 'stock'
+                    : null,
+                  factory_bom_uom: isFactoryInventoryKind(materialPayload.factory_inventory_kind)
+                    ? isFactoryBomUom(materialPayload.factory_bom_uom)
+                      ? materialPayload.factory_bom_uom
+                      : 'base'
+                    : null,
+                  minimum_stock: minimumPurchaseUnits * stockPerPurchaseForSave,
+                  current_stock: initialPurchaseUnits * stockPerPurchaseForSave,
+                })
+              }}
+              className={`px-4 py-2 rounded-lg ${
+                isValid 
+                  ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
+              disabled={!isValid}
+            >
+              {material ? 'Update Material' : 'Add Material'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -4748,23 +6240,59 @@ function StockMovementModal({ material, onSave, onClose }: {
   onSave: (movement: Partial<MaterialStockMovement>) => void
   onClose: () => void
 }) {
+  const isLinkedToInventory = Boolean(material.linked_product_id)
+  const purchaseUnit = getPurchaseUnit(material) || 'PU'
+  const stockPerPurchase = getStockUnitsPerPurchase(material)
   const [formData, setFormData] = useState({
     movement_type: 'in' as 'in' | 'out' | 'adjustment',
-    quantity: '' as any,
-    unit_cost: material.unit_cost,
+    quantity: '' as string | number,
+    unit_cost: (material.unit_cost > 0 ? material.unit_cost : '') as string | number,
     reference_type: '',
     reference_number: '',
     notes: '',
     movement_date: new Date().toISOString().split('T')[0],
     created_by: ''
   })
-  
-  // For adjustment, allow any non-zero quantity (positive or negative)
-  // For in/out, require positive quantity
-  const quantityNum = typeof formData.quantity === 'string' ? parseFloat(formData.quantity) || 0 : formData.quantity
-  const isValid = formData.movement_type === 'adjustment' 
-    ? quantityNum !== 0 
-    : quantityNum > 0
+
+  const parseQuantityInput = (raw: string | number): number => {
+    const s = String(raw ?? '').trim()
+    if (!s) return 0
+    const n = parseInt(s, 10)
+    return Number.isFinite(n) ? n : 0
+  }
+
+  const quantityNum = parseQuantityInput(formData.quantity)
+  const quantityInStockUnits = quantityNum * stockPerPurchase
+  const signedPurchaseQty =
+    formData.movement_type === 'adjustment'
+      ? (() => {
+          const s = String(formData.quantity ?? '').trim()
+          if (!s || s === '-') return 0
+          const n = parseInt(s, 10)
+          return Number.isFinite(n) ? n : 0
+        })()
+      : quantityNum
+  const projectedStockUnits =
+    formData.movement_type === 'out'
+      ? material.current_stock - quantityInStockUnits
+      : formData.movement_type === 'adjustment'
+        ? material.current_stock + signedPurchaseQty * stockPerPurchase
+        : material.current_stock + quantityInStockUnits
+  const isValid =
+    formData.movement_type === 'adjustment' ? quantityNum !== 0 : quantityNum > 0
+
+  useEffect(() => {
+    if (!isLinkedToInventory && formData.movement_type === 'out') {
+      setFormData((prev) => ({ ...prev, movement_type: 'in', quantity: '' }))
+    }
+  }, [isLinkedToInventory, formData.movement_type])
+
+  const parseUnitCostForSave = (): number | null => {
+    const raw = formData.unit_cost
+    if (raw === '' || raw === null || raw === undefined) return null
+    const n = typeof raw === 'string' ? parseFloat(raw) : Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
   
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -4772,7 +6300,14 @@ function StockMovementModal({ material, onSave, onClose }: {
         <div className="p-6 border-b">
           <h2 className="text-xl font-semibold">Stock Movement</h2>
           <p className="text-sm text-gray-600 mt-1">{material.material_name}</p>
-          <p className="text-xs text-gray-500">Current Stock: {material.current_stock} {material.unit}</p>
+          <p className="text-xs text-gray-500">
+            On hand: {formatStockAsPurchaseWithRemainder(material.current_stock, material)}
+          </p>
+          {quantityNum !== 0 || (formData.movement_type === 'adjustment' && String(formData.quantity).trim() && String(formData.quantity).trim() !== '-') ? (
+            <p className="text-xs text-gray-500 mt-1">
+              After movement: {formatStockAsPurchaseWithRemainder(Math.max(0, projectedStockUnits), material)}
+            </p>
+          ) : null}
         </div>
         
         <div className="p-6 space-y-4">
@@ -4780,48 +6315,80 @@ function StockMovementModal({ material, onSave, onClose }: {
             <label className="block text-sm font-medium mb-1">Movement Type *</label>
             <select
               value={formData.movement_type}
-              onChange={(e) => setFormData({ ...formData, movement_type: e.target.value as any, quantity: 0 })}
+              onChange={(e) => setFormData({ ...formData, movement_type: e.target.value as any, quantity: '' })}
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="in">Stock In (Purchase/Receipt)</option>
-              <option value="out">Stock Out (Usage/Consumption)</option>
+              {isLinkedToInventory && <option value="out">Stock Out (Transfer to Inventory)</option>}
               <option value="adjustment">Adjustment (+ to add, - to subtract)</option>
             </select>
+            {!isLinkedToInventory && (
+              <p className="text-[11px] text-amber-600 mt-1">
+                Stock Out is available only for materials linked to an inventory product.
+              </p>
+            )}
           </div>
           
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Quantity * ({material.unit})
-              {formData.movement_type === 'adjustment' && (
-                <span className="text-xs text-gray-500 ml-2">(Use negative for decrease, positive for increase)</span>
-              )}
-            </label>
-            <input
-              type="number"
-              value={formData.quantity}
-              onChange={(e) => setFormData({ ...formData, quantity: e.target.value as any })}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-              min={formData.movement_type === 'adjustment' ? undefined : "0"}
-              step="0.01"
-              placeholder="Enter quantity"
-              required
-            />
-          </div>
-          
-          {formData.movement_type === 'in' && (
+          <div
+            className={`grid gap-4 ${formData.movement_type === 'in' ? 'grid-cols-2' : 'grid-cols-1'}`}
+          >
             <div>
-              <label className="block text-sm font-medium mb-1">Unit Cost (₱)</label>
+              <label className="block text-sm font-medium mb-1">
+                Quantity * ({purchaseUnit})
+                {formData.movement_type === 'adjustment' && (
+                  <span className="block text-xs font-normal text-gray-500 mt-0.5">
+                    Negative to subtract, positive to add
+                  </span>
+                )}
+              </label>
               <input
                 type="number"
-                value={formData.unit_cost}
-                onChange={(e) => setFormData({ ...formData, unit_cost: e.target.value as any })}
+                value={formData.quantity}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (formData.movement_type === 'adjustment') {
+                    if (v === '' || v === '-' || /^-?\d+$/.test(v)) {
+                      setFormData({ ...formData, quantity: v })
+                    }
+                  } else if (v === '' || /^\d+$/.test(v)) {
+                    setFormData({ ...formData, quantity: v })
+                  }
+                }}
                 className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                min="0"
-                step="0.01"
-                placeholder="0.00"
+                min={formData.movement_type === 'adjustment' ? undefined : 1}
+                step={1}
+                inputMode="numeric"
+                placeholder={
+                  formData.movement_type === 'adjustment' ? 'e.g. 5 or -3' : 'Qty'
+                }
+                required
               />
+              <p className="text-[11px] text-gray-500 mt-1">
+                1 {purchaseUnit} = {stockPerPurchase} {material.unit}
+              </p>
             </div>
-          )}
+
+            {formData.movement_type === 'in' && (
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Purchase Unit Cost (₱/{purchaseUnit})
+                </label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={formData.unit_cost}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                      setFormData({ ...formData, unit_cost: v })
+                    }
+                  }}
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder={`Cost per ${purchaseUnit}`}
+                />
+              </div>
+            )}
+          </div>
           
           <div>
             <label className="block text-sm font-medium mb-1">Movement Date</label>
@@ -4855,36 +6422,12 @@ function StockMovementModal({ material, onSave, onClose }: {
             />
           </div>
           
-          {quantityNum !== 0 && (
-            <div className={`border rounded-md p-3 ${
-              formData.movement_type === 'in' || (formData.movement_type === 'adjustment' && quantityNum > 0)
-                ? 'bg-green-50 border-green-200'
-                : 'bg-orange-50 border-orange-200'
-            }`}>
-              <p className="text-sm font-medium text-gray-700">
-                New Stock After Movement:
-              </p>
-              <p className={`text-lg font-bold ${
-                formData.movement_type === 'in' || (formData.movement_type === 'adjustment' && quantityNum > 0)
-                  ? 'text-green-600'
-                  : 'text-orange-600'
-              }`}>
-                {formData.movement_type === 'in' 
-                  ? material.current_stock + quantityNum
-                  : formData.movement_type === 'out'
-                  ? material.current_stock - quantityNum
-                  : material.current_stock + quantityNum
-                } {material.unit}
-              </p>
-              {formData.movement_type === 'adjustment' && (
-                <p className="text-xs text-gray-600 mt-1">
-                  {quantityNum > 0 
-                    ? `+${quantityNum} ${material.unit} (increase)`
-                    : `${quantityNum} ${material.unit} (decrease)`
-                  }
-                </p>
-              )}
-            </div>
+          {quantityNum !== 0 && formData.movement_type === 'adjustment' && (
+            <p className="text-xs text-gray-600">
+              {quantityNum > 0
+                ? `+${quantityNum} ${purchaseUnit} (increase)`
+                : `${quantityNum} ${purchaseUnit} (decrease)`}
+            </p>
           )}
         </div>
         
@@ -4896,7 +6439,17 @@ function StockMovementModal({ material, onSave, onClose }: {
             Cancel
           </button>
           <button
-            onClick={() => onSave({ ...formData, quantity: quantityNum })}
+            onClick={() => {
+              if (!isLinkedToInventory && formData.movement_type === 'out') {
+                alert('Stock Out is only allowed for linked materials.')
+                return
+              }
+              onSave({
+                ...formData,
+                quantity: quantityInStockUnits,
+                unit_cost: formData.movement_type === 'in' ? parseUnitCostForSave() : null,
+              })
+            }}
             className={`px-4 py-2 rounded-lg ${
               isValid 
                 ? 'bg-blue-600 text-white hover:bg-blue-700' 
@@ -4921,6 +6474,17 @@ function MovementHistoryModal({ material, movements, onClose }: {
   movements: MaterialStockMovement[]
   onClose: () => void
 }) {
+  const purchaseUnit = getPurchaseUnit(material) || 'PU'
+  const stockPerPurchase = getStockUnitsPerPurchase(material)
+  const toPurchaseUnits = (stockUnits: number) => stockUnits / stockPerPurchase
+
+  const MOVEMENTS_PER_PAGE = 10
+  const [currentPage, setCurrentPage] = useState(1)
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [material.id, movements.length])
+
   // Calculate statistics
   const totalStockIn = movements.filter(m => m.movement_type === 'in').reduce((sum, m) => sum + m.quantity, 0)
   const totalStockOut = movements.filter(m => m.movement_type === 'out').reduce((sum, m) => sum + m.quantity, 0)
@@ -4961,6 +6525,12 @@ function MovementHistoryModal({ material, movements, onClose }: {
         : balance + movement.quantity
     }
   })
+
+  const totalPages = Math.max(1, Math.ceil(movementsWithBalance.length / MOVEMENTS_PER_PAGE))
+  const safeCurrentPage = Math.min(currentPage, totalPages)
+  const startIndex = (safeCurrentPage - 1) * MOVEMENTS_PER_PAGE
+  const endIndex = Math.min(startIndex + MOVEMENTS_PER_PAGE, movementsWithBalance.length)
+  const paginatedMovements = movementsWithBalance.slice(startIndex, endIndex)
   
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -4974,7 +6544,10 @@ function MovementHistoryModal({ material, movements, onClose }: {
               <div className="flex gap-4 mt-2 text-xs text-gray-500">
                 <span>SKU: {material.sku || 'N/A'}</span>
                 <span>Category: {material.category || 'N/A'}</span>
-                <span>Current: {material.current_stock} {material.unit}</span>
+                <span>
+                  Current: {toPurchaseUnits(material.current_stock).toLocaleString(undefined, { maximumFractionDigits: 2 })} {purchaseUnit}
+                  <span className="text-gray-400"> ({material.current_stock.toLocaleString()} {material.unit})</span>
+                </span>
               </div>
             </div>
             <button
@@ -4991,20 +6564,26 @@ function MovementHistoryModal({ material, movements, onClose }: {
           <div className="grid grid-cols-5 gap-3">
             <div className="bg-gray-50 border border-gray-200 rounded-md p-3 text-center">
               <p className="text-xs text-gray-600 mb-1">Stock In</p>
-              <p className="text-lg font-bold text-green-600">+{totalStockIn.toFixed(1)}</p>
-              <p className="text-xs text-gray-500">{material.unit}</p>
+              <p className="text-lg font-bold text-green-600">
+                +{toPurchaseUnits(totalStockIn).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </p>
+              <p className="text-xs text-gray-500">{purchaseUnit}</p>
             </div>
             <div className="bg-gray-50 border border-gray-200 rounded-md p-3 text-center">
               <p className="text-xs text-gray-600 mb-1">Stock Out</p>
-              <p className="text-lg font-bold text-red-600">-{totalStockOut.toFixed(1)}</p>
-              <p className="text-xs text-gray-500">{material.unit}</p>
+              <p className="text-lg font-bold text-red-600">
+                -{toPurchaseUnits(totalStockOut).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </p>
+              <p className="text-xs text-gray-500">{purchaseUnit}</p>
             </div>
             <div className="bg-gray-50 border border-gray-200 rounded-md p-3 text-center">
               <p className="text-xs text-gray-600 mb-1">Net Change</p>
               <p className="text-lg font-bold text-gray-900">
-                {(totalStockIn - totalStockOut + totalAdjustments).toFixed(1)}
+                {toPurchaseUnits(totalStockIn - totalStockOut + totalAdjustments).toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}
               </p>
-              <p className="text-xs text-gray-500">{material.unit}</p>
+              <p className="text-xs text-gray-500">{purchaseUnit}</p>
             </div>
             <div className="bg-gray-50 border border-gray-200 rounded-md p-3 text-center">
               <p className="text-xs text-gray-600 mb-1">Total Value</p>
@@ -5028,7 +6607,7 @@ function MovementHistoryModal({ material, movements, onClose }: {
             </div>
           ) : (
             <div className="space-y-2">
-              {movementsWithBalance.map((movement, index) => (
+              {paginatedMovements.map((movement, index) => (
                 <div 
                   key={movement.id} 
                   className="bg-gray-50 border border-gray-200 rounded-md p-3 hover:bg-gray-100 transition-colors"
@@ -5066,11 +6645,15 @@ function MovementHistoryModal({ material, movements, onClose }: {
                           'text-blue-600'
                         }`}>
                           {movement.movement_type === 'in' ? '+' : movement.movement_type === 'out' ? '-' : '±'}
-                          {movement.quantity} {material.unit}
+                          {toPurchaseUnits(movement.quantity).toLocaleString(undefined, { maximumFractionDigits: 2 })} {purchaseUnit}
                         </span>
+                        <div className="text-xs text-gray-500">
+                          ({movement.quantity.toLocaleString()} {material.unit})
+                        </div>
                         {movement.unit_cost && movement.movement_type === 'in' && (
                           <div className="text-xs text-gray-600">
-                            ₱{movement.unit_cost.toLocaleString()} × {movement.quantity} = ₱{(movement.quantity * movement.unit_cost).toLocaleString()}
+                            ₱{movement.unit_cost.toLocaleString()} × {toPurchaseUnits(movement.quantity).toLocaleString(undefined, { maximumFractionDigits: 2 })} {purchaseUnit}
+                            {' = '}₱{(toPurchaseUnits(movement.quantity) * movement.unit_cost).toLocaleString()}
                           </div>
                         )}
                       </div>
@@ -5096,10 +6679,14 @@ function MovementHistoryModal({ material, movements, onClose }: {
                   <div className="flex items-center justify-between pt-2 border-t border-gray-200">
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-gray-500">Balance:</span>
-                      <span className="font-medium text-gray-700">{movement.balanceBefore.toFixed(2)}</span>
+                      <span className="font-medium text-gray-700">
+                        {toPurchaseUnits(movement.balanceBefore).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </span>
                       <span className="text-gray-400">→</span>
-                      <span className="font-bold text-gray-900">{movement.balanceAfter.toFixed(2)}</span>
-                      <span className="text-gray-500">{material.unit}</span>
+                      <span className="font-bold text-gray-900">
+                        {toPurchaseUnits(movement.balanceAfter).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-gray-500">{purchaseUnit}</span>
                     </div>
                     <div className="text-xs text-gray-400">
                       {new Date(movement.created_at || '').toLocaleTimeString('en-US', { 
@@ -5117,11 +6704,197 @@ function MovementHistoryModal({ material, movements, onClose }: {
         {/* Footer */}
         <div className="p-4 border-t bg-gray-50 flex justify-between items-center">
           <div className="text-xs text-gray-500">
-            {movements.length} total movement{movements.length !== 1 ? 's' : ''}
+            {movements.length === 0
+              ? '0 total movements'
+              : `Showing ${startIndex + 1}-${endIndex} of ${movements.length} movement${movements.length !== 1 ? 's' : ''}`}
           </div>
+          <div className="flex items-center gap-2">
+            {movements.length > MOVEMENTS_PER_PAGE && (
+              <>
+                <button
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={safeCurrentPage === 1}
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Previous
+                </button>
+                <span className="text-xs text-gray-500 px-1">
+                  Page {safeCurrentPage} of {totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={safeCurrentPage === totalPages}
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-md bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next
+                </button>
+              </>
+            )}
+            <button
+              onClick={onClose}
+              className="px-6 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// =============================================
+// PR DETAILS MODAL
+// =============================================
+
+function getPRStatusBadgeClasses(status: PurchaseRequisition['status']) {
+  if (status === 'draft') return 'bg-gray-100 text-gray-800'
+  if (status === 'submitted') return 'bg-yellow-100 text-yellow-800'
+  if (status === 'approved') return 'bg-green-100 text-green-800'
+  if (status === 'rejected') return 'bg-red-100 text-red-800'
+  return 'bg-blue-100 text-blue-800'
+}
+
+function PRDetailsModal({ pr, linkedPO, onOpenPurchaseOrder, onClose }: {
+  pr: PurchaseRequisition
+  linkedPO?: PurchaseOrder
+  onOpenPurchaseOrder: (poId: string) => void
+  onClose: () => void
+}) {
+  const items = (pr.items || []) as PurchaseRequisitionItem[]
+  const estimatedTotal = items.reduce((sum, item) => {
+    return sum + (item.quantity || 0) * (item.estimated_price || 0)
+  }, 0)
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="p-6 border-b bg-gray-50 sticky top-0 z-10">
+          <div className="flex justify-between items-start">
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-xl font-semibold">{pr.pr_number}</h2>
+                <span className={`px-2 py-1 text-xs font-medium rounded-full ${getPRStatusBadgeClasses(pr.status)}`}>
+                  {pr.status}
+                </span>
+              </div>
+              <p className="text-sm text-gray-600 mt-1">Purchase Requisition</p>
+            </div>
+            <button
+              onClick={onClose}
+              className="text-gray-400 hover:text-gray-600 text-2xl leading-none"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="bg-gray-50 border border-gray-200 rounded-md p-4">
+            <h3 className="font-medium mb-3">Requisition Details</h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-gray-500">Requested by</p>
+                <p className="font-medium">{pr.requested_by}</p>
+              </div>
+              <div>
+                <p className="text-gray-500">Request Date</p>
+                <p className="font-medium">{new Date(pr.request_date).toLocaleDateString()}</p>
+              </div>
+              {pr.department && (
+                <div>
+                  <p className="text-gray-500">Department</p>
+                  <p className="font-medium">{pr.department}</p>
+                </div>
+              )}
+              {pr.required_date && (
+                <div>
+                  <p className="text-gray-500">Required by</p>
+                  <p className="font-medium">{new Date(pr.required_date).toLocaleDateString()}</p>
+                </div>
+              )}
+              {pr.purpose && (
+                <div className="col-span-2">
+                  <p className="text-gray-500">Purpose</p>
+                  <p className="font-medium">{pr.purpose}</p>
+                </div>
+              )}
+              {linkedPO && (
+                <div className="col-span-2">
+                  <p className="text-gray-500">Linked Purchase Order</p>
+                  <button
+                    type="button"
+                    onClick={() => onOpenPurchaseOrder(linkedPO.id)}
+                    className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                  >
+                    {linkedPO.po_number}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-medium mb-3">Items ({items.length})</h3>
+            {items.length > 0 ? (
+              <div className="border border-gray-200 rounded-md overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">#</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Product</th>
+                      <th className="px-3 py-2 text-center font-medium text-gray-600">Qty</th>
+                      <th className="px-3 py-2 text-center font-medium text-gray-600">Unit</th>
+                      <th className="px-3 py-2 text-right font-medium text-gray-600">Est. Price</th>
+                      <th className="px-3 py-2 text-right font-medium text-gray-600">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {items.map((item, index) => (
+                      <tr key={item.id}>
+                        <td className="px-3 py-2 text-gray-500">{index + 1}</td>
+                        <td className="px-3 py-2 font-medium">{item.product_description}</td>
+                        <td className="px-3 py-2 text-center">{item.quantity}</td>
+                        <td className="px-3 py-2 text-center">{item.unit}</td>
+                        <td className="px-3 py-2 text-right">
+                          ₱{(item.estimated_price || 0).toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-right font-medium">
+                          ₱{((item.quantity || 0) * (item.estimated_price || 0)).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No items on this requisition.</p>
+            )}
+
+            {items.length > 0 && (
+              <div className="mt-4 pt-4 border-t-2 border-dashed border-gray-300 flex justify-between items-center">
+                <p className="font-medium text-gray-700">Estimated Total</p>
+                <p className="text-xl font-bold">
+                  ₱{estimatedTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              </div>
+            )}
+          </div>
+
+          {pr.notes && (
+            <div>
+              <h3 className="font-medium mb-2">Notes</h3>
+              <div className="bg-gray-50 border border-gray-200 rounded-md p-3 text-sm text-gray-700">
+                {pr.notes}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="p-6 border-t bg-gray-50 sticky bottom-0">
           <button
             onClick={onClose}
-            className="px-6 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+            className="w-full px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
           >
             Close
           </button>
@@ -5135,8 +6908,9 @@ function MovementHistoryModal({ material, movements, onClose }: {
 // PO DETAILS MODAL
 // =============================================
 
-function PODetailsModal({ po, onClose }: {
+function PODetailsModal({ po, onClose, onOpenRequisition }: {
   po: PurchaseOrder
+  onOpenRequisition: (prId: string) => void
   onClose: () => void
 }) {
   const [statusHistory, setStatusHistory] = useState<POStatusHistory[]>([])
@@ -5410,6 +7184,22 @@ function PODetailsModal({ po, onClose }: {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {po.pr_id && (
+            <div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+              <h3 className="font-medium mb-2 text-blue-900">Reference Requisition</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose()
+                  onOpenRequisition(po.pr_id!)
+                }}
+                className="text-sm text-blue-700 hover:text-blue-900 hover:underline font-medium"
+              >
+                {po.requisition?.pr_number || po.pr_id}
+              </button>
             </div>
           )}
           

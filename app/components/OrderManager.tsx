@@ -1,11 +1,18 @@
 'use client'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
-import { ShoppingCart, Package, CheckCircle, Check, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X } from 'lucide-react'
+import { ShoppingCart, Package, CheckCircle, Check, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X, Upload } from 'lucide-react'
 import { formatPhilippinesDateTime, formatPhilippinesTransferSheetDate } from '../../lib/timezone'
 import { TRANSFER_SHEET_PRINT_STYLES } from '../../lib/transferSheetPrintStyles'
 import { renderTransferSheetItemsBlock } from '../../lib/transferSheetPrintItems'
 import { renderTransferSheetTotalsSection } from '../../lib/transferSheetPrintTotals'
+import { buildTransferSheetDsirPayload } from '../../lib/transferSheetDsirQr'
+import {
+  buildCategoryPortalMap,
+  filterProductsForOrderPortal,
+  getCategoryPortalSettings,
+  type CategoryPortalSettings,
+} from '../../lib/product-category-settings'
 
 interface Location {
   id: string
@@ -13,7 +20,47 @@ interface Location {
   passkey: string
   franchisee?: string
   company_owned?: boolean
+  is_remote?: boolean
   brand?: Brand
+}
+
+function isRemoteStoreLocation(location?: Location | null): boolean {
+  return !!location?.is_remote
+}
+
+function logisticsLabelForOrder(order: {
+  location?: Location | null
+  delivery_type: CustomerOrder['delivery_type']
+}): string {
+  if (order.delivery_type === 'shipment') return 'Shipment'
+  if (isRemoteStoreLocation(order.location)) return 'Remote'
+  if (order.delivery_type === 'delivery') return 'Delivery'
+  if (order.delivery_type === 'pickup') return 'Pickup'
+  return 'None'
+}
+
+function logisticsBadgeClassForOrder(order: {
+  location?: Location | null
+  delivery_type: CustomerOrder['delivery_type']
+}): string {
+  if (order.delivery_type === 'shipment' || isRemoteStoreLocation(order.location)) {
+    return 'bg-purple-100 text-purple-800'
+  }
+  if (order.delivery_type === 'delivery') return 'bg-blue-100 text-blue-800'
+  if (order.delivery_type === 'pickup') return 'bg-green-100 text-green-800'
+  return 'bg-gray-200 text-gray-700'
+}
+
+function shipmentBillOfLadingViewable(order: {
+  location?: Location | null
+  delivery_type: CustomerOrder['delivery_type']
+  bill_of_lading_url?: string | null
+}): boolean {
+  return (
+    isRemoteStoreLocation(order.location) &&
+    order.delivery_type === 'shipment' &&
+    !!order.bill_of_lading_url
+  )
 }
 
 interface CustomerOrder {
@@ -24,12 +71,14 @@ interface CustomerOrder {
   customer_contact?: string
   status: 'pending' | 'approved' | 'in-transit' | 'verified' | 'fulfilled' | 'paid' | 'complete' | 'cancelled'
   total_amount: number
-  delivery_type: 'delivery' | 'pickup' | 'none'
+  delivery_type: 'delivery' | 'pickup' | 'none' | 'shipment'
   notes?: string
   created_at: string
   updated_at: string
   returnable_pans_image_url?: string
   deposit_slip_url?: string
+  freight_fee?: number
+  bill_of_lading_url?: string | null
   location: Location
   brand: Brand
   order_details: OrderDetail[]
@@ -75,7 +124,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const [editingOrder, setEditingOrder] = useState<CustomerOrder | null>(null)
   const [originalOrder, setOriginalOrder] = useState<CustomerOrder | null>(null)
   const [availableProducts, setAvailableProducts] = useState<any[]>([])
+  const [overrideCategoryPortalByKey, setOverrideCategoryPortalByKey] = useState<
+    Record<string, CategoryPortalSettings>
+  >({})
   const [overrideLoading, setOverrideLoading] = useState(false)
+  const [overrideBolFile, setOverrideBolFile] = useState<File | null>(null)
+  const [overrideBolPreview, setOverrideBolPreview] = useState<string | null>(null)
+  const [showBillOfLadingModal, setShowBillOfLadingModal] = useState(false)
+  const [selectedBillOfLadingUrl, setSelectedBillOfLadingUrl] = useState<string | null>(null)
   const [completePage, setCompletePage] = useState(1)
   const [cancelledPage, setCancelledPage] = useState(1)
   const itemsPerPage = 10
@@ -1031,21 +1087,24 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     return Array.from(categoryMap.values())
   }, [])
 
-  const getTotalAmount = useCallback((order: CustomerOrder) => {
+  const computeOrderGrandTotal = useCallback((order: CustomerOrder) => {
     const subtotal = order.order_details.reduce((total, detail) => {
-      return total + (detail.unit_price * detail.quantity)
+      return total + detail.unit_price * detail.quantity
     }, 0)
 
-    let total = subtotal
-
-    if (order.delivery_type === 'delivery') {
-      total += subtotal >= 10000 ? 0 : 500
-    } else if (order.delivery_type === 'pickup' && subtotal >= 10000) {
-      total -= subtotal * 0.05
+    if (order.delivery_type === 'shipment') {
+      return subtotal + (Number(order.freight_fee) || 0)
     }
-
-    return total
+    if (order.delivery_type === 'delivery') {
+      return subtotal + (subtotal >= 10000 ? 0 : 500)
+    }
+    if (order.delivery_type === 'pickup' && subtotal >= 10000) {
+      return subtotal - subtotal * 0.05
+    }
+    return subtotal
   }, [])
+
+  const getTotalAmount = computeOrderGrandTotal
 
   // Memoized helper functions for categorization and pagination
   const ordersByStatus = useMemo(() => {
@@ -1153,6 +1212,10 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                         <div title="Company Owned">
                           <Building2 className="h-4 w-4 text-blue-600" />
                         </div>
+                      ) : isRemoteStoreLocation(order.location) ? (
+                        <div title="Remote store">
+                          <Store className="h-4 w-4 text-purple-600" />
+                        </div>
                       ) : (
                         <div title="Franchise">
                           <Store className={`h-4 w-4 ${getFranchiseIconColor()}`} />
@@ -1172,15 +1235,25 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                     <div className="space-y-1">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                        order.delivery_type === 'delivery' 
-                          ? 'bg-blue-100 text-blue-800' 
-                          : order.delivery_type === 'pickup'
-                          ? 'bg-green-100 text-green-800'
-                          : 'bg-gray-200 text-gray-700'
-                      }`}>
-                        {order.delivery_type === 'delivery' ? 'Delivery' : order.delivery_type === 'pickup' ? 'Pickup' : 'None'}
-                      </span>
+                      {shipmentBillOfLadingViewable(order) ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedBillOfLadingUrl(order.bill_of_lading_url || null)
+                            setShowBillOfLadingModal(true)
+                          }}
+                          className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium cursor-pointer hover:ring-2 hover:ring-purple-300 transition-shadow ${logisticsBadgeClassForOrder(order)}`}
+                          title="View bill of lading"
+                        >
+                          {logisticsLabelForOrder(order)}
+                        </button>
+                      ) : (
+                        <span
+                          className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${logisticsBadgeClassForOrder(order)}`}
+                        >
+                          {logisticsLabelForOrder(order)}
+                        </span>
+                      )}
                       {order.logistics_assignments && order.logistics_assignments.length > 0 && (
                         <div className="text-xs text-gray-500">
                           {order.logistics_assignments.map((assignment, index) => (
@@ -1522,7 +1595,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     return order.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0)
   }
 
-  const printReceipt = () => {
+  const printReceipt = async () => {
     if (!selectedOrder) return
 
     const sortedDetails = [...selectedOrder.order_details].sort((a, b) => {
@@ -1543,6 +1616,25 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       })),
       { showPrices: true }
     )
+
+    const nonIndexZeroItems = sortedDetails
+      .filter((_, index) => index !== 0)
+      .map((detail) => ({
+        name: detail.products.name,
+        quantity: detail.quantity,
+      }))
+    const fallbackAllItems = sortedDetails.map((detail) => ({
+      name: detail.products.name,
+      quantity: detail.quantity,
+    }))
+    const dsirPayloadText =
+      buildTransferSheetDsirPayload(nonIndexZeroItems) ||
+      buildTransferSheetDsirPayload(fallbackAllItems)
+    let dsirQrDataUrl = ''
+    if (dsirPayloadText) {
+      const QRCode = (await import('qrcode')).default
+      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 220, margin: 1 })
+    }
 
     const printWindow = window.open('', '_blank')
     if (printWindow) {
@@ -1577,7 +1669,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 </div>
                 <div class="info-item">
                   <span class="info-label">Logistics</span>
-                  <span class="info-value">${selectedOrder.delivery_type === 'delivery' ? 'Delivery' : selectedOrder.delivery_type === 'pickup' ? 'Pickup' : 'None'}</span>
+                  <span class="info-value">${logisticsLabelForOrder(selectedOrder)}</span>
                 </div>
               </div>
             </div>
@@ -1589,8 +1681,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               subtotal: getSubtotalAmount(selectedOrder),
               deliveryType: selectedOrder.delivery_type,
               grandTotal: getTotalAmount(selectedOrder),
+              freightFee: selectedOrder.freight_fee,
               remarks: selectedOrder.notes,
               showLogisticsNone: true,
+              qrDataUrl: dsirQrDataUrl,
+              qrCaption: 'DSIR ICE CREAM',
             })}
             
             <div class="signatories">
@@ -1643,32 +1738,111 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     }
   }
 
-  // Override functions
+  // Override functions (remote stores: shipment/none + freight; local stores: delivery/pickup/none)
+  const normalizeRemoteOverrideDeliveryType = (
+    deliveryType: CustomerOrder['delivery_type']
+  ): 'shipment' | 'none' => (deliveryType === 'shipment' ? 'shipment' : 'none')
+
+  const normalizeLocalOverrideDeliveryType = (
+    deliveryType: CustomerOrder['delivery_type']
+  ): 'delivery' | 'pickup' | 'none' => {
+    if (deliveryType === 'delivery' || deliveryType === 'pickup' || deliveryType === 'none') {
+      return deliveryType
+    }
+    return 'none'
+  }
+
+  const resetOverrideModalExtras = () => {
+    setOverrideBolFile(null)
+    setOverrideBolPreview(null)
+    setOverrideCategoryPortalByKey({})
+  }
+
   const handleOverrideOrder = () => {
     if (!selectedOrder) return
+    const isRemote = isRemoteStoreLocation(selectedOrder.location)
     setOriginalOrder({ ...selectedOrder })
-    setEditingOrder({ ...selectedOrder })
+
+    if (isRemote) {
+      const normalizedType = normalizeRemoteOverrideDeliveryType(selectedOrder.delivery_type)
+      setEditingOrder({
+        ...selectedOrder,
+        delivery_type: normalizedType,
+        freight_fee:
+          normalizedType === 'shipment' ? Number(selectedOrder.freight_fee) || 0 : 0,
+      })
+      setOverrideBolFile(null)
+      setOverrideBolPreview(selectedOrder.bill_of_lading_url || null)
+    } else {
+      setEditingOrder({
+        ...selectedOrder,
+        delivery_type: normalizeLocalOverrideDeliveryType(selectedOrder.delivery_type),
+        freight_fee: 0,
+        bill_of_lading_url: null,
+      })
+      setOverrideBolFile(null)
+      setOverrideBolPreview(null)
+    }
+
     setShowOverrideModal(true)
     fetchAvailableProducts()
   }
 
+  const uploadBillOfLading = async (orderId: string, file: File): Promise<string> => {
+    const fileExt = file.name.split('.').pop() || 'jpg'
+    const fileName = `bol-${orderId}-${Date.now()}.${fileExt}`
+    const { error: uploadError } = await supabase.storage
+      .from('returnable_pans')
+      .upload(fileName, file, { upsert: true })
+    if (uploadError) throw uploadError
+    const { data: urlData } = supabase.storage.from('returnable_pans').getPublicUrl(fileName)
+    return urlData.publicUrl
+  }
+
   const fetchAvailableProducts = async () => {
     if (!selectedBrand) return
-    
-    try {
-      const { data, error } = await supabase
-        .from('inventory_summary')
-        .select('*')
-        .eq('brand_id', selectedBrand.id)
-        .order('category, product_name')
 
-      if (error) throw error
-      setAvailableProducts(data || [])
+    try {
+      const [productsRes, portalRes] = await Promise.all([
+        supabase
+          .from('inventory_summary')
+          .select('*')
+          .eq('brand_id', selectedBrand.id)
+          .order('category, product_name'),
+        supabase
+          .from('product_category_sort')
+          .select('category_name, show_on_order_portal, remote_store')
+          .eq('brand_id', selectedBrand.id),
+      ])
+
+      if (productsRes.error) throw productsRes.error
+
+      const portalByKey = portalRes.error ? {} : buildCategoryPortalMap(portalRes.data)
+      if (portalRes.error) {
+        console.warn('product_category_sort portal settings:', portalRes.error.message)
+      }
+      setOverrideCategoryPortalByKey(portalByKey)
+      setAvailableProducts(productsRes.data || [])
     } catch (error) {
       console.error('Error fetching products:', error)
       alert('Failed to fetch products')
     }
   }
+
+  const overrideModalAddProducts = useMemo(() => {
+    if (!editingOrder) return []
+    const isRemote = isRemoteStoreLocation(editingOrder.location)
+    if (isRemote) {
+      return availableProducts.filter((product) =>
+        getCategoryPortalSettings(product.category, overrideCategoryPortalByKey).remote_store
+      )
+    }
+    return filterProductsForOrderPortal(
+      availableProducts,
+      overrideCategoryPortalByKey,
+      false
+    )
+  }, [availableProducts, overrideCategoryPortalByKey, editingOrder])
 
   const handleSaveOverride = async () => {
     if (!editingOrder || !originalOrder || !selectedBrand) return
@@ -1854,16 +2028,37 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         if (insertError) throw insertError
       }
 
-      // Calculate new total amount
-      const newTotalAmount = calculateOverrideTotal()
-      
-      // Update order
+      const isRemote = isRemoteStoreLocation(editingOrder.location)
+      const overrideDeliveryType = isRemote
+        ? normalizeRemoteOverrideDeliveryType(editingOrder.delivery_type)
+        : normalizeLocalOverrideDeliveryType(editingOrder.delivery_type)
+      const freightFee = isRemote && overrideDeliveryType === 'shipment'
+        ? Math.max(0, Number(editingOrder.freight_fee) || 0)
+        : 0
+
+      let billOfLadingUrl: string | null = null
+      if (isRemote && overrideDeliveryType === 'shipment') {
+        billOfLadingUrl = editingOrder.bill_of_lading_url || null
+        if (overrideBolFile) {
+          billOfLadingUrl = await uploadBillOfLading(editingOrder.id, overrideBolFile)
+        }
+      }
+
+      const orderForTotal: CustomerOrder = {
+        ...editingOrder,
+        delivery_type: overrideDeliveryType,
+        freight_fee: freightFee,
+      }
+      const newTotalAmount = computeOrderGrandTotal(orderForTotal)
+
       const { error: orderError } = await supabase
         .from('customer_orders')
         .update({
           total_amount: newTotalAmount,
-          delivery_type: editingOrder.delivery_type,
-          updated_at: new Date().toISOString()
+          delivery_type: overrideDeliveryType,
+          freight_fee: freightFee,
+          bill_of_lading_url: billOfLadingUrl,
+          updated_at: new Date().toISOString(),
         })
         .eq('id', editingOrder.id)
 
@@ -1881,13 +2076,16 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
       setSelectedOrder({
         ...selectedOrder,
         total_amount: newTotalAmount,
-        delivery_type: editingOrder.delivery_type,
-        order_details: editingOrder.order_details
+        delivery_type: overrideDeliveryType,
+        freight_fee: freightFee,
+        bill_of_lading_url: billOfLadingUrl,
+        order_details: editingOrder.order_details,
       })
-      
+
       setShowOverrideModal(false)
       setEditingOrder(null)
       setOriginalOrder(null)
+      resetOverrideModalExtras()
       alert('Order updated successfully!')
     } catch (error) {
       console.error('Error updating order:', error)
@@ -1984,21 +2182,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
   const calculateOverrideTotal = () => {
     if (!editingOrder) return 0
-
-    const subtotal = editingOrder.order_details.reduce((total, detail) => {
-      return total + detail.unit_price * detail.quantity
-    }, 0)
-
-    let total = subtotal
-
-    if (editingOrder.delivery_type === 'delivery') {
-      total += subtotal >= 10000 ? 0 : 500
-    } else if (editingOrder.delivery_type === 'pickup' && subtotal >= 10000) {
-      total -= subtotal * 0.05
-    }
-    // For 'none' delivery_type, no discount and no delivery fee - total remains as subtotal
-
-    return total
+    return computeOrderGrandTotal(editingOrder)
   }
 
   const canIncreaseQuantity = (productId: string) => {
@@ -2246,12 +2430,10 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   </div>
                   <div>
                     <p className="text-xs text-gray-500 uppercase tracking-wide">Logistics</p>
-                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${
-                      selectedOrder.delivery_type === 'delivery' 
-                        ? 'bg-blue-100 text-blue-800' 
-                        : 'bg-green-100 text-green-800'
-                    }`}>
-                      {selectedOrder.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}
+                    <span
+                      className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium mt-1 ${logisticsBadgeClassForOrder(selectedOrder)}`}
+                    >
+                      {logisticsLabelForOrder(selectedOrder)}
                     </span>
                   </div>
                   <div>
@@ -2260,6 +2442,10 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       {selectedOrder.location?.company_owned ? (
                         <div title="Company Owned">
                           <Building2 className="h-4 w-4 text-blue-600" />
+                        </div>
+                      ) : isRemoteStoreLocation(selectedOrder.location) ? (
+                        <div title="Remote store">
+                          <Store className="h-4 w-4 text-purple-600" />
                         </div>
                       ) : (
                         <div title="Franchise">
@@ -2318,6 +2504,17 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                           <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
                         </div>
                       )}
+                      {selectedOrder.delivery_type === 'shipment' && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-gray-600">Freight fee:</span>
+                          <span className="text-sm text-purple-800">
+                            +₱{(Number(selectedOrder.freight_fee) || 0).toLocaleString('en-PH', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex justify-between items-center pt-2 border-t border-gray-200">
                         <span className="text-sm font-semibold text-gray-900">Total Amount:</span>
                         <span className="text-sm font-semibold text-green-600">₱{getTotalAmount(selectedOrder).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -2332,6 +2529,22 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 <div className="bg-white border rounded-lg p-4">
                   <h4 className="text-sm font-semibold text-gray-900 mb-2">Notes</h4>
                   <p className="text-sm text-gray-700">{selectedOrder.notes}</p>
+                </div>
+              )}
+
+              {selectedOrder.bill_of_lading_url && (
+                <div className="bg-white border rounded-lg p-4">
+                  <h4 className="text-sm font-semibold text-gray-900 mb-2">Bill of Lading</h4>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedBillOfLadingUrl(selectedOrder.bill_of_lading_url || null)
+                      setShowBillOfLadingModal(true)
+                    }}
+                    className="text-sm text-purple-700 hover:text-purple-900 underline"
+                  >
+                    View bill of lading
+                  </button>
                 </div>
               )}
 
@@ -2440,6 +2653,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   setShowOverrideModal(false)
                   setEditingOrder(null)
                   setOriginalOrder(null)
+                  resetOverrideModalExtras()
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -2450,53 +2664,192 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             <div className="space-y-6 flex-1 overflow-y-auto min-h-0">
               {/* Logistics Method and Category Summary */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Logistics Method */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Logistics Method</label>
-                  <div className="flex space-x-4">
-                    <label className="flex items-center">
-                      <input
-                        type="radio"
-                        name="delivery_type"
-                        value="delivery"
-                        checked={editingOrder.delivery_type === 'delivery'}
-                        onChange={(e) => setEditingOrder({
-                          ...editingOrder,
-                          delivery_type: e.target.value as 'delivery' | 'pickup' | 'none'
-                        })}
-                        className="mr-2"
-                      />
-                      <span className="text-sm">Delivery</span>
+                {/* Logistics (remote: shipment/none + freight/BOL; local: delivery/pickup/none) */}
+                <div className="flex flex-wrap items-end gap-4 ml-3">
+                  <div className="shrink-0">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Logistics Method
                     </label>
-                    <label className="flex items-center">
-                      <input
-                        type="radio"
-                        name="delivery_type"
-                        value="pickup"
-                        checked={editingOrder.delivery_type === 'pickup'}
-                        onChange={(e) => setEditingOrder({
-                          ...editingOrder,
-                          delivery_type: e.target.value as 'delivery' | 'pickup' | 'none'
-                        })}
-                        className="mr-2"
-                      />
-                      <span className="text-sm">Pickup</span>
-                    </label>
-                    <label className="flex items-center">
-                      <input
-                        type="radio"
-                        name="delivery_type"
-                        value="none"
-                        checked={editingOrder.delivery_type === 'none'}
-                        onChange={(e) => setEditingOrder({
-                          ...editingOrder,
-                          delivery_type: e.target.value as 'delivery' | 'pickup' | 'none'
-                        })}
-                        className="mr-2"
-                      />
-                      <span className="text-sm">None (No discount, no delivery fee)</span>
-                    </label>
+                    <div className="flex h-[38px] items-center gap-4">
+                      {isRemoteStoreLocation(editingOrder.location) ? (
+                        <>
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="delivery_type"
+                              value="shipment"
+                              checked={editingOrder.delivery_type === 'shipment'}
+                              onChange={() =>
+                                setEditingOrder({
+                                  ...editingOrder,
+                                  delivery_type: 'shipment',
+                                  freight_fee: editingOrder.freight_fee ?? 0,
+                                })
+                              }
+                              className="mr-2"
+                            />
+                            <span className="text-sm">Shipment</span>
+                          </label>
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="delivery_type"
+                              value="none"
+                              checked={editingOrder.delivery_type === 'none'}
+                              onChange={() => {
+                                setOverrideBolFile(null)
+                                setOverrideBolPreview(null)
+                                setEditingOrder({
+                                  ...editingOrder,
+                                  delivery_type: 'none',
+                                  freight_fee: 0,
+                                  bill_of_lading_url: null,
+                                })
+                              }}
+                              className="mr-2"
+                            />
+                            <span className="text-sm">None</span>
+                          </label>
+                        </>
+                      ) : (
+                        <>
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="delivery_type"
+                              value="delivery"
+                              checked={editingOrder.delivery_type === 'delivery'}
+                              onChange={() =>
+                                setEditingOrder({
+                                  ...editingOrder,
+                                  delivery_type: 'delivery',
+                                })
+                              }
+                              className="mr-2"
+                            />
+                            <span className="text-sm">Delivery</span>
+                          </label>
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="delivery_type"
+                              value="pickup"
+                              checked={editingOrder.delivery_type === 'pickup'}
+                              onChange={() =>
+                                setEditingOrder({
+                                  ...editingOrder,
+                                  delivery_type: 'pickup',
+                                })
+                              }
+                              className="mr-2"
+                            />
+                            <span className="text-sm">Pickup</span>
+                          </label>
+                          <label className="flex items-center">
+                            <input
+                              type="radio"
+                              name="delivery_type"
+                              value="none"
+                              checked={editingOrder.delivery_type === 'none'}
+                              onChange={() =>
+                                setEditingOrder({
+                                  ...editingOrder,
+                                  delivery_type: 'none',
+                                })
+                              }
+                              className="mr-2"
+                            />
+                            <span className="text-sm">None</span>
+                          </label>
+                        </>
+                      )}
+                    </div>
                   </div>
+
+                  {isRemoteStoreLocation(editingOrder.location) &&
+                    editingOrder.delivery_type === 'shipment' && (
+                    <>
+                      <div className="w-28 shrink-0">
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Freight fee (₱)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={
+                            editingOrder.freight_fee === 0 || editingOrder.freight_fee == null
+                              ? ''
+                              : editingOrder.freight_fee
+                          }
+                          onChange={(e) =>
+                            setEditingOrder({
+                              ...editingOrder,
+                              freight_fee:
+                                e.target.value === '' ? 0 : parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          onWheel={(e) => e.currentTarget.blur()}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                          placeholder="0.00"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Bill of lading
+                        </label>
+                        <div className="flex h-[38px] items-center gap-2">
+                          {overrideBolPreview && (
+                            <div className="relative shrink-0">
+                              <img
+                                src={overrideBolPreview}
+                                alt="Bill of lading preview"
+                                className="h-9 w-9 rounded border border-gray-200 object-cover"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setOverrideBolFile(null)
+                                  setOverrideBolPreview(null)
+                                  setEditingOrder({
+                                    ...editingOrder,
+                                    bill_of_lading_url: null,
+                                  })
+                                }}
+                                className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600"
+                                title="Remove image"
+                              >
+                                <X className="h-2.5 w-2.5" />
+                              </button>
+                            </div>
+                          )}
+                          <input
+                            type="file"
+                            id="override-bol-upload"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0]
+                              if (!file) return
+                              setOverrideBolFile(file)
+                              const reader = new FileReader()
+                              reader.onloadend = () => {
+                                setOverrideBolPreview(reader.result as string)
+                              }
+                              reader.readAsDataURL(file)
+                            }}
+                          />
+                          <label
+                            htmlFor="override-bol-upload"
+                            className="inline-flex h-[38px] items-center gap-2 px-3 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 cursor-pointer whitespace-nowrap"
+                          >
+                            <Upload className="h-4 w-4 shrink-0" />
+                            {overrideBolPreview ? 'Change' : 'Upload'}
+                          </label>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
                 
                 {/* Category Item Summary */}
@@ -2573,9 +2926,10 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 <div>
                   <h4 className="text-md font-medium text-gray-900 mb-3">Add Products</h4>
                   <div className="max-h-96 overflow-y-auto space-y-4">
-                    {(() => {
-                      // Group products by category
-                      const productsByCategory = availableProducts.reduce((acc, product) => {
+                    {overrideModalAddProducts.length === 0 ? (
+                      <p className="text-sm text-gray-500">No products available to add.</p>
+                    ) : (() => {
+                      const productsByCategory = overrideModalAddProducts.reduce((acc, product) => {
                         const category = product.category || 'Uncategorized'
                         if (!acc[category]) {
                           acc[category] = []
@@ -2648,42 +3002,50 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   </span>
                 </div>
 
-                {/* Delivery Fee or Pickup Discount */}
-                {editingOrder.delivery_type === 'delivery' && (
+                {isRemoteStoreLocation(editingOrder.location) &&
+                  editingOrder.delivery_type === 'shipment' && (
                   <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm text-gray-600">Delivery Fee:</span>
+                    <span className="text-sm text-gray-600">Freight fee:</span>
+                    <span className="text-sm font-medium text-purple-800">
+                      +₱{(Number(editingOrder.freight_fee) || 0).toLocaleString('en-PH', {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </span>
+                  </div>
+                )}
+                {!isRemoteStoreLocation(editingOrder.location) &&
+                  editingOrder.delivery_type === 'delivery' && (
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm text-gray-600">Delivery fee:</span>
                     <span className="text-sm font-medium text-gray-900">
-                      {editingOrder.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) >= 10000 
-                        ? 'FREE (Order over ₱10k)' 
-                        : '+₱500.00'
-                      }
+                      {(() => {
+                        const sub = editingOrder.order_details.reduce(
+                          (t, d) => t + d.unit_price * d.quantity,
+                          0
+                        )
+                        return sub >= 10000 ? 'FREE (Order over ₱10k)' : '+₱500.00'
+                      })()}
                     </span>
                   </div>
                 )}
-
-                {editingOrder.delivery_type === 'pickup' && editingOrder.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) >= 10000 && (
+                {!isRemoteStoreLocation(editingOrder.location) &&
+                  editingOrder.delivery_type === 'pickup' &&
+                  editingOrder.order_details.reduce((t, d) => t + d.unit_price * d.quantity, 0) >=
+                    10000 && (
                   <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
+                    <span className="text-sm text-gray-600">Pickup discount (5%):</span>
                     <span className="text-sm font-medium text-green-600">
-                      -₱{(editingOrder.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                  </div>
-                )}
-
-                {editingOrder.delivery_type === 'pickup' && editingOrder.order_details.reduce((total, detail) => total + (detail.unit_price * detail.quantity), 0) < 10000 && (
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm text-gray-600">Pickup Discount:</span>
-                    <span className="text-sm font-medium text-gray-500">
-                      Not available (Order under ₱10k)
-                    </span>
-                  </div>
-                )}
-
-                {editingOrder.delivery_type === 'none' && (
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm text-gray-600">Logistics:</span>
-                    <span className="text-sm font-medium text-gray-500">
-                      None (No discount, no delivery fee)
+                      -₱
+                      {(
+                        editingOrder.order_details.reduce(
+                          (t, d) => t + d.unit_price * d.quantity,
+                          0
+                        ) * 0.05
+                      ).toLocaleString('en-PH', {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
                     </span>
                   </div>
                 )}
@@ -2706,6 +3068,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   setShowOverrideModal(false)
                   setEditingOrder(null)
                   setOriginalOrder(null)
+                  resetOverrideModalExtras()
                 }}
                 className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
               >
@@ -2776,6 +3139,35 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 src={selectedReturnablePansImage}
                 alt="Returnable pans"
                 className="max-h-[70vh] w-auto rounded-lg border transition-transform duration-300 ease-in-out hover:scale-[2] cursor-zoom-in"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bill of Lading Image Modal */}
+      {showBillOfLadingModal && selectedBillOfLadingUrl && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+            <div className="flex justify-between items-center mb-4 flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">Bill of Lading</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowBillOfLadingModal(false)
+                  setSelectedBillOfLadingUrl(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            <div className="text-center flex-1 flex items-center justify-center overflow-auto">
+              <img
+                src={selectedBillOfLadingUrl}
+                alt="Bill of lading"
+                className="max-h-[70vh] w-auto rounded-lg border"
               />
             </div>
           </div>

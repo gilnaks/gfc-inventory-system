@@ -366,6 +366,13 @@ export const TRANSFER_SHEET_PRINT_STYLES = `
     align-items: start;
   }
 
+  .total-section-three-col {
+    display: grid;
+    grid-template-columns: 1fr minmax(220px, 34%) minmax(120px, 18%);
+    gap: 12px 16px;
+    align-items: start;
+  }
+
   .total-section-breakdown {
     min-width: 0;
   }
@@ -379,6 +386,40 @@ export const TRANSFER_SHEET_PRINT_STYLES = `
     padding-left: 16px;
     min-width: 220px;
     width: 100%;
+  }
+
+  .total-section-qr {
+    border-left: 1px solid #000;
+    padding-left: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 108px;
+  }
+
+  .total-qr-box {
+    text-align: center;
+  }
+
+  .total-qr-image {
+    width: 92px;
+    height: 92px;
+    display: block;
+    border: 1px solid #000;
+    background: #fff;
+  }
+
+  .total-qr-caption {
+    margin-top: 4px;
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+
+  .total-qr-empty {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #000;
   }
 
   .total-grand-block {

@@ -6,6 +6,7 @@ import { formatPhilippinesDateTime, formatPhilippinesTransferSheetDate } from '.
 import { TRANSFER_SHEET_PRINT_STYLES } from '../../lib/transferSheetPrintStyles'
 import { renderTransferSheetItemsBlock } from '../../lib/transferSheetPrintItems'
 import { renderTransferSheetTotalsSection } from '../../lib/transferSheetPrintTotals'
+import { buildTransferSheetDsirPayload } from '../../lib/transferSheetDsirQr'
 
 interface PaidOrder {
   id: string
@@ -475,7 +476,7 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
       .reduce((total, order) => total + getOrderTotalAmount(order), 0)
   }
 
-  const printTransferSheet = (order: PaidOrder) => {
+  const printTransferSheet = async (order: PaidOrder) => {
     const sortedDetails = [...(order.order_details || [])].sort((a, b) => {
       const categoryA =
         a.products?.category && a.products.category.trim() !== '' ? a.products.category : 'Uncategorized'
@@ -492,6 +493,25 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
         quantity: detail.quantity,
       }))
     )
+
+    const nonIndexZeroItems = sortedDetails
+      .filter((_, index) => index !== 0)
+      .map((detail) => ({
+        name: detail.products?.name || '',
+        quantity: detail.quantity,
+      }))
+    const fallbackAllItems = sortedDetails.map((detail) => ({
+      name: detail.products?.name || '',
+      quantity: detail.quantity,
+    }))
+    const dsirPayloadText =
+      buildTransferSheetDsirPayload(nonIndexZeroItems) ||
+      buildTransferSheetDsirPayload(fallbackAllItems)
+    let dsirQrDataUrl = ''
+    if (dsirPayloadText) {
+      const QRCode = (await import('qrcode')).default
+      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 220, margin: 1 })
+    }
 
     const printWindow = window.open('', '_blank')
     if (printWindow) {
@@ -543,6 +563,8 @@ export function BillingManager({ selectedBrand, theme = 'blue' }: BillingManager
               deliveryType: order.delivery_type,
               grandTotal: getOrderTotalAmount(order),
               remarks: order.notes,
+              qrDataUrl: dsirQrDataUrl,
+              qrCaption: 'DSIR ICE CREAM',
             })}
             
           </div>

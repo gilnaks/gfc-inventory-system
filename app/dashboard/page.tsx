@@ -11,14 +11,18 @@ import { StaffManager } from '../components/StaffManager'
 import { PayrollManager } from '../components/PayrollManager'
 import { ReportsManager } from '../components/ReportsManager'
 import { PurchasingManager } from '../components/PurchasingManager'
+import { FactoryManager } from '../components/FactoryManager'
 import { BrandsProvider } from '../contexts/BrandsContext'
-import { Brand, supabase } from '../../lib/supabase'
-import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck, FileText, Users, Calculator, BarChart3, ClipboardList } from 'lucide-react'
-
-const DASHBOARD_GUEST_PASSCODE = '030199'
+import { Brand } from '../../lib/supabase'
+import { Lock, Unlock, Package, ShoppingCart, MapPin, CreditCard, Truck, FileText, Users, Calculator, BarChart3, ClipboardList, Factory } from 'lucide-react'
+import {
+  authenticateDashboardPasscode,
+  type DashboardCredentialRole,
+  type DashboardAuthIdentity,
+} from '../../lib/admin-auth'
 
 const GUEST_RESTRICTED_TABS = ['billing', 'payroll', 'reports', 'purchasing'] as const
-type DashboardTab = 'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing'
+type DashboardTab = 'products' | 'orders' | 'branches' | 'billing' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing' | 'factory'
 
 function isGuestRestrictedTab(tab: string): tab is (typeof GUEST_RESTRICTED_TABS)[number] {
   return (GUEST_RESTRICTED_TABS as readonly string[]).includes(tab)
@@ -28,6 +32,7 @@ export default function DashboardPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [isGuestSession, setIsGuestSession] = useState(false)
   const [passcode, setPasscode] = useState('')
+  const [currentUsername, setCurrentUsername] = useState<string>('')
   const [selectedBrand, setSelectedBrand] = useState<Brand | null>(null)
   const [activeTab, setActiveTab] = useState<DashboardTab>('products')
   const [error, setError] = useState('')
@@ -43,11 +48,16 @@ export default function DashboardPage() {
       const savedBrand = localStorage.getItem('dashboard_selected_brand')
       const savedTab = localStorage.getItem('dashboard_active_tab')
       
-      const guest = localStorage.getItem('dashboard_guest') === 'true'
+      const savedRole = localStorage.getItem('dashboard_role')
+      const savedUsername = localStorage.getItem('dashboard_username')
+      const guest =
+        savedRole === 'guest' ||
+        (savedRole !== 'admin' && localStorage.getItem('dashboard_guest') === 'true')
 
       if (savedAuth === 'true') {
         setIsAuthenticated(true)
         setIsGuestSession(guest)
+        setCurrentUsername((savedUsername || savedRole || '').trim())
       }
       
       if (savedBrand) {
@@ -58,7 +68,7 @@ export default function DashboardPage() {
         }
       }
       
-      const allTabs: DashboardTab[] = ['products', 'orders', 'branches', 'billing', 'logistics', 'dsir', 'staff', 'payroll', 'reports', 'purchasing']
+      const allTabs: DashboardTab[] = ['products', 'orders', 'branches', 'billing', 'logistics', 'dsir', 'staff', 'payroll', 'reports', 'purchasing', 'factory']
       if (savedTab && allTabs.includes(savedTab as DashboardTab)) {
         if (guest && isGuestRestrictedTab(savedTab)) {
           setActiveTab('products')
@@ -77,35 +87,32 @@ export default function DashboardPage() {
     initializeDashboard()
   }, [])
 
+  const persistDashboardSession = ({ role, username }: DashboardAuthIdentity) => {
+    const normalizedUsername = username.trim() || role
+    setIsAuthenticated(true)
+    setIsGuestSession(role === 'guest')
+    setCurrentUsername(normalizedUsername)
+    localStorage.setItem('dashboard_authenticated', 'true')
+    localStorage.setItem('dashboard_role', role)
+    localStorage.setItem('dashboard_username', normalizedUsername)
+    if (role === 'guest') {
+      localStorage.setItem('dashboard_guest', 'true')
+    } else {
+      localStorage.removeItem('dashboard_guest')
+    }
+  }
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
 
-    if (passcode === DASHBOARD_GUEST_PASSCODE) {
-      setIsAuthenticated(true)
-      setIsGuestSession(true)
-      localStorage.setItem('dashboard_authenticated', 'true')
-      localStorage.setItem('dashboard_guest', 'true')
-      setError('')
-      return
-    }
-
     try {
-      const { data, error } = await supabase
-        .rpc('validate_admin_credentials', { input_passcode: passcode })
-      
-      if (error) {
-        console.error('Error validating credentials:', error)
-        setError('Authentication error. Please try again.')
-        return
-      }
-      
-      if (data) {
-        setIsAuthenticated(true)
-        setIsGuestSession(false)
-        localStorage.setItem('dashboard_authenticated', 'true')
-        localStorage.removeItem('dashboard_guest')
+      const identity = await authenticateDashboardPasscode(passcode)
+
+      if (identity) {
+        persistDashboardSession(identity)
         setError('')
+        setPasscode('')
       } else {
         setError('Invalid passcode. Please try again.')
         setPasscode('')
@@ -120,11 +127,14 @@ export default function DashboardPage() {
     setIsAuthenticated(false)
     setIsGuestSession(false)
     setPasscode('')
+    setCurrentUsername('')
     setSelectedBrand(null)
     setActiveTab('products')
     setInitialLoading(false)
     localStorage.removeItem('dashboard_authenticated')
+    localStorage.removeItem('dashboard_role')
     localStorage.removeItem('dashboard_guest')
+    localStorage.removeItem('dashboard_username')
     localStorage.removeItem('dashboard_selected_brand')
     localStorage.removeItem('dashboard_active_tab')
   }
@@ -286,9 +296,14 @@ export default function DashboardPage() {
               <div className="flex-1 mr-3">
                 <BrandSelector onBrandChange={setSelectedBrand} />
               </div>
-              <div className="flex items-center space-x-1 text-xs text-gray-500">
-                <div className={`w-1.5 h-1.5 rounded-full ${isGuestSession ? 'bg-amber-500' : 'bg-green-500'}`}></div>
-                <span>{isGuestSession ? 'Guest access' : 'Admin access'}</span>
+              <div className="flex flex-col items-end">
+                <span className="text-xs text-gray-500">
+                  <span className="font-medium text-gray-700">{currentUsername || 'Unknown'}</span>
+                </span>
+                <div className="flex items-center space-x-1 text-xs text-gray-500">
+                  <div className={`w-1.5 h-1.5 rounded-full ${isGuestSession ? 'bg-amber-500' : 'bg-green-500'}`}></div>
+                  <span>{isGuestSession ? 'Guest access' : 'Admin access'}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -315,9 +330,14 @@ export default function DashboardPage() {
                   </span>
                 )}
               </div>
-              <div className="flex items-center space-x-1 text-sm text-gray-500">
-                <div className={`w-2 h-2 rounded-full ${isGuestSession ? 'bg-amber-500' : 'bg-green-500'}`}></div>
-                <span>{isGuestSession ? 'Guest access' : 'Admin access'}</span>
+              <div className="flex flex-col">
+                <span className="text-sm text-gray-500">
+                  <span className="font-medium text-gray-700">{currentUsername || 'Unknown'}</span>
+                </span>
+                <div className="flex items-center space-x-1 text-sm text-gray-500">
+                  <div className={`w-2 h-2 rounded-full ${isGuestSession ? 'bg-amber-500' : 'bg-green-500'}`}></div>
+                  <span>{isGuestSession ? 'Guest access' : 'Admin access'}</span>
+                </div>
               </div>
             </div>
             
@@ -341,12 +361,15 @@ export default function DashboardPage() {
           <div className="bg-white rounded-lg shadow-sm border p-4">
             <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
               {/* Tabs */}
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <div className="border-b border-gray-200">
-                  <nav className="-mb-px flex space-x-4 sm:space-x-8 overflow-x-auto" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
+                  <nav
+                    className="-mb-px flex flex-wrap gap-x-3 gap-y-1 sm:gap-x-5 sm:gap-y-1 max-w-full"
+                    aria-label="Dashboard sections"
+                  >
               <button
                 onClick={() => setActiveTab('products')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'products'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -355,14 +378,14 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <Package className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <Package className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Inventory</span>
                 </div>
               </button>
               <button
                 onClick={() => setActiveTab('orders')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'orders'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -371,15 +394,15 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <ShoppingCart className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <ShoppingCart className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Orders</span>
                 </div>
               </button>
               {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('billing')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'billing'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -388,15 +411,15 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <CreditCard className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <CreditCard className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Billing</span>
                 </div>
               </button>
               )}
               <button
                 onClick={() => setActiveTab('logistics')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'logistics'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -405,14 +428,14 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <Truck className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <Truck className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Logistics</span>
                 </div>
               </button>
               <button
                 onClick={() => setActiveTab('dsir')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'dsir'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -421,14 +444,14 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <FileText className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <FileText className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>DSIR</span>
                 </div>
               </button>
               <button
                 onClick={() => setActiveTab('staff')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'staff'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -437,15 +460,15 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <Users className="h-4 w-4" />
-                  <span>Staff Manager</span>
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <Users className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
+                  <span>Staff</span>
                 </div>
               </button>
               {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('payroll')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'payroll'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -454,8 +477,8 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <Calculator className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <Calculator className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Payroll</span>
                 </div>
               </button>
@@ -463,7 +486,7 @@ export default function DashboardPage() {
               {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('reports')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'reports'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -472,8 +495,8 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <BarChart3 className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <BarChart3 className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Reports</span>
                 </div>
               </button>
@@ -481,7 +504,7 @@ export default function DashboardPage() {
               {!isGuestSession && (
               <button
                 onClick={() => setActiveTab('purchasing')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'purchasing'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -490,15 +513,31 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <ClipboardList className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <ClipboardList className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Procurement</span>
                 </div>
               </button>
               )}
               <button
+                onClick={() => setActiveTab('factory')}
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
+                  activeTab === 'factory'
+                    ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
+                      currentTheme === 'red' ? 'border-red-500 text-red-600' :
+                      currentTheme === 'yellow' ? 'border-yellow-500 text-yellow-600' :
+                      'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <Factory className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
+                  <span>Factory</span>
+                </div>
+              </button>
+              <button
                 onClick={() => setActiveTab('branches')}
-                className={`py-2 px-1 border-b-2 font-medium text-sm whitespace-nowrap ${
+                className={`py-2 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm whitespace-nowrap shrink-0 ${
                   activeTab === 'branches'
                     ? currentTheme === 'green' ? 'border-green-500 text-green-600' :
                       currentTheme === 'red' ? 'border-red-500 text-red-600' :
@@ -507,8 +546,8 @@ export default function DashboardPage() {
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center space-x-1 sm:space-x-2">
-                  <MapPin className="h-4 w-4" />
+                <div className="flex items-center gap-1.5 sm:gap-2">
+                  <MapPin className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                   <span>Branches</span>
                 </div>
               </button>
@@ -523,7 +562,14 @@ export default function DashboardPage() {
         <div className="bg-white rounded-lg shadow-sm border">
           {activeTab === 'products' && selectedBrand && (
             <div className="p-4 sm:p-6">
-              <ProductManager key={refreshKey} selectedBrand={selectedBrand} theme={currentTheme} guestMode={isGuestSession} />
+              <ProductManager
+                key={refreshKey}
+                selectedBrand={selectedBrand}
+                theme={currentTheme}
+                guestMode={isGuestSession}
+                currentUsername={currentUsername}
+                onNavigateToPurchasing={() => setActiveTab('purchasing')}
+              />
             </div>
           )}
           
@@ -612,7 +658,29 @@ export default function DashboardPage() {
 
           {activeTab === 'purchasing' && !isGuestSession && (
             <div className="p-4 sm:p-6">
-              <PurchasingManager selectedBrand={selectedBrand} theme={currentTheme} />
+              <PurchasingManager
+                selectedBrand={selectedBrand}
+                theme={currentTheme}
+                currentUsername={currentUsername}
+              />
+            </div>
+          )}
+
+          {activeTab === 'factory' && selectedBrand && (
+            <div className="p-4 sm:p-6">
+              <FactoryManager
+                key={refreshKey}
+                selectedBrand={selectedBrand}
+                theme={currentTheme}
+                currentUsername={currentUsername}
+              />
+            </div>
+          )}
+
+          {!selectedBrand && activeTab === 'factory' && (
+            <div className="p-4 sm:p-6 text-center py-12">
+              <Factory className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+              <p className="text-gray-600">Please select a brand to manage factory operations</p>
             </div>
           )}
 

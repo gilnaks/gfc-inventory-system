@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
-import { Calendar, Clock, Truck, Package, Plus, X, Edit, Trash2, ChevronLeft, ChevronRight, Sun, Moon, ArrowUpDown, ArrowDown, ArrowUp } from 'lucide-react'
+import { Calendar, Clock, Truck, Package, Plus, X, Edit, Trash2, ChevronLeft, ChevronRight, Sun, Moon, ArrowUpDown, ArrowDown, ArrowUp, Ship } from 'lucide-react'
 import { formatPhilippinesDateTime, toPhilippinesDateString } from '../../lib/timezone'
 
 interface LogisticsAssignment {
@@ -17,7 +17,7 @@ interface LogisticsAssignment {
     id: string
     customer_name: string
     total_amount: number
-    delivery_type: 'delivery' | 'pickup'
+    delivery_type: 'delivery' | 'pickup' | 'none' | 'shipment'
     created_at: string
     brand_id: string
     brand?: {
@@ -25,8 +25,13 @@ interface LogisticsAssignment {
     }
     location?: {
       name: string
+      is_remote?: boolean
     }
   }
+}
+
+function isRemoteStoreLocation(location?: { is_remote?: boolean } | null): boolean {
+  return !!location?.is_remote
 }
 
 interface LogisticsManagerProps {
@@ -73,7 +78,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
              created_at,
              brand_id,
              brand:brands(name),
-             location:locations(name)
+             location:locations(name, is_remote)
            )
         `)
         .gte('date', toPhilippinesDateString(startOfMonth))
@@ -108,7 +113,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
            created_at,
            brand_id,
            brand:brands(name),
-           location:locations(name)
+           location:locations(name, is_remote)
          `)
         .eq('brand_id', selectedBrand.id)
         .eq('status', 'approved')
@@ -545,18 +550,30 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                   </div>
                    <div className="space-y-1">
                      {morningAssignments.map(assignment => {
-                       const brandColors = getCalendarBrandColor(assignment.order?.brand_id || '', assignment.order?.brand?.name)
+                       const isRemote = isRemoteStoreLocation(assignment.order?.location)
+                       const brandColors = getCalendarBrandColor(
+                         assignment.order?.brand_id || '',
+                         assignment.order?.brand?.name
+                       )
                        return (
                          <div
                            key={assignment.id}
-                           className={`text-xs p-1 ${brandColors.morning} rounded border-l-2 flex flex-col group relative`}
+                           className={`text-xs p-1 ${brandColors.morning} rounded flex flex-col group relative ${
+                             isRemote ? 'border-l-4 border-l-purple-500' : 'border-l-2'
+                           }`}
                          >
                          <div className="font-medium text-gray-900 truncate">{assignment.order?.location?.name}</div>
                          <div className="flex items-center justify-between mt-1">
                            <div className="text-gray-600 text-xs">{assignment.order?.created_at ? new Date(assignment.order.created_at).toLocaleDateString() : 'No Date'}</div>
                            <div className="flex items-center gap-0.5">
-                             {assignment.order?.delivery_type === 'pickup' && (
-                               <Package className="h-3 w-3 text-orange-600" />
+                             {isRemote ? (
+                               <span title="Remote store / shipment">
+                                 <Ship className="h-3 w-3 text-purple-600" />
+                               </span>
+                             ) : (
+                               assignment.order?.delivery_type === 'pickup' && (
+                                 <Package className="h-3 w-3 text-orange-600" />
+                               )
                              )}
                              <button
                                onClick={() => handleDeleteAssignment(assignment.id)}
@@ -594,19 +611,31 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                   </div>
                    <div className="space-y-1">
                      {afternoonAssignments.map(assignment => {
-                       const brandColors = getCalendarBrandColor(assignment.order?.brand_id || '', assignment.order?.brand?.name)
+                       const isRemote = isRemoteStoreLocation(assignment.order?.location)
+                       const brandColors = getCalendarBrandColor(
+                         assignment.order?.brand_id || '',
+                         assignment.order?.brand?.name
+                       )
                        return (
                          <div
                            key={assignment.id}
-                           className={`text-xs p-1 ${brandColors.afternoon} rounded border-l-2 flex flex-col group relative`}
+                           className={`text-xs p-1 ${brandColors.afternoon} rounded flex flex-col group relative ${
+                             isRemote ? 'border-l-4 border-l-purple-500' : 'border-l-2'
+                           }`}
                          >
                            <div className="font-medium text-gray-900 truncate">{assignment.order?.location?.name}</div>
                            <div className="flex items-center justify-between mt-1">
                              <div className="text-gray-600 text-xs">{assignment.order?.created_at ? new Date(assignment.order.created_at).toLocaleDateString() : 'No Date'}</div>
                              <div className="flex items-center gap-0.5">
-                                {assignment.order?.delivery_type === 'pickup' && (
-                                  <Package className="h-3 w-3 text-orange-600" />
-                                )}
+                               {isRemote ? (
+                                 <span title="Remote store / shipment">
+                                   <Ship className="h-3 w-3 text-purple-600" />
+                                 </span>
+                               ) : (
+                                 assignment.order?.delivery_type === 'pickup' && (
+                                   <Package className="h-3 w-3 text-orange-600" />
+                                 )
+                               )}
                                <button
                                  onClick={() => handleDeleteAssignment(assignment.id)}
                                  className="p-0.5 text-red-600 hover:text-red-800 hover:bg-red-200 rounded opacity-0 group-hover:opacity-100 transition-opacity"
@@ -667,22 +696,32 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                 return unassignedOrders.length === 0 ? (
                   <p className="text-sm text-gray-500">No available orders</p>
                 ) : (
-                  unassignedOrders.map(order => (
+                  unassignedOrders.map(order => {
+                    const isRemote = isRemoteStoreLocation(order.location)
+                    return (
                     <button
                       key={order.id}
                       onClick={() => {
                         handleCreateAssignment(order.id, selectedDate, selectedTimeSlot)
                         setShowOrderPopup(false)
                       }}
-                      className="w-full text-left p-2 hover:bg-gray-100 rounded border border-gray-200"
+                      className={`w-full text-left p-2 hover:bg-gray-100 rounded border border-gray-200 ${
+                        isRemote ? 'border-l-4 border-l-purple-500' : ''
+                      }`}
                     >
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium text-gray-900">
                             {order.location?.name}
                           </span>
-                          {order.delivery_type === 'pickup' && (
-                            <Package className="h-4 w-4 text-orange-600" />
+                          {isRemote ? (
+                            <span title="Remote store / shipment">
+                              <Ship className="h-4 w-4 text-purple-600" />
+                            </span>
+                          ) : (
+                            order.delivery_type === 'pickup' && (
+                              <Package className="h-4 w-4 text-orange-600" />
+                            )
                           )}
                         </div>
                         <span className={`px-2 py-1 text-xs rounded-full ${
@@ -704,7 +743,8 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
                         {order.created_at ? new Date(order.created_at).toLocaleDateString() : 'No Date'} - #{order.id.slice(-8)}
                       </div>
                     </button>
-                  ))
+                    )
+                  })
                 )
               })()}
             </div>

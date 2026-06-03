@@ -1,82 +1,67 @@
-# Admin Credentials Migration
+# Admin Credentials
 
-This migration moves admin credentials from hardcoded values to a secure Supabase database table.
+Dashboard login and sensitive actions use the `admin_credentials` table in Supabase — not hardcoded passcodes in the app.
 
-## Migration File
-- `admin-credentials-migration.sql` - Complete migration script
+## Roles
 
-## What This Migration Does
+| Role | Purpose |
+|------|---------|
+| `admin` | Full dashboard access; passcode works for edit/delete confirmations |
+| `guest` | Limited dashboard (products, orders, branches, logistics, DSIR view); cannot use admin-only confirmations |
 
-### 1. Creates Admin Credentials Table
-- Stores admin usernames and passcodes securely
-- Includes active/inactive status for credential management
-- Tracks creation and update timestamps
+Each row has `username`, `passcode`, `role`, and `is_active`.
 
-### 2. Sets Up Security
-- Row Level Security (RLS) policies
-- Secure functions for credential validation
-- Proper permissions for authenticated users
+## Migrations
 
-### 3. Inserts Default Credentials
-- Username: `admin`
-- Passcode: `gfc030199`
-- Status: Active
+1. **New database:** run `admin-credentials-migration.sql`
+2. **Existing database:** run `migrations/admin-credentials-roles.sql` (adds `role`, seeds `guest`, updates RPCs)
 
-## How to Run the Migration
+Do **not** use `migrations/dashboard-guest-passcode.sql` — it is deprecated.
 
-1. **Open Supabase Dashboard**
-2. **Go to SQL Editor**
-3. **Copy and paste the entire `admin-credentials-migration.sql` content**
-4. **Click "Run"**
+## Default seed (change in Supabase as needed)
+
+| Username | Role | Example passcode |
+|----------|------|------------------|
+| `admin` | admin | `gfc030199` |
+| `guest` | guest | `030199` |
+
+## RPCs
+
+| Function | Returns | Use |
+|----------|---------|-----|
+| `authenticate_dashboard_passcode(passcode)` | `{"username","role"}` or NULL | Dashboard login |
+| `validate_admin_passcode(passcode)` | boolean | Edit/delete password modal (admin only) |
+| `validate_admin_credentials(passcode)` | boolean | Alias for `validate_admin_passcode` |
+
+## App code
+
+- Login: `lib/admin-auth.ts` → `authenticateDashboardPasscode()`
+- Confirmations: `validateAdminPassword()` (admin role only)
+- Session: `localStorage.dashboard_role` = `admin` | `guest`
+
+## Manage credentials in SQL
+
+```sql
+-- Change admin passcode
+UPDATE admin_credentials
+SET passcode = 'new_passcode', updated_at = NOW()
+WHERE username = 'admin';
+
+-- Change guest passcode
+UPDATE admin_credentials
+SET passcode = 'new_guest_code', updated_at = NOW()
+WHERE username = 'guest';
+
+-- Deactivate guest login
+UPDATE admin_credentials SET is_active = FALSE WHERE username = 'guest';
+```
 
 ## Verification
 
-After running the migration, you can verify it worked by:
-
-1. **Test Login**: Try logging into the dashboard with passcode `gfc030199`
-2. **Check Database**: Run `SELECT * FROM admin_credentials;` in SQL Editor
-3. **Test Function**: Run `SELECT validate_admin_credentials('gfc030199');` (should return `true`)
-
-## Managing Admin Credentials
-
-### Add New Admin
 ```sql
-INSERT INTO admin_credentials (username, passcode, is_active) 
-VALUES ('new_admin', 'new_passcode', TRUE);
+SELECT username, role, is_active FROM admin_credentials ORDER BY role;
+SELECT authenticate_dashboard_passcode('gfc030199');  -- admin
+SELECT authenticate_dashboard_passcode('030199');     -- guest
+SELECT validate_admin_passcode('030199');             -- false
+SELECT validate_admin_passcode('gfc030199');          -- true
 ```
-
-### Deactivate Admin
-```sql
-UPDATE admin_credentials 
-SET is_active = FALSE 
-WHERE username = 'admin';
-```
-
-### Change Passcode
-```sql
-UPDATE admin_credentials 
-SET passcode = 'new_passcode', updated_at = NOW() 
-WHERE username = 'admin';
-```
-
-## Security Features
-
-- **Encrypted Storage**: Credentials are stored securely in Supabase
-- **RLS Protection**: Row Level Security prevents unauthorized access
-- **Function-based Validation**: Uses secure database functions for validation
-- **Audit Trail**: Tracks when credentials are created and updated
-
-## Code Changes
-
-The dashboard login now uses:
-- `supabase.rpc('validate_admin_credentials', { input_passcode: passcode })`
-- Instead of hardcoded `john101797` comparison
-- Proper error handling for database operations
-
-## Benefits
-
-1. **Security**: No more hardcoded credentials in source code
-2. **Flexibility**: Easy to add/remove admin users
-3. **Audit**: Track credential changes
-4. **Scalability**: Support multiple admin accounts
-5. **Maintenance**: Change credentials without code deployment

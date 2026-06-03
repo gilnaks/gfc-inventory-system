@@ -4,5 +4,6 @@
   "/factory/page": "app/factory/page.js",
   "/dsir/page": "app/dsir/page.js",
   "/page": "app/page.js",
+  "/factory/scan/page": "app/factory/scan/page.js",
   "/order/page": "app/order/page.js"
 }

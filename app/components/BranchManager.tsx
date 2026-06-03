@@ -6,6 +6,7 @@ import { formatPhilippinesDateTime, formatPhilippinesTransferSheetDate } from '.
 import { TRANSFER_SHEET_PRINT_STYLES } from '../../lib/transferSheetPrintStyles'
 import { renderTransferSheetItemsBlock } from '../../lib/transferSheetPrintItems'
 import { renderTransferSheetTotalsSection } from '../../lib/transferSheetPrintTotals'
+import { buildTransferSheetDsirPayload } from '../../lib/transferSheetDsirQr'
 
 interface Location {
   id: string
@@ -409,7 +410,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     setShowOrderDetails(true)
   }
 
-  const handlePrintReceipt = (order: CustomerOrder) => {
+  const handlePrintReceipt = async (order: CustomerOrder) => {
     const sortedDetails = [...order.order_details].sort((a, b) => {
       const categoryA =
         a.product?.category && a.product.category.trim() !== '' ? a.product.category : 'Uncategorized'
@@ -428,6 +429,25 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
       })),
       { showPrices: true }
     )
+
+    const nonIndexZeroItems = sortedDetails
+      .filter((_, index) => index !== 0)
+      .map((detail) => ({
+        name: detail.product.name,
+        quantity: detail.quantity,
+      }))
+    const fallbackAllItems = sortedDetails.map((detail) => ({
+      name: detail.product.name,
+      quantity: detail.quantity,
+    }))
+    const dsirPayloadText =
+      buildTransferSheetDsirPayload(nonIndexZeroItems) ||
+      buildTransferSheetDsirPayload(fallbackAllItems)
+    let dsirQrDataUrl = ''
+    if (dsirPayloadText) {
+      const QRCode = (await import('qrcode')).default
+      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 220, margin: 1 })
+    }
 
     const printWindow = window.open('', '_blank')
     if (printWindow) {
@@ -479,6 +499,8 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               deliveryType: order.delivery_type,
               grandTotal: order.total_amount,
               remarks: order.notes,
+              qrDataUrl: dsirQrDataUrl,
+              qrCaption: 'DSIR ICE CREAM',
             })}
           </div>
           
@@ -929,7 +951,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
       {/* Add Branch Modal */}
       {showAddForm && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-1/2 shadow-lg rounded-md bg-white">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-md shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Add New Branch</h3>
               <button
@@ -945,20 +967,20 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Branch Name *
                 </label>
-                <div className="flex items-center space-x-3">
-                  <input
-                    type="text"
-                    required
-                    value={newLocation.name}
-                    onChange={(e) => setNewLocation({...newLocation, name: e.target.value})}
-                    className={`flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
-                      theme === 'green' ? 'focus:ring-green-500' :
-                      theme === 'red' ? 'focus:ring-red-500' :
-                      theme === 'yellow' ? 'focus:ring-yellow-500' :
-                      'focus:ring-blue-500'
-                    }`}
-                    placeholder="Enter branch name"
-                  />
+                <input
+                  type="text"
+                  required
+                  value={newLocation.name}
+                  onChange={(e) => setNewLocation({...newLocation, name: e.target.value})}
+                  className={`w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:border-transparent ${
+                    theme === 'green' ? 'focus:ring-green-500' :
+                    theme === 'red' ? 'focus:ring-red-500' :
+                    theme === 'yellow' ? 'focus:ring-yellow-500' :
+                    'focus:ring-blue-500'
+                  }`}
+                  placeholder="Enter branch name"
+                />
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-x-4">
                   <label className="flex items-center space-x-2 text-sm text-gray-700">
                     <input
                       type="checkbox"
@@ -1009,7 +1031,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 />
               </div>
               
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Franchisee Name *

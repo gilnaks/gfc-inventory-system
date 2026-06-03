@@ -7,7 +7,7 @@ import { Plus, Trash2, Save, Edit3, X, Check, X as CloseIcon } from 'lucide-reac
 interface DSIRPredefinedItem {
   id?: string
   brand_id: string
-  category: 'sales' | 'ice_cream' | 'materials' | 'denominations'
+  category: 'sales' | 'materials' | 'denominations'
   name: string
   price?: number
   is_active: boolean
@@ -27,11 +27,10 @@ export function DSIRItemManagerModal({ isOpen, onClose, selectedBrand, theme }: 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-  const [activeCategory, setActiveCategory] = useState<'sales' | 'ice_cream' | 'materials' | 'denominations'>('sales')
+  const [activeCategory, setActiveCategory] = useState<'sales' | 'materials' | 'denominations'>('sales')
   
   // Items by category
   const [salesItems, setSalesItems] = useState<DSIRPredefinedItem[]>([])
-  const [iceCreamItems, setIceCreamItems] = useState<DSIRPredefinedItem[]>([])
   const [materialsItems, setMaterialsItems] = useState<DSIRPredefinedItem[]>([])
   const [denominationsItems, setDenominationsItems] = useState<DSIRPredefinedItem[]>([])
   
@@ -44,7 +43,6 @@ export function DSIRItemManagerModal({ isOpen, onClose, selectedBrand, theme }: 
 
   const categories = [
     { key: 'sales', label: 'Sales Items', items: salesItems, setItems: setSalesItems },
-    { key: 'ice_cream', label: 'Ice Cream Flavors', items: iceCreamItems, setItems: setIceCreamItems },
     { key: 'materials', label: 'Materials/Supplies', items: materialsItems, setItems: setMaterialsItems },
     { key: 'denominations', label: 'Cash Denominations', items: denominationsItems, setItems: setDenominationsItems }
   ] as const
@@ -71,12 +69,10 @@ export function DSIRItemManagerModal({ isOpen, onClose, selectedBrand, theme }: 
 
       // Group items by category
       const sales = data?.filter(item => item.category === 'sales') || []
-      const iceCream = data?.filter(item => item.category === 'ice_cream') || []
       const materials = data?.filter(item => item.category === 'materials') || []
       const denominations = data?.filter(item => item.category === 'denominations') || []
 
       setSalesItems(sales)
-      setIceCreamItems(iceCream)
       setMaterialsItems(materials)
       setDenominationsItems(denominations)
     } catch (error) {

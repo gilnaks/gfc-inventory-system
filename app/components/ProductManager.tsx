@@ -1,18 +1,147 @@
 'use client'
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { supabase, Product, Brand } from '../../lib/supabase'
-import { Plus, Edit, Trash2, Save, X, Package, Eye, FileText, Calendar } from 'lucide-react'
-import { ProductionScheduleManager } from './ProductionScheduleManager'
+import {
+  Plus,
+  Edit,
+  Trash2,
+  Save,
+  X,
+  Package,
+  Eye,
+  FileText,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  ClipboardCheck,
+  Info,
+} from 'lucide-react'
+import { ProductsCycleCountPanel } from './ProductsCycleCountPanel'
+import type { ProductCycleCountScope } from '../../lib/product-cycle-count'
+import { ProductBomModal } from './ProductBomModal'
+import { ProductMaterialLinkModal } from './ProductMaterialLinkModal'
+import { ProductMaterialReceiveModal } from './ProductMaterialReceiveModal'
+import { ProductComponentExportModal } from './ProductComponentExportModal'
 import { getPhilippinesDate } from '../../lib/timezone'
+import {
+  getAvailableStockTextClass,
+  isAvailableCritical,
+} from '../../lib/product-stock-level'
+import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
+import {
+  categorySortKey,
+  DEFAULT_CATEGORY_PORTAL_SETTINGS,
+  parseCategoryPortalRow,
+  productCategoryDisplayName,
+  type CategoryPortalSettings,
+  isProductConsumableSupply,
+  isProductBomComponent,
+  isBomComponentProductCategory,
+  CATEGORY_SORT_INDEX_HELP_LINES,
+} from '../../lib/product-category-settings'
+import { deleteLinkedComponentMaterials } from '../../lib/product-bom-component'
 
 interface ProductManagerProps {
   selectedBrand: Brand | null
   theme?: string
   /** When true, hides production controls, add-product entry points, and row actions (dashboard guest). */
   guestMode?: boolean
+  currentUsername?: string
+  onNavigateToPurchasing?: () => void
 }
 
-export function ProductManager({ selectedBrand, theme = 'blue', guestMode = false }: ProductManagerProps) {
+/** Lower rank = earlier in the list. Index 0 is last (before Uncategorized). */
+function categorySortRank(displayName: string, sortIndex: number | undefined): number {
+  if (displayName === 'Uncategorized') return 1_000_000_000
+  if (sortIndex === 0) return 900_000_000
+  if (sortIndex !== undefined && sortIndex > 0) return sortIndex
+  return 500_000_000
+}
+
+function categoryHeaderThemeClasses(
+  theme: string,
+  sortIndex: number | undefined
+): { bar: string; title: string; editBtn: string } {
+  if (sortIndex === 0) {
+    return {
+      bar: 'bg-gray-100 border-gray-200 hover:bg-gray-50',
+      title: 'text-gray-800',
+      editBtn: 'text-gray-600 hover:bg-gray-200',
+    }
+  }
+  const dark = isBomComponentProductCategory(sortIndex)
+  if (theme === 'green') {
+    return dark
+      ? {
+          bar: 'bg-green-200 border-green-300 hover:bg-green-100',
+          title: 'text-green-950',
+          editBtn: 'text-green-800 hover:bg-green-300',
+        }
+      : {
+          bar: 'bg-green-100 border-green-200 hover:bg-green-50',
+          title: 'text-green-900',
+          editBtn: 'text-green-700 hover:bg-green-200',
+        }
+  }
+  if (theme === 'red') {
+    return dark
+      ? {
+          bar: 'bg-red-200 border-red-300 hover:bg-red-100',
+          title: 'text-red-950',
+          editBtn: 'text-red-800 hover:bg-red-300',
+        }
+      : {
+          bar: 'bg-red-100 border-red-200 hover:bg-red-50',
+          title: 'text-red-900',
+          editBtn: 'text-red-700 hover:bg-red-200',
+        }
+  }
+  if (theme === 'yellow') {
+    return dark
+      ? {
+          bar: 'bg-yellow-200 border-yellow-300 hover:bg-yellow-100',
+          title: 'text-yellow-950',
+          editBtn: 'text-yellow-800 hover:bg-yellow-300',
+        }
+      : {
+          bar: 'bg-yellow-100 border-yellow-200 hover:bg-yellow-50',
+          title: 'text-yellow-900',
+          editBtn: 'text-yellow-700 hover:bg-yellow-200',
+        }
+  }
+  return dark
+    ? {
+        bar: 'bg-blue-200 border-blue-300 hover:bg-blue-100',
+        title: 'text-blue-950',
+        editBtn: 'text-blue-800 hover:bg-blue-300',
+      }
+    : {
+        bar: 'bg-blue-100 border-blue-200 hover:bg-blue-50',
+        title: 'text-blue-900',
+        editBtn: 'text-blue-700 hover:bg-blue-200',
+      }
+}
+
+function isNewCategoryName(
+  raw: string,
+  existingCategories: string[],
+  sortOrders: Record<string, number>
+): boolean {
+  const trimmed = raw.trim()
+  if (!trimmed) return false
+  const display = productCategoryDisplayName(trimmed)
+  if (existingCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase())) return false
+  if (sortOrders[display] !== undefined) return false
+  return true
+}
+
+export function ProductManager({
+  selectedBrand,
+  theme = 'blue',
+  guestMode = false,
+  currentUsername = '',
+  onNavigateToPurchasing,
+}: ProductManagerProps) {
+  const { requestAdminPassword, AdminPasswordModal } = useAdminPasswordConfirm()
   const [products, setProducts] = useState<Product[]>([])
   const [loading, setLoading] = useState(false)
   const [showAddForm, setShowAddForm] = useState(false)
@@ -40,7 +169,61 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
   const [loadingReports, setLoadingReports] = useState(false)
   const [selectedReport, setSelectedReport] = useState<any | null>(null)
   const [deletingItem, setDeletingItem] = useState<string | null>(null)
-  const [showProductionSchedule, setShowProductionSchedule] = useState(false)
+  const [bomProduct, setBomProduct] = useState<Product | null>(null)
+  /** Ignore product realtime refetches briefly after BOM modal closes (trailing bom_* updates). */
+  const suppressProductsRealtimeUntilRef = useRef(0)
+  const bomRealtimeSuppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [materialLinkProduct, setMaterialLinkProduct] = useState<Product | null>(null)
+  const [receiveProduct, setReceiveProduct] = useState<Product | null>(null)
+  const [editingCategory, setEditingCategory] = useState<string | null>(null)
+  const [editingCategoryName, setEditingCategoryName] = useState('')
+  const [editingCategoryIndex, setEditingCategoryIndex] = useState('')
+  const [categorySortOrders, setCategorySortOrders] = useState<Record<string, number>>({})
+  const [categoryPortalSettings, setCategoryPortalSettings] = useState<
+    Record<string, CategoryPortalSettings>
+  >({})
+  const [editingCategoryShowOnOrder, setEditingCategoryShowOnOrder] = useState(true)
+  const [editingCategoryRemoteStore, setEditingCategoryRemoteStore] = useState(false)
+  const [categoryMinStockEdits, setCategoryMinStockEdits] = useState<Record<string, number>>({})
+  const [savingCategory, setSavingCategory] = useState(false)
+  const [exportComponentProduct, setExportComponentProduct] = useState<Product | null>(null)
+  const [cycleCountPanel, setCycleCountPanel] = useState<{
+    products: Product[]
+    categoryScope: ProductCycleCountScope
+    scopeTitle: string
+    scopeDescription: string
+    groupByCategory: boolean
+  } | null>(null)
+  const [newCategorySortIndex, setNewCategorySortIndex] = useState('')
+  const [newCategoryShowOnOrder, setNewCategoryShowOnOrder] = useState(true)
+  const [newCategoryRemoteStore, setNewCategoryRemoteStore] = useState(false)
+  const [addProductPrice, setAddProductPrice] = useState('')
+  const [addProductInitialStock, setAddProductInitialStock] = useState('')
+
+  const resetAddProductForm = useCallback(() => {
+    setNewProduct({
+      name: '',
+      sku: '',
+      category: '',
+      unit: 'pcs',
+      price: 0,
+      initial_stock: 0,
+      production: 0,
+      released: 0,
+      reserved: 0,
+    })
+    setAddProductPrice('')
+    setAddProductInitialStock('')
+    setNewCategorySortIndex('')
+    setNewCategoryShowOnOrder(true)
+    setNewCategoryRemoteStore(false)
+    setShowCategoryDropdown(false)
+  }, [])
+
+  const isAddingNewCategory = useMemo(
+    () => isNewCategoryName(newProduct.category, categories, categorySortOrders),
+    [newProduct.category, categories, categorySortOrders]
+  )
 
   useEffect(() => {
     if (guestMode) {
@@ -48,6 +231,12 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
       setProductionInputMode(false)
       setProductionValues({})
       setShowAddForm(false)
+      setEditingCategory(null)
+      setEditingCategoryName('')
+      setEditingCategoryIndex('')
+      setCategoryMinStockEdits({})
+      setEditingCategoryShowOnOrder(true)
+      setEditingCategoryRemoteStore(false)
     }
   }, [guestMode])
 
@@ -93,13 +282,22 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
         },
         (payload) => {
           console.log('Products realtime update:', payload)
-          
-          // Only refetch if we're not currently editing
-          // This prevents the realtime update from overwriting local edits
-          if (!editingProduct) {
+
+          const modalBlocksRefetch =
+            editingProduct ||
+            bomProduct ||
+            materialLinkProduct ||
+            receiveProduct ||
+            exportComponentProduct
+          const bomRealtimeSuppressed =
+            Date.now() < suppressProductsRealtimeUntilRef.current
+
+          // Skip refetch while editing or a product-inventory modal is open (e.g. BOM
+          // quantity basis saves bom_* columns and would otherwise reload the whole list).
+          if (!modalBlocksRefetch && !bomRealtimeSuppressed) {
             fetchProducts()
           } else {
-            console.log('Skipping realtime refetch - currently editing product')
+            console.log('Skipping realtime refetch - product inventory modal or inline edit active')
           }
         }
       )
@@ -108,7 +306,14 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [selectedBrand, editingProduct])
+  }, [
+    selectedBrand,
+    editingProduct,
+    bomProduct,
+    materialLinkProduct,
+    receiveProduct,
+    exportComponentProduct,
+  ])
 
   useEffect(() => {
     // Extract unique categories from products
@@ -118,6 +323,249 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
     )).sort()
     setCategories(uniqueCategories)
   }, [products])
+
+  const closeBomModal = useCallback(() => {
+    setBomProduct(null)
+    suppressProductsRealtimeUntilRef.current = Date.now() + 3000
+    if (bomRealtimeSuppressTimerRef.current) {
+      clearTimeout(bomRealtimeSuppressTimerRef.current)
+    }
+    bomRealtimeSuppressTimerRef.current = setTimeout(() => {
+      suppressProductsRealtimeUntilRef.current = 0
+      bomRealtimeSuppressTimerRef.current = null
+    }, 3000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (bomRealtimeSuppressTimerRef.current) {
+        clearTimeout(bomRealtimeSuppressTimerRef.current)
+      }
+    }
+  }, [])
+
+  const fetchCategorySortOrders = async (brandId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('product_category_sort')
+        .select('category_name, sort_index, show_on_order_portal, remote_store, yield_per_batch')
+        .eq('brand_id', brandId)
+
+      if (error) {
+        console.warn('product_category_sort:', error.message)
+        setCategorySortOrders({})
+        setCategoryPortalSettings({})
+        return
+      }
+
+      const orders: Record<string, number> = {}
+      const portal: Record<string, CategoryPortalSettings> = {}
+      for (const row of data || []) {
+        const display = productCategoryDisplayName(row.category_name)
+        orders[display] = row.sort_index
+        portal[display] = parseCategoryPortalRow(row)
+      }
+      setCategorySortOrders(orders)
+      setCategoryPortalSettings(portal)
+    } catch (error) {
+      console.error('Error fetching category sort:', error)
+      setCategorySortOrders({})
+    }
+  }
+
+  const startEditingCategory = (category: string) => {
+    setEditingCategory(category)
+    setEditingCategoryName(category === 'Uncategorized' ? '' : category)
+    const index = categorySortOrders[category]
+    setEditingCategoryIndex(index !== undefined ? String(index) : '')
+    const edits: Record<string, number> = {}
+    for (const p of products) {
+      if (productCategoryDisplayName(p.category) !== category) continue
+      const id = p.product_id || p.id
+      if (id) edits[id] = p.minimum_stock ?? 0
+    }
+    setCategoryMinStockEdits(edits)
+    const portal = categoryPortalSettings[category] ?? DEFAULT_CATEGORY_PORTAL_SETTINGS
+    setEditingCategoryShowOnOrder(portal.show_on_order_portal)
+    setEditingCategoryRemoteStore(portal.remote_store)
+  }
+
+  const cancelEditingCategory = () => {
+    setEditingCategory(null)
+    setEditingCategoryName('')
+    setEditingCategoryIndex('')
+    setCategoryMinStockEdits({})
+    setEditingCategoryShowOnOrder(true)
+    setEditingCategoryRemoteStore(false)
+  }
+
+  const handleSaveCategory = async (
+    oldCategory: string,
+    categoryProducts: Product[]
+  ) => {
+    if (!selectedBrand || savingCategory) return
+
+    const trimmed = editingCategoryName.trim()
+    const newCategoryValue = trimmed || null
+    const newDisplay = trimmed || 'Uncategorized'
+    const nameChanged = newDisplay !== oldCategory
+
+    const indexTrimmed = editingCategoryIndex.trim()
+    let newSortIndex: number | null = null
+    if (indexTrimmed !== '') {
+      const parsed = parseInt(indexTrimmed, 10)
+      if (Number.isNaN(parsed)) {
+        alert('Sort index must be a whole number.')
+        return
+      }
+      newSortIndex = parsed
+    }
+
+    const storedIndex = categorySortOrders[oldCategory]
+    const indexChanged = newSortIndex !== (storedIndex ?? null)
+
+    const minStockChanged = categoryProducts.some((p) => {
+      const id = p.id
+      if (!id) return false
+      return (categoryMinStockEdits[id] ?? 0) !== (p.minimum_stock ?? 0)
+    })
+
+    const storedPortal =
+      categoryPortalSettings[oldCategory] ?? DEFAULT_CATEGORY_PORTAL_SETTINGS
+
+    const portalChanged =
+      editingCategoryShowOnOrder !== storedPortal.show_on_order_portal ||
+      editingCategoryRemoteStore !== storedPortal.remote_store
+
+    if (!nameChanged && !indexChanged && !minStockChanged && !portalChanged) {
+      cancelEditingCategory()
+      return
+    }
+
+    const productIds = categoryProducts.map((p) => p.id).filter(Boolean) as string[]
+    const oldKey = categorySortKey(oldCategory)
+    const newKey = categorySortKey(newDisplay)
+
+    setSavingCategory(true)
+    try {
+      if (nameChanged && productIds.length > 0) {
+        const { error } = await supabase
+          .from('products')
+          .update({ category: newCategoryValue })
+          .in('id', productIds)
+          .eq('brand_id', selectedBrand.id)
+
+        if (error) throw error
+
+        setProducts((prev) =>
+          prev.map((p) =>
+            productIds.includes(p.id!) ? { ...p, category: newCategoryValue } : p
+          )
+        )
+      }
+
+      if (nameChanged && oldKey !== newKey) {
+        await supabase
+          .from('product_category_sort')
+          .delete()
+          .eq('brand_id', selectedBrand.id)
+          .eq('category_name', oldKey)
+      }
+
+      const shouldPersistCategoryRow =
+        portalChanged || nameChanged || newSortIndex !== null || indexChanged
+
+      if (shouldPersistCategoryRow) {
+        const sortIndexToSave =
+          newSortIndex ??
+          categorySortOrders[newDisplay] ??
+          categorySortOrders[oldCategory] ??
+          0
+        const { error: sortError } = await supabase
+          .from('product_category_sort')
+          .upsert(
+            {
+              brand_id: selectedBrand.id,
+              category_name: newKey,
+              sort_index: sortIndexToSave,
+              show_on_order_portal: editingCategoryShowOnOrder,
+              remote_store: editingCategoryRemoteStore,
+              yield_per_batch: storedPortal.yield_per_batch,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'brand_id,category_name' }
+          )
+        if (sortError) throw sortError
+      } else if (indexChanged && newSortIndex === null) {
+        await supabase
+          .from('product_category_sort')
+          .delete()
+          .eq('brand_id', selectedBrand.id)
+          .eq('category_name', newKey)
+      }
+
+      setCategorySortOrders((prev) => {
+        const next = { ...prev }
+        if (nameChanged) delete next[oldCategory]
+        if (shouldPersistCategoryRow && newSortIndex !== null) {
+          next[newDisplay] = newSortIndex
+        } else if (shouldPersistCategoryRow) {
+          next[newDisplay] =
+            newSortIndex ??
+            categorySortOrders[newDisplay] ??
+            categorySortOrders[oldCategory] ??
+            0
+        } else if (indexChanged) {
+          delete next[newDisplay]
+        }
+        return next
+      })
+
+      setCategoryPortalSettings((prev) => {
+        const next = { ...prev }
+        if (nameChanged) delete next[oldCategory]
+        if (shouldPersistCategoryRow) {
+          next[newDisplay] = {
+            show_on_order_portal: editingCategoryShowOnOrder,
+            remote_store: editingCategoryRemoteStore,
+            yield_per_batch: storedPortal.yield_per_batch,
+          }
+        }
+        return next
+      })
+
+      if (minStockChanged && productIds.length > 0) {
+        const minStockResults = await Promise.all(
+          productIds.map((id) =>
+            supabase
+              .from('products')
+              .update({ minimum_stock: categoryMinStockEdits[id] ?? 0 })
+              .eq('id', id)
+              .eq('brand_id', selectedBrand.id)
+          )
+        )
+        const minStockError = minStockResults.find((r) => r.error)?.error
+        if (minStockError) throw minStockError
+
+        setProducts((prev) =>
+          prev.map((p) => {
+            const id = p.id
+            if (!id || !productIds.includes(id)) return p
+            return { ...p, minimum_stock: categoryMinStockEdits[id] ?? 0 }
+          })
+        )
+      }
+
+      cancelEditingCategory()
+    } catch (error) {
+      console.error('Error saving category:', error)
+      alert(
+        'Failed to save category. Run migrations/product-category-sort.sql, product-category-portal-settings.sql, and product-minimum-stock.sql if tables or columns are missing.'
+      )
+    } finally {
+      setSavingCategory(false)
+    }
+  }
 
   useEffect(() => {
     // Close dropdown when clicking outside
@@ -211,37 +659,42 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
           category,
           unit,
           price,
+          minimum_stock,
           initial_stock,
           production,
           released,
           reserved,
+          linked_material_id,
+          material_inventory_uom,
           created_at,
           updated_at
         `)
         .eq('brand_id', selectedBrand.id)
         .order('name')
-      
+
       if (error) {
         console.error('Error fetching products:', error)
         alert('Failed to load products. Please try refreshing the page.')
         return
       }
-      
-      if (data) {
-        console.log('Products fetched successfully:', data.length, 'items')
-        
-        // Calculate computed fields on the client side for better performance
-        const productsWithCalculations = data.map(product => ({
-          ...product,
-          product_name: product.name,
-          brand_name: selectedBrand.name,
-          brand_slug: selectedBrand.slug,
-          final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
-          available_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0) - (product.reserved || 0)
-        }))
-        
-        setProducts(productsWithCalculations)
-      }
+      const rows = data || []
+      console.log('Products fetched successfully:', rows.length, 'items')
+
+      const productsWithCalculations = rows.map((product) => ({
+        ...product,
+        product_name: product.name,
+        brand_name: selectedBrand.name,
+        brand_slug: selectedBrand.slug,
+        final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
+        available_stock:
+          (product.initial_stock || 0) +
+          (product.production || 0) -
+          (product.released || 0) -
+          (product.reserved || 0),
+      }))
+
+      setProducts(productsWithCalculations)
+      await fetchCategorySortOrders(selectedBrand.id)
     } catch (error) {
       console.error('Error fetching products:', error)
       alert('Failed to load products. Please check your internet connection and try again.')
@@ -253,30 +706,82 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
   // Memoized grouped products calculation
   const groupedProducts = useMemo(() => {
     const grouped = products.reduce((acc, product) => {
-      const category = product.category || 'Uncategorized'
+      const category = productCategoryDisplayName(product.category)
       if (!acc[category]) {
         acc[category] = []
       }
       acc[category].push(product)
       return acc
     }, {} as Record<string, Product[]>)
-    
-    // Sort categories alphabetically, with 'Uncategorized' last
+
     const sortedCategories = Object.keys(grouped).sort((a, b) => {
-      if (a === 'Uncategorized') return 1
-      if (b === 'Uncategorized') return -1
+      const rankA = categorySortRank(a, categorySortOrders[a])
+      const rankB = categorySortRank(b, categorySortOrders[b])
+      if (rankA !== rankB) return rankA - rankB
       return a.localeCompare(b)
     })
-    
-    return sortedCategories.map(category => ({
+
+    return sortedCategories.map((category) => ({
       category,
-      products: grouped[category]
+      sortIndex: categorySortOrders[category],
+      products: grouped[category],
     }))
-  }, [products])
+  }, [products, categorySortOrders])
+
+  const mainCycleCountProducts = useMemo(
+    () =>
+      groupedProducts
+        .filter((g) => g.sortIndex !== 0)
+        .flatMap((g) => g.products),
+    [groupedProducts]
+  )
 
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!selectedBrand) return
+
+    const categoryTrimmed = newProduct.category.trim()
+    if (!categoryTrimmed) {
+      alert('Category is required.')
+      return
+    }
+
+    const addingNewCategory = isNewCategoryName(
+      newProduct.category,
+      categories,
+      categorySortOrders
+    )
+    const newCategoryDisplay = productCategoryDisplayName(categoryTrimmed)
+    const indexTrimmed = newCategorySortIndex.trim()
+    if (addingNewCategory && !indexTrimmed) {
+      alert('Sort index is required for a new category.')
+      return
+    }
+    let newCategorySortIndexValue = 0
+    if (addingNewCategory) {
+      const parsed = parseInt(indexTrimmed, 10)
+      if (Number.isNaN(parsed)) {
+        alert('Sort index must be a whole number.')
+        return
+      }
+      newCategorySortIndexValue = parsed
+    }
+
+    const priceTrimmed = addProductPrice.trim()
+    const price =
+      priceTrimmed === '' ? 0 : Number.parseFloat(priceTrimmed)
+    if (priceTrimmed !== '' && Number.isNaN(price)) {
+      alert('Price must be a valid number.')
+      return
+    }
+
+    const stockTrimmed = addProductInitialStock.trim()
+    const initialStock =
+      stockTrimmed === '' ? 0 : Number.parseInt(stockTrimmed, 10)
+    if (stockTrimmed !== '' && Number.isNaN(initialStock)) {
+      alert('Initial stock must be a whole number.')
+      return
+    }
 
     try {
       const { data, error } = await supabase
@@ -286,10 +791,10 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
             brand_id: selectedBrand.id,
             name: newProduct.name,
             sku: newProduct.sku || null,
-            category: newProduct.category || null,
+            category: categoryTrimmed,
             unit: newProduct.unit,
-            price: newProduct.price,
-            initial_stock: newProduct.initial_stock,
+            price,
+            initial_stock: initialStock,
             production: newProduct.production,
             released: newProduct.released,
             reserved: newProduct.reserved
@@ -314,7 +819,48 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
           available_stock: (newProductData.initial_stock || 0) + (newProductData.production || 0) - (newProductData.released || 0) - (newProductData.reserved || 0)
         }
         setProducts(prev => [...prev, computedProduct])
-        setNewProduct({ name: '', sku: '', category: '', unit: 'pcs', price: 0, initial_stock: 0, production: 0, released: 0, reserved: 0 })
+
+        if (addingNewCategory) {
+          const { error: sortError } = await supabase.from('product_category_sort').upsert(
+            {
+              brand_id: selectedBrand.id,
+              category_name: categorySortKey(newCategoryDisplay),
+              sort_index: newCategorySortIndexValue,
+              show_on_order_portal: newCategoryShowOnOrder,
+              remote_store: newCategoryRemoteStore,
+              yield_per_batch: DEFAULT_CATEGORY_PORTAL_SETTINGS.yield_per_batch,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'brand_id,category_name' }
+          )
+          if (sortError) {
+            console.error('Error saving new category settings:', sortError)
+            alert(
+              'Product was added, but category settings could not be saved: ' + sortError.message
+            )
+          } else {
+            setCategorySortOrders((prev) => ({
+              ...prev,
+              [newCategoryDisplay]: newCategorySortIndexValue,
+            }))
+            setCategoryPortalSettings((prev) => ({
+              ...prev,
+              [newCategoryDisplay]: {
+                show_on_order_portal: newCategoryShowOnOrder,
+                remote_store: newCategoryRemoteStore,
+                yield_per_batch: DEFAULT_CATEGORY_PORTAL_SETTINGS.yield_per_batch,
+              },
+            }))
+            setCategories((prev) => {
+              if (prev.some((c) => c.toLowerCase() === newCategoryDisplay.toLowerCase())) {
+                return prev
+              }
+              return [...prev, newCategoryDisplay].sort((a, b) => a.localeCompare(b))
+            })
+          }
+        }
+
+        resetAddProductForm()
         setShowAddForm(false)
       }
     } catch (error) {
@@ -551,9 +1097,15 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
   }
 
   const handleDeleteProductionItem = async (reportId: string, itemIndex: number) => {
-    if (!selectedReport || !confirm('Are you sure you want to delete this item from the production report?')) {
-      return
-    }
+    if (!selectedReport) return
+
+    const confirmed = await requestAdminPassword({
+      title: 'Delete production item',
+      message:
+        'Are you sure you want to delete this item from the production report?\n\nEnter admin password to confirm.',
+      confirmLabel: 'Delete',
+    })
+    if (!confirmed) return
 
     setDeletingItem(`${reportId}-${itemIndex}`)
     try {
@@ -604,13 +1156,29 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
   }
 
   const handleDeleteProduct = async (productId: string) => {
-    if (!confirm('Are you sure you want to delete this product?')) return
+    const productToDelete = products.find((p) => (p.product_id || p.id) === productId)
+    const isComponent =
+      productToDelete != null &&
+      isProductBomComponent(productToDelete, categorySortOrders)
+
+    const confirmed = await requestAdminPassword({
+      title: 'Delete product',
+      message: isComponent
+        ? 'Delete this component product from Product Inventory? The linked procurement material (Component category) will also be removed.\n\nEnter admin password to confirm.'
+        : 'Are you sure you want to delete this product?\n\nEnter admin password to confirm.',
+      confirmLabel: 'Delete',
+    })
+    if (!confirmed) return
 
     // Optimistic UI update - remove product immediately
     const previousProducts = products
     setProducts(products.filter(p => (p.product_id || p.id) !== productId))
 
     try {
+      if (isComponent) {
+        await deleteLinkedComponentMaterials(productId)
+      }
+
       const { error } = await supabase
         .from('products')
         .delete()
@@ -648,14 +1216,32 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">
-            Inventory
+            Product Inventory
           </h1>
           <p className="text-sm text-gray-600">
             Manage finished goods and stock levels for {selectedBrand.name}
           </p>
         </div>
         {!guestMode && (
-        <div className="flex space-x-3">
+        <div className="flex flex-wrap gap-2 sm:gap-3">
+          {mainCycleCountProducts.length > 0 ? (
+            <button
+              type="button"
+              onClick={() =>
+                setCycleCountPanel({
+                  products: mainCycleCountProducts,
+                  categoryScope: null,
+                  scopeTitle: 'Product cycle count',
+                  scopeDescription: 'Non index-0 categories',
+                  groupByCategory: true,
+                })
+              }
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-indigo-700 border border-indigo-200 bg-white rounded-lg hover:bg-indigo-50 shadow-sm"
+            >
+              <ClipboardCheck className="h-4 w-4" />
+              Cycle count
+            </button>
+          ) : null}
           <button
             onClick={() => {
               if (productionInputMode) {
@@ -698,13 +1284,6 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
             </button>
           )}
           <button
-            onClick={() => setShowProductionSchedule(true)}
-            className="flex items-center space-x-2 px-4 py-2 text-white rounded-lg transition-colors bg-indigo-600 hover:bg-indigo-700"
-          >
-            <Calendar className="h-4 w-4" />
-            <span>Production Schedule</span>
-          </button>
-          <button
             onClick={() => {
               setShowProductionReports(true)
               fetchProductionReports()
@@ -739,14 +1318,14 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
 
       {/* Add Product Modal */}
       {showAddForm && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg w-full max-w-md shadow-xl max-h-[90vh] overflow-y-auto p-5">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Add New Product</h3>
               <button
                 onClick={() => {
                   setShowAddForm(false)
-                  setNewProduct({ name: '', sku: '', category: '', unit: 'pcs', price: 0, initial_stock: 0, production: 0, released: 0, reserved: 0 })
+                  resetAddProductForm()
                 }}
                 className="text-gray-400 hover:text-gray-600"
               >
@@ -755,7 +1334,7 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
             </div>
             
             <form onSubmit={handleAddProduct} className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Product Name *
@@ -769,62 +1348,120 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                     placeholder="Enter product name"
                   />
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    SKU (Auto-generated)
-                  </label>
-                  <input
-                    type="text"
-                    value={newProduct.sku}
-                    onChange={(e) => setNewProduct({...newProduct, sku: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-gray-50"
-                    placeholder="Auto-generated SKU"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    SKU format: {getBrandPrefix(selectedBrand.slug)}XXX (e.g., {getBrandPrefix(selectedBrand.slug)}001)
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Category
-                  </label>
-                  <div className="relative category-dropdown">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="min-w-0">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      SKU
+                    </label>
                     <input
                       type="text"
-                      value={newProduct.category}
-                      onChange={(e) => {
-                        setNewProduct({...newProduct, category: e.target.value})
-                        setShowCategoryDropdown(true)
-                      }}
-                      onFocus={() => setShowCategoryDropdown(true)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="Enter or select category"
+                      readOnly
+                      value={newProduct.sku}
+                      className="w-full px-3 py-2 border border-gray-200 rounded-lg bg-gray-50 text-gray-700 cursor-default"
+                      placeholder="—"
                     />
-                    {showCategoryDropdown && categories.length > 0 && (
-                      <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                        {categories.map((category) => (
-                          <button
-                            key={category}
-                            type="button"
-                            onClick={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              setNewProduct({...newProduct, category})
-                              setShowCategoryDropdown(false)
-                            }}
-                            onMouseDown={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                            }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-100 text-sm text-gray-900"
-                          >
-                            {category}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Category *
+                    </label>
+                    <div className="relative category-dropdown">
+                      <input
+                        type="text"
+                        required
+                        value={newProduct.category}
+                        onChange={(e) => {
+                          setNewProduct({...newProduct, category: e.target.value})
+                          setShowCategoryDropdown(true)
+                        }}
+                        onFocus={() => setShowCategoryDropdown(true)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="Enter or select"
+                      />
+                      {showCategoryDropdown && categories.length > 0 && (
+                        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                          {categories.map((category) => (
+                            <button
+                              key={category}
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                setNewProduct({...newProduct, category})
+                                setShowCategoryDropdown(false)
+                              }}
+                              onMouseDown={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                              }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-100 text-sm text-gray-900"
+                            >
+                              {category}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
+                {isAddingNewCategory && (
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
+                    <p className="text-xs text-gray-600">
+                      New category — configure sort order and order portal visibility.
+                    </p>
+                    <div className="w-28">
+                      <div className="flex items-center gap-1 mb-1">
+                        <label className="text-xs font-medium text-gray-600">Index *</label>
+                        <span className="relative group">
+                          <button
+                            type="button"
+                            className="p-0.5 text-gray-400 hover:text-gray-600 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            aria-label="Sort index guide"
+                          >
+                            <Info className="h-3.5 w-3.5" />
+                          </button>
+                          <span
+                            role="tooltip"
+                            className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden w-52 rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block"
+                          >
+                            {CATEGORY_SORT_INDEX_HELP_LINES.map((line) => (
+                              <span key={line} className="block">
+                                {line}
+                              </span>
+                            ))}
+                          </span>
+                        </span>
+                      </div>
+                      <input
+                        type="number"
+                        required
+                        value={newCategorySortIndex}
+                        onChange={(e) => setNewCategorySortIndex(e.target.value)}
+                        className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-x-5">
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={newCategoryShowOnOrder}
+                          onChange={(e) => setNewCategoryShowOnOrder(e.target.checked)}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Show on order portal</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={newCategoryRemoteStore}
+                          onChange={(e) => setNewCategoryRemoteStore(e.target.checked)}
+                          className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                        />
+                        <span>Remote store only</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
                 {/* Initial Stock, Unit, and Price in same row */}
                 <div className="grid grid-cols-3 gap-4">
                   <div>
@@ -834,10 +1471,11 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                     <input
                       type="number"
                       min="0"
-                      value={newProduct.initial_stock}
-                      onChange={(e) => setNewProduct({...newProduct, initial_stock: parseInt(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="0"
+                      step="1"
+                      value={addProductInitialStock}
+                      onChange={(e) => setAddProductInitialStock(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                      placeholder=""
                     />
                   </div>
                   <div>
@@ -868,11 +1506,11 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                     <input
                       type="number"
                       min="0"
-                      step="0.01"
-                      value={newProduct.price}
-                      onChange={(e) => setNewProduct({...newProduct, price: parseFloat(e.target.value) || 0})}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="0.00"
+                      step="1"
+                      value={addProductPrice}
+                      onChange={(e) => setAddProductPrice(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                      placeholder=""
                     />
                   </div>
                 </div>
@@ -883,7 +1521,7 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                   type="button"
                   onClick={() => {
                     setShowAddForm(false)
-                    setNewProduct({ name: '', sku: '', category: '', unit: 'pcs', price: 0, initial_stock: 0, production: 0, released: 0, reserved: 0 })
+                    resetAddProductForm()
                   }}
                   className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
                 >
@@ -914,9 +1552,19 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
           {[...Array(2)].map((_, categoryIndex) => (
             <div key={categoryIndex} className="bg-white rounded-lg border shadow-sm overflow-hidden">
               {/* Category header skeleton */}
-              <div className="bg-gray-50 px-6 py-3 border-b">
+              <div className={`px-6 py-3 border-b ${
+                theme === 'green' ? 'bg-green-100 border-green-200' :
+                theme === 'red' ? 'bg-red-100 border-red-200' :
+                theme === 'yellow' ? 'bg-yellow-100 border-yellow-200' :
+                'bg-blue-100 border-blue-200'
+              }`}>
                 <div className="animate-pulse">
-                  <div className="h-6 bg-gray-200 rounded w-48"></div>
+                  <div className={`h-6 rounded w-48 ${
+                    theme === 'green' ? 'bg-green-200' :
+                    theme === 'red' ? 'bg-red-200' :
+                    theme === 'yellow' ? 'bg-yellow-200' :
+                    'bg-blue-200'
+                  }`}></div>
                 </div>
               </div>
               
@@ -959,12 +1607,168 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
         </div>
       ) : (
         <div className="space-y-6">
-          {groupedProducts.map(({ category, products: categoryProducts }) => (
+          {groupedProducts.map(({ category, sortIndex, products: categoryProducts }) => {
+            const isZeroIndexCategory = sortIndex === 0
+            const headerTheme = categoryHeaderThemeClasses(theme, sortIndex)
+            return (
             <div key={category} className="bg-white rounded-lg border shadow-sm overflow-hidden hover:shadow-md transition-shadow duration-200 ease-in-out">
-              <div className="bg-gray-50 px-6 py-3 border-b hover:bg-gray-100 transition-colors duration-200 ease-in-out">
-                <h3 className="text-lg font-medium text-gray-900">
-                  {category} ({categoryProducts.length} {categoryProducts.length === 1 ? 'product' : 'products'})
-                </h3>
+              <div className={`px-6 py-3 border-b transition-colors duration-200 ease-in-out ${headerTheme.bar}`}>
+                {editingCategory === category ? (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-end gap-2">
+                    <div className="w-20">
+                      <div className="flex items-center gap-1 mb-1.5">
+                        <label className="text-xs font-medium text-gray-600">Index</label>
+                        <span className="relative group">
+                          <button
+                            type="button"
+                            className="p-0.5 text-gray-400 hover:text-gray-600 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            aria-label="Sort index guide"
+                          >
+                            <Info className="h-3.5 w-3.5" />
+                          </button>
+                          <span
+                            role="tooltip"
+                            className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden w-52 rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs leading-relaxed text-gray-600 shadow-lg group-hover:block group-focus-within:block"
+                          >
+                            {CATEGORY_SORT_INDEX_HELP_LINES.map((line) => (
+                              <span key={line} className="block">
+                                {line}
+                              </span>
+                            ))}
+                          </span>
+                        </span>
+                      </div>
+                      <input
+                        type="number"
+                        value={editingCategoryIndex}
+                        onChange={(e) => setEditingCategoryIndex(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveCategory(category, categoryProducts)
+                          if (e.key === 'Escape') cancelEditingCategory()
+                        }}
+                        placeholder="—"
+                        className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                        disabled={savingCategory}
+                      />
+                    </div>
+                    <div className="w-48 sm:w-56">
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Category name</label>
+                      <input
+                        type="text"
+                        value={editingCategoryName}
+                        onChange={(e) => setEditingCategoryName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveCategory(category, categoryProducts)
+                          if (e.key === 'Escape') cancelEditingCategory()
+                        }}
+                        placeholder="Category name"
+                        className="w-full max-w-full px-3 py-1.5 border border-gray-300 rounded-lg text-sm bg-white"
+                        autoFocus
+                        disabled={savingCategory}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleSaveCategory(category, categoryProducts)}
+                      disabled={savingCategory}
+                      className={`flex items-center gap-1 px-3 py-1.5 text-white text-sm rounded-lg disabled:opacity-50 ${
+                        theme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                        theme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                        theme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                        'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      <Save className="h-4 w-4" />
+                      {savingCategory ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelEditingCategory}
+                      disabled={savingCategory}
+                      className="px-3 py-1.5 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-x-5">
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={editingCategoryShowOnOrder}
+                          onChange={(e) => setEditingCategoryShowOnOrder(e.target.checked)}
+                          disabled={savingCategory}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Show on order portal</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={editingCategoryRemoteStore}
+                          onChange={(e) => setEditingCategoryRemoteStore(e.target.checked)}
+                          disabled={savingCategory}
+                          className="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                        />
+                        <span>Remote store only</span>
+                      </label>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className={`text-lg font-medium flex items-center gap-2 ${headerTheme.title}`}>
+                      <span>
+                        {category} ({categoryProducts.length} {categoryProducts.length === 1 ? 'product' : 'products'})
+                      </span>
+                      {(categoryPortalSettings[category]?.show_on_order_portal === false ||
+                        categoryPortalSettings[category]?.remote_store) && (
+                        <span className="flex flex-wrap gap-1.5">
+                          {categoryPortalSettings[category]?.show_on_order_portal === false ? (
+                            <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-200 text-gray-700">
+                              Hidden on order
+                            </span>
+                          ) : null}
+                          {categoryPortalSettings[category]?.remote_store ? (
+                            <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-100 text-purple-800">
+                              Remote store only
+                            </span>
+                          ) : null}
+                        </span>
+                      )}
+                    </h3>
+                    {!guestMode && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        {isZeroIndexCategory && categoryProducts.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCycleCountPanel({
+                                products: categoryProducts,
+                                categoryScope: category,
+                                scopeTitle: `Cycle count — ${category}`,
+                                scopeDescription: `Index 0 · ${category}`,
+                                groupByCategory: false,
+                              })
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-indigo-700 border border-indigo-200 bg-white rounded-md hover:bg-indigo-50"
+                            title={`Cycle count for ${category}`}
+                          >
+                            <ClipboardCheck className="h-3.5 w-3.5" />
+                            Cycle count
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => startEditingCategory(category)}
+                          title="Edit category name and sort index"
+                          className={`p-1.5 rounded-lg transition-colors ${headerTheme.editBtn}`}
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
@@ -1002,14 +1806,36 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                   </th>
                   {!guestMode && (
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
-                    Actions
+                    {editingCategory === category ? 'Min Stock' : 'Actions'}
                   </th>
                   )}
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {categoryProducts.map((product) => (
-                  <tr key={product.product_id || product.id} className="hover:bg-blue-100">
+                {categoryProducts.map((product) => {
+                  const productKey = product.product_id || product.id
+                  const isCategoryEditMode = editingCategory === category
+                  const minStock = isCategoryEditMode
+                    ? (categoryMinStockEdits[productKey] ?? product.minimum_stock ?? 0)
+                    : (product.minimum_stock ?? 0)
+                  const availableQty = productionInputMode
+                    ? ((product.initial_stock || 0) +
+                        (productionValues[productKey] || product.production || 0) -
+                        (product.released || 0)) -
+                      (product.reserved || 0)
+                    : editingProduct?.id === productKey
+                      ? ((editingProduct.initial_stock || 0) +
+                          (editingProduct.production || 0) -
+                          (editingProduct.released || 0)) -
+                        (editingProduct.reserved || 0)
+                      : product.available_stock || 0
+                  const availableCritical = isAvailableCritical(availableQty, minStock)
+                  const availableClass = getAvailableStockTextClass(availableQty, minStock)
+                  const isConsumable = isProductConsumableSupply(product, categorySortOrders)
+                  const isComponent = isProductBomComponent(product, categorySortOrders)
+
+                  return (
+                  <tr key={productKey} className="hover:bg-blue-100">
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-medium text-gray-900">
                       {editingProduct?.id === (product.product_id || product.id) ? (
                         <input
@@ -1019,7 +1845,27 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                           className="w-full max-w-44 px-2 h-6 border border-gray-300 rounded text-sm"
                         />
                       ) : (
-                        product.product_name || product.name
+                        <button
+                          type="button"
+                          onClick={() =>
+                            isConsumable
+                              ? setMaterialLinkProduct(product)
+                              : setBomProduct(product)
+                          }
+                          className="text-left px-2 py-1 -mx-2 rounded-md transition-colors text-gray-900 hover:bg-blue-200"
+                          title={
+                            isConsumable
+                              ? 'Materials inventory link (supplies/consumable)'
+                              : 'View bill of materials'
+                          }
+                        >
+                          {product.product_name || product.name}
+                          {isConsumable && product.linked_material_id ? (
+                            <span className="ml-1 text-[10px] font-medium text-emerald-700">
+                              linked
+                            </span>
+                          ) : null}
+                        </button>
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-500">
@@ -1057,13 +1903,18 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-medium text-green-600">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
+                      {editingProduct?.id === productKey ? (
                         <input
                           type="number"
                           min="0"
                           step="0.01"
                           value={editingProduct.price === 0 ? '' : editingProduct.price || ''}
-                          onChange={(e) => setEditingProduct({...editingProduct, price: e.target.value === '' ? 0 : parseFloat(e.target.value) || 0})}
+                          onChange={(e) =>
+                            setEditingProduct({
+                              ...editingProduct,
+                              price: e.target.value === '' ? 0 : parseFloat(e.target.value) || 0,
+                            })
+                          }
                           className="w-full max-w-20 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
                       ) : (
@@ -1145,22 +1996,48 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                         product.reserved || 0
                       )}
                     </td>
-                    <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-semibold text-emerald-600">
-                      {productionInputMode ? (
-                        ((product.initial_stock || 0) + (productionValues[product.product_id || product.id] || product.production || 0) - (product.released || 0)) - (product.reserved || 0)
-                      ) : editingProduct?.id === (product.product_id || product.id) ? (
-                        ((editingProduct.initial_stock || 0) + (editingProduct.production || 0) - (editingProduct.released || 0)) - (editingProduct.reserved || 0)
-                      ) : (
-                        product.available_stock || 0
-                      )}
+                    <td
+                      className={`px-6 py-2 h-10 whitespace-nowrap text-sm tabular-nums ${availableClass}`}
+                      title={availableCritical ? 'Critical stock level' : undefined}
+                    >
+                      {availableQty}
+                      {availableCritical ? '*' : ''}
                     </td>
                     {!guestMode && (
                     <td className="px-6 py-2 whitespace-nowrap text-sm text-gray-500">
+                      {isCategoryEditMode ? (
+                        <input
+                          type="number"
+                          min="0"
+                          value={
+                            categoryMinStockEdits[productKey] === 0
+                              ? ''
+                              : categoryMinStockEdits[productKey] ?? ''
+                          }
+                          onChange={(e) =>
+                            setCategoryMinStockEdits({
+                              ...categoryMinStockEdits,
+                              [productKey]:
+                                e.target.value === '' ? 0 : parseInt(e.target.value, 10) || 0,
+                            })
+                          }
+                          className="w-full max-w-20 px-2 h-6 border border-gray-300 rounded text-sm text-center text-gray-900 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                        />
+                      ) : (
                       <div className="flex space-x-2">
                         {editingProduct?.id === (product.product_id || product.id) ? (
                           <>
                             <button
-                              onClick={() => handleUpdateProduct(editingProduct)}
+                              onClick={async () => {
+                                if (!editingProduct) return
+                                const confirmed = await requestAdminPassword({
+                                  title: 'Save product changes',
+                                  message:
+                                    'Enter admin password to save changes to this product.',
+                                  confirmLabel: 'Save',
+                                })
+                                if (confirmed) handleUpdateProduct(editingProduct)
+                              }}
                               className={`p-1 rounded ${
                                 theme === 'green' ? 'text-green-600 hover:text-green-900 hover:bg-green-100' :
                                 theme === 'red' ? 'text-red-600 hover:text-red-900 hover:bg-red-100' :
@@ -1181,6 +2058,42 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                           </>
                         ) : (
                           <>
+                            {isConsumable ? (
+                              <button
+                                type="button"
+                                onClick={() => setReceiveProduct(product)}
+                                className={`p-1 rounded ${
+                                  theme === 'green'
+                                    ? 'text-green-600 hover:text-green-900 hover:bg-green-100'
+                                    : theme === 'red'
+                                      ? 'text-red-600 hover:text-red-900 hover:bg-red-100'
+                                      : theme === 'yellow'
+                                        ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100'
+                                        : 'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
+                                }`}
+                                title="Import materials"
+                              >
+                                <ArrowDownToLine className="h-4 w-4" />
+                              </button>
+                            ) : null}
+                            {isComponent ? (
+                              <button
+                                type="button"
+                                onClick={() => setExportComponentProduct(product)}
+                                className={`p-1 rounded ${
+                                  theme === 'green'
+                                    ? 'text-green-600 hover:text-green-900 hover:bg-green-100'
+                                    : theme === 'red'
+                                      ? 'text-red-600 hover:text-red-900 hover:bg-red-100'
+                                      : theme === 'yellow'
+                                        ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100'
+                                        : 'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
+                                }`}
+                                title="Export component to procurement"
+                              >
+                                <ArrowUpFromLine className="h-4 w-4" />
+                              </button>
+                            ) : null}
                             <button
                               onClick={() => setEditingProduct({
                                 ...product, 
@@ -1207,23 +2120,72 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
                           </>
                         )}
                       </div>
+                      )}
                     </td>
                     )}
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
-      {/* Production Schedule Modal */}
-      {showProductionSchedule && (
-        <ProductionScheduleManager
-          onClose={() => setShowProductionSchedule(false)}
+      {bomProduct && selectedBrand && (
+        <ProductBomModal
+          product={bomProduct}
+          selectedBrand={selectedBrand}
+          categorySortOrders={categorySortOrders}
+          brandProducts={products}
           theme={theme}
+          guestMode={guestMode}
+          onClose={closeBomModal}
+          onOpenProcurement={onNavigateToPurchasing}
+        />
+      )}
+
+      {materialLinkProduct && selectedBrand && (
+        <ProductMaterialLinkModal
+          product={materialLinkProduct}
+          selectedBrand={selectedBrand}
+          categorySortOrders={categorySortOrders}
+          theme={theme}
+          guestMode={guestMode}
+          onClose={() => setMaterialLinkProduct(null)}
+          onSaved={fetchProducts}
+          onOpenProcurement={onNavigateToPurchasing}
+        />
+      )}
+
+      {receiveProduct && (
+        <ProductMaterialReceiveModal
+          product={receiveProduct}
+          theme={theme}
+          guestMode={guestMode}
+          currentUsername={currentUsername}
+          onClose={() => setReceiveProduct(null)}
+          onReceived={fetchProducts}
+          onOpenMaterialLink={() => {
+            setReceiveProduct(null)
+            setMaterialLinkProduct(receiveProduct)
+          }}
+        />
+      )}
+
+      {exportComponentProduct && selectedBrand && (
+        <ProductComponentExportModal
+          product={exportComponentProduct}
+          selectedBrand={selectedBrand}
+          theme={theme}
+          guestMode={guestMode}
+          currentUsername={currentUsername}
+          requestAdminPassword={requestAdminPassword}
+          onClose={() => setExportComponentProduct(null)}
+          onExported={fetchProducts}
         />
       )}
 
@@ -1380,6 +2342,23 @@ export function ProductManager({ selectedBrand, theme = 'blue', guestMode = fals
           </div>
         </div>
       )}
+
+      {cycleCountPanel && selectedBrand && (
+        <ProductsCycleCountPanel
+          selectedBrand={selectedBrand}
+          products={cycleCountPanel.products}
+          categoryScope={cycleCountPanel.categoryScope}
+          scopeTitle={cycleCountPanel.scopeTitle}
+          scopeDescription={cycleCountPanel.scopeDescription}
+          groupByCategory={cycleCountPanel.groupByCategory}
+          categorySortOrders={categorySortOrders}
+          createdBy={currentUsername.trim() || 'Dashboard'}
+          onClose={() => setCycleCountPanel(null)}
+          onPosted={() => fetchProducts()}
+        />
+      )}
+
+      {AdminPasswordModal}
     </div>
   )
 }

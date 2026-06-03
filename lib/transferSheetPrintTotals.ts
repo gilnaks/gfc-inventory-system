@@ -9,10 +9,15 @@ export interface TransferSheetTotalsParams {
   subtotal: number
   deliveryType: string
   grandTotal: number
+  /** Shipment freight fee (dashboard override) */
+  freightFee?: number
   /** Order notes shown inside the remarks box */
   remarks?: string | null
   /** OrderManager: show row when logistics is "none" */
   showLogisticsNone?: boolean
+  /** Optional QR image for DSIR transfer import */
+  qrDataUrl?: string
+  qrCaption?: string
 }
 
 function escapeHtml(value: string): string {
@@ -29,7 +34,8 @@ function formatMoney(amount: number): string {
 
 /** Two-column totals: breakdown on the left, grand total only on the right. */
 export function renderTransferSheetTotalsSection(params: TransferSheetTotalsParams): string {
-  const { categoryTotals, subtotal, deliveryType, grandTotal, remarks, showLogisticsNone } = params
+  const { categoryTotals, subtotal, deliveryType, grandTotal, freightFee, remarks, showLogisticsNone, qrDataUrl, qrCaption } =
+    params
   const remarksText = remarks?.trim() ? escapeHtml(remarks.trim()) : ''
 
   const categoryRows = categoryTotals
@@ -82,8 +88,18 @@ export function renderTransferSheetTotalsSection(params: TransferSheetTotalsPara
   `
     : ''
 
+  const freightRow =
+    deliveryType === 'shipment'
+      ? `
+    <div class="total-row">
+      <span class="total-label">Freight fee</span>
+      <span class="total-value">+${formatMoney(Number(freightFee) || 0)}</span>
+    </div>
+  `
+      : ''
+
   return `
-    <div class="total-section total-section-two-col">
+    <div class="total-section total-section-three-col">
       <div class="total-section-breakdown">
         ${categoryRows}
         <div class="total-row">
@@ -93,6 +109,7 @@ export function renderTransferSheetTotalsSection(params: TransferSheetTotalsPara
         ${deliveryRow}
         ${pickupDiscountRow}
         ${pickupUnavailableRow}
+        ${freightRow}
         ${logisticsNoneRow}
       </div>
       <div class="total-section-grand">
@@ -106,6 +123,18 @@ export function renderTransferSheetTotalsSection(params: TransferSheetTotalsPara
             <div class="total-remarks-text">${remarksText}</div>
           </div>
         </div>
+      </div>
+      <div class="total-section-qr">
+        ${
+          qrDataUrl
+            ? `
+          <div class="total-qr-box">
+            <img src="${qrDataUrl}" alt="Transfer QR" class="total-qr-image" />
+            <div class="total-qr-caption">${escapeHtml(qrCaption || 'DSIR scan')}</div>
+          </div>
+        `
+            : `<div class="total-qr-empty">No QR</div>`
+        }
       </div>
     </div>
   `

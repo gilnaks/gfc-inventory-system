@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
 import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X, Plus, ChevronLeft, ChevronRight, Columns } from 'lucide-react'
+import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
 
 interface Brand {
   id: string
@@ -66,6 +67,7 @@ export function DSIRReportsViewer({
   showLast7DaysSummary = true,
   dsirViewerReadOnly = false,
 }: DSIRReportsViewerProps) {
+  const { requestAdminPassword, AdminPasswordModal } = useAdminPasswordConfirm()
   const [reports, setReports] = useState<DSIRReport[]>([])
   const [selectedReport, setSelectedReport] = useState<DSIRReport | null>(null)
   const [loading, setLoading] = useState(true)
@@ -899,7 +901,7 @@ export function DSIRReportsViewer({
         .order('category, name')
 
       if (error) throw error
-      setPredefinedItems(data || [])
+      setPredefinedItems((data || []).filter((item) => item.category !== 'ice_cream'))
     } catch (error) {
       console.error('Error loading predefined items:', error)
       setError('Failed to load predefined items')
@@ -954,6 +956,13 @@ export function DSIRReportsViewer({
   }
 
   const updatePredefinedItem = async (id: string, name: string, price: number, category: string, show_in_local: boolean, show_in_remote: boolean) => {
+    const confirmed = await requestAdminPassword({
+      title: 'Save item changes',
+      message: 'Enter admin password to save changes to this predefined item.',
+      confirmLabel: 'Save',
+    })
+    if (!confirmed) return
+
     setSavingItems(true)
     try {
       const updateData: any = { 
@@ -988,9 +997,12 @@ export function DSIRReportsViewer({
   }
 
   const deletePredefinedItem = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this item?')) {
-      return
-    }
+    const confirmed = await requestAdminPassword({
+      title: 'Delete item',
+      message: 'Are you sure you want to delete this item?\n\nEnter admin password to confirm.',
+      confirmLabel: 'Delete',
+    })
+    if (!confirmed) return
 
     setSavingItems(true)
     try {
@@ -1034,7 +1046,6 @@ export function DSIRReportsViewer({
   const getCategoryDisplayName = (category: string) => {
     const categoryNames: { [key: string]: string } = {
       'sales': 'Sales Inventory',
-      'ice_cream': 'Ice Cream Flavors',
       'materials': 'Materials Inventory',
       'denominations': 'Sales Reconciliation'
     }
@@ -1875,7 +1886,6 @@ export function DSIRReportsViewer({
                     >
                       <option value="">Select category</option>
                       <option value="sales">Sales Inventory</option>
-                      <option value="ice_cream">Ice Cream Flavors</option>
                       <option value="materials">Materials Inventory</option>
                       <option value="denominations">Sales Reconciliation</option>
                     </select>
@@ -2128,6 +2138,8 @@ export function DSIRReportsViewer({
           </div>
         </div>
       )}
+
+      {AdminPasswordModal}
     </div>
   )
 }
@@ -2174,7 +2186,6 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
   const getCategoryDisplayName = (category: string) => {
     const categoryNames: { [key: string]: string } = {
       'sales': 'Sales Inventory',
-      'ice_cream': 'Ice Cream Flavors',
       'materials': 'Materials Inventory',
       'denominations': 'Sales Reconciliation'
     }
@@ -2194,7 +2205,6 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
               >
                 <option value="sales">Sales Inventory</option>
-                <option value="ice_cream">Ice Cream Flavors</option>
                 <option value="materials">Materials Inventory</option>
                 <option value="denominations">Sales Reconciliation</option>
               </select>

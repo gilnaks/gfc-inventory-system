@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS admin_credentials (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   username VARCHAR(50) NOT NULL UNIQUE,
   passcode VARCHAR(20) NOT NULL,
+  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'guest')),
   is_active BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -78,6 +79,10 @@ GRANT USAGE ON SCHEMA public TO authenticated;
 GRANT USAGE ON SCHEMA public TO anon;
 
 -- Grant execute on functions
+GRANT EXECUTE ON FUNCTION authenticate_dashboard_passcode(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION authenticate_dashboard_passcode(TEXT) TO anon;
+GRANT EXECUTE ON FUNCTION validate_admin_passcode(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION validate_admin_passcode(TEXT) TO anon;
 GRANT EXECUTE ON FUNCTION validate_admin_credentials(TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION validate_admin_credentials(TEXT) TO anon;
 GRANT EXECUTE ON FUNCTION get_admin_credentials() TO authenticated;
@@ -98,8 +103,10 @@ CREATE INDEX IF NOT EXISTS idx_admin_credentials_active ON admin_credentials(is_
 -- =============================================
 
 -- Test the validation function
--- SELECT validate_admin_credentials('gfc030199'); -- Should return TRUE
--- SELECT validate_admin_credentials('wrong_passcode'); -- Should return FALSE
+-- SELECT authenticate_dashboard_passcode('gfc030199'); -- 'admin'
+-- SELECT authenticate_dashboard_passcode('030199');    -- 'guest'
+-- SELECT validate_admin_passcode('030199');              -- FALSE
+-- SELECT validate_admin_passcode('gfc030199');           -- TRUE
 
 -- View all admin credentials
 -- SELECT * FROM admin_credentials;

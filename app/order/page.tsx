@@ -7,6 +7,12 @@ import { OrderSettings } from '../components/OrderSettings'
 import { BranchSwitcher } from '../components/BranchSwitcher'
 import { ShoppingCart, MapPin, Plus, Minus, Check, LogOut, X, FileText, Edit3, Home, IceCream, Printer, Users, BarChart3, Settings, RefreshCw, Upload, Image } from 'lucide-react'
 import { formatPhilippinesDateTime } from '../../lib/timezone'
+import {
+  buildCategoryPortalMap,
+  filterProductsForOrderPortal,
+  productCategoryDisplayName,
+  type CategoryPortalSettings,
+} from '../../lib/product-category-settings'
 
 interface Location {
   id: string
@@ -15,7 +21,37 @@ interface Location {
   brand_id: string
   company_owned?: boolean
   can_access_order_features?: boolean
+  is_remote?: boolean
   brand?: Brand
+}
+
+type StoreDeliveryType = 'pickup' | 'delivery' | 'shipment'
+
+function resolveStoreDeliveryType(
+  isRemote: boolean,
+  chosen: 'pickup' | 'delivery'
+): StoreDeliveryType {
+  return isRemote ? 'shipment' : chosen
+}
+
+function orderDeliveryTypeLabel(type: string): string {
+  if (type === 'shipment') return 'Shipment'
+  if (type === 'delivery') return 'Delivery'
+  if (type === 'pickup') return 'Pickup'
+  return 'None'
+}
+
+function calculateOrderTotalFromDeliveryType(
+  subtotal: number,
+  deliveryType: string
+): number {
+  if (deliveryType === 'delivery') {
+    return subtotal >= 10000 ? subtotal : subtotal + 500
+  }
+  if (deliveryType === 'pickup') {
+    return subtotal >= 10000 ? subtotal * 0.95 : subtotal
+  }
+  return subtotal
 }
 
 interface OrderItem {
@@ -33,6 +69,9 @@ export default function OrderPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [passcode, setPasscode] = useState('')
   const [location, setLocation] = useState<Location | null>(null)
+  const [categoryPortalByKey, setCategoryPortalByKey] = useState<
+    Record<string, CategoryPortalSettings>
+  >({})
   const [redirectedFromDSIR, setRedirectedFromDSIR] = useState(false)
   
   // Data state
@@ -53,6 +92,8 @@ export default function OrderPage() {
   const [uploadingPhoto, setUploadingPhoto] = useState(false)
   const [uploadingOrderId, setUploadingOrderId] = useState<string | null>(null)
   const [deliveryType, setDeliveryType] = useState<'pickup' | 'delivery'>('delivery')
+  const isRemoteStore = !!location?.is_remote
+  const effectiveDeliveryType = resolveStoreDeliveryType(isRemoteStore, deliveryType)
   const [showBranchSwitcher, setShowBranchSwitcher] = useState(false)
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   const [showBranchSwitcherModal, setShowBranchSwitcherModal] = useState(false)
@@ -123,7 +164,7 @@ export default function OrderPage() {
             await Promise.all([
               checkPendingOrders(locationData.id),
               fetchPastOrders(locationData.id),
-              fetchProducts(locationData.brand_id)
+              loadProductsForLocation(locationData)
             ])
             
             // Clear sessionStorage after successful login
@@ -149,7 +190,7 @@ export default function OrderPage() {
             await Promise.all([
               checkPendingOrders(locationData.id),
               fetchPastOrders(locationData.id),
-              fetchProducts(locationData.brand_id)
+              loadProductsForLocation(locationData)
             ])
           } catch (error) {
             console.error('Error parsing saved data:', error)
@@ -221,7 +262,7 @@ export default function OrderPage() {
         },
         () => {
           if (!loading) {
-            fetchProducts(location.brand_id)
+            loadProductsForLocation(location)
           }
         }
       )
@@ -230,7 +271,7 @@ export default function OrderPage() {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [location?.brand_id, loading])
+  }, [location, loading])
 
   const getBrandTheme = (location: Location | null) => {
     if (!location?.brand) return 'blue'
@@ -319,7 +360,7 @@ export default function OrderPage() {
       await Promise.all([
         checkPendingOrders(data.id),
         fetchPastOrders(data.id),
-        fetchProducts(data.brand_id)
+        loadProductsForLocation(data)
       ])
       
       setSuccess(`Switched to ${data.name} successfully!`)
@@ -354,7 +395,7 @@ export default function OrderPage() {
       await Promise.all([
         checkPendingOrders(data.id),
         fetchPastOrders(data.id),
-        fetchProducts(data.brand_id)
+        loadProductsForLocation(data)
       ])
     } catch (error) {
       setError('Invalid location passcode. Please try again.')
@@ -364,16 +405,46 @@ export default function OrderPage() {
     }
   }
 
-  const fetchProducts = async (brandId: string) => {
+  const loadProductsForLocation = (loc: { brand_id: string; is_remote?: boolean }) =>
+    fetchProducts(loc.brand_id, !!loc.is_remote)
+
+  const applyOrderPortalProductFilter = (
+    list: Product[],
+    portalByKey: Record<string, CategoryPortalSettings>,
+    isRemoteBranch: boolean
+  ) => filterProductsForOrderPortal(list, portalByKey, isRemoteBranch)
+
+  const fetchProducts = async (brandId: string, isRemoteBranch = false) => {
     try {
-      const { data, error } = await supabase
-        .from('inventory_summary')
-        .select('*')
-        .eq('brand_id', brandId)
-        .order('category, product_name')
-      
-      if (error) throw error
-      setProducts(data || [])
+      const [productsRes, portalRes] = await Promise.all([
+        supabase
+          .from('inventory_summary')
+          .select('*')
+          .eq('brand_id', brandId)
+          .order('category, product_name'),
+        supabase
+          .from('product_category_sort')
+          .select('category_name, show_on_order_portal, remote_store')
+          .eq('brand_id', brandId),
+      ])
+
+      if (productsRes.error) throw productsRes.error
+
+      const portalByKey = portalRes.error
+        ? {}
+        : buildCategoryPortalMap(portalRes.data)
+      if (portalRes.error) {
+        console.warn('product_category_sort portal settings:', portalRes.error.message)
+      } else {
+        setCategoryPortalByKey(portalByKey)
+      }
+
+      const visible = applyOrderPortalProductFilter(
+        productsRes.data || [],
+        portalByKey,
+        isRemoteBranch
+      )
+      setProducts(visible)
     } catch (error) {
       console.error('Error fetching products:', error)
     }
@@ -490,15 +561,8 @@ export default function OrderPage() {
   }
 
   const calculateTotal = () => {
-    const subtotal = cartItems.reduce((total, item) => total + (item.product.price || 0) * item.quantity, 0)
-    
-    if (deliveryType === 'delivery') {
-      // Delivery fee is waived if total exceeds 10k
-      return subtotal >= 10000 ? subtotal : subtotal + 500
-    } else {
-      // Pickup discount only applies if total exceeds 10k
-      return subtotal >= 10000 ? subtotal * 0.95 : subtotal
-    }
+    const subtotal = calculateSubtotal()
+    return calculateOrderTotalFromDeliveryType(subtotal, effectiveDeliveryType)
   }
 
   const calculateSubtotal = () => {
@@ -512,7 +576,7 @@ export default function OrderPage() {
   // Group products by category
   const getProductsByCategory = () => {
     const grouped = products.reduce((acc, product) => {
-      const category = product.category || 'Other'
+      const category = productCategoryDisplayName(product.category)
       if (!acc[category]) {
         acc[category] = []
       }
@@ -532,9 +596,8 @@ export default function OrderPage() {
     // Sort categories alphabetically
     const sortedGrouped: Record<string, Product[]> = {}
     const sortedCategories = Object.keys(grouped).sort((a, b) => {
-      // Put 'Other' category at the end
-      if (a === 'Other') return 1
-      if (b === 'Other') return -1
+      if (a === 'Uncategorized') return 1
+      if (b === 'Uncategorized') return -1
       return a.toLowerCase().localeCompare(b.toLowerCase())
     })
     
@@ -557,20 +620,28 @@ export default function OrderPage() {
           .eq('brand_id', location.brand_id)
         
         if (error) throw error
-        
-        // Update products state with fresh data
-        setProducts(freshProducts || [])
+
+        const visibleProducts = applyOrderPortalProductFilter(
+          freshProducts || [],
+          categoryPortalByKey,
+          !!location.is_remote
+        )
+        setProducts(visibleProducts)
         
         // Update cart items with fresh product data
         const updatedCartItems = cartItems.map(item => {
-          const freshProduct = freshProducts?.find(p => (p.product_id || p.id) === item.product_id)
+          const freshProduct = visibleProducts.find(
+            (p) => (p.product_id || p.id) === item.product_id
+          )
           return freshProduct ? { ...item, product: freshProduct } : item
         })
         setCartItems(updatedCartItems)
         
         // Validate against fresh data
         for (const item of updatedCartItems) {
-          const freshProduct = freshProducts?.find(p => (p.product_id || p.id) === item.product_id)
+          const freshProduct = visibleProducts.find(
+            (p) => (p.product_id || p.id) === item.product_id
+          )
           if (freshProduct) {
             let availableStock = freshProduct.available_stock || 0
             
@@ -709,7 +780,7 @@ export default function OrderPage() {
           customer_name: `${location.name} Order`,
           status: 'pending',
           total_amount: totalAmount,
-          delivery_type: deliveryType
+          delivery_type: effectiveDeliveryType
         }])
         .select()
 
@@ -916,7 +987,7 @@ export default function OrderPage() {
         .from('customer_orders')
         .update({ 
           total_amount: totalAmount,
-          delivery_type: deliveryType
+          delivery_type: effectiveDeliveryType
         })
         .eq('id', pendingOrder.id)
 
@@ -955,7 +1026,10 @@ export default function OrderPage() {
         product: detail.products
       }))
       setCartItems(cartItems)
-      setDeliveryType(pendingOrder.delivery_type || 'delivery')
+      const pendingType = pendingOrder.delivery_type || 'delivery'
+      setDeliveryType(
+        pendingType === 'pickup' || pendingType === 'delivery' ? pendingType : 'delivery'
+      )
       setCurrentView('modify')
     }
   }
@@ -982,13 +1056,7 @@ export default function OrderPage() {
   // Full total with delivery fee / pickup discount (matches order creation & logistics)
   const getOrderTotalAmount = (order: any) => {
     const subtotal = getTotalAmount(order)
-    if (order.delivery_type === 'delivery') {
-      return subtotal >= 10000 ? subtotal : subtotal + 500
-    }
-    if (order.delivery_type === 'pickup') {
-      return subtotal >= 10000 ? subtotal * 0.95 : subtotal
-    }
-    return subtotal
+    return calculateOrderTotalFromDeliveryType(subtotal, order.delivery_type || 'delivery')
   }
 
   // Get returnable pans products based on brand
@@ -1497,7 +1565,7 @@ export default function OrderPage() {
                 </div>
                 <div class="info-item">
                   <span class="info-label">Logistics</span>
-                  <span class="info-value">${order.delivery_type === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                  <span class="info-value">${orderDeliveryTypeLabel(order.delivery_type || 'delivery')}</span>
                 </div>
               </div>
             </div>
@@ -1555,19 +1623,10 @@ export default function OrderPage() {
             <div class="total-section">
               ${(() => {
                 const subtotal = order.order_details.reduce((sum, detail) => sum + (detail.unit_price * detail.quantity), 0)
-                let deliveryFee = 0
-                let pickupDiscount = 0
-                let total = subtotal
-                
-                if (order.delivery_type === 'delivery') {
-                  if (subtotal < 10000) {
-                    deliveryFee = 500
-                    total = subtotal + 500
-                  }
-                } else if (order.delivery_type === 'pickup' && subtotal >= 10000) {
-                  pickupDiscount = subtotal * 0.05
-                  total = subtotal - pickupDiscount
-                }
+                const deliveryType = order.delivery_type || 'delivery'
+                const pickupDiscount =
+                  deliveryType === 'pickup' && subtotal >= 10000 ? subtotal * 0.05 : 0
+                const total = calculateOrderTotalFromDeliveryType(subtotal, deliveryType)
                 
                 return `
                   <div class="total-row">
@@ -2040,6 +2099,12 @@ export default function OrderPage() {
                           <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
                         </div>
                       )}
+                      {pendingOrder.delivery_type === 'shipment' && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-purple-700">Delivery type:</span>
+                          <span className="text-sm font-medium text-purple-800">Shipment</span>
+                        </div>
+                      )}
                       <div className="flex justify-between items-center border-t pt-2">
                         <span className="font-medium text-base">Total:</span>
                         <span className="font-semibold text-green-600 text-lg">₱{pendingOrder.total_amount?.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}</span>
@@ -2273,7 +2338,11 @@ export default function OrderPage() {
                           <div className="text-sm text-orange-700">
                             <p>Please upload your deposit slip to complete payment</p>
                             <div className="mt-2 text-xs text-orange-600">
-                              {order.delivery_type === 'delivery' ? 'Delivery Order' : 'Pickup Order'}
+                              {order.delivery_type === 'shipment'
+                                ? 'Shipment Order'
+                                : order.delivery_type === 'delivery'
+                                  ? 'Delivery Order'
+                                  : 'Pickup Order'}
                               {getTotalAmount(order) >= 10000 && order.delivery_type === 'delivery' && ' • Free delivery (Order over ₱10k)'}
                               {getTotalAmount(order) >= 10000 && order.delivery_type === 'pickup' && ' • 5% discount applied'}
                             </div>
@@ -2502,30 +2571,39 @@ export default function OrderPage() {
                       {/* Delivery Type Selection */}
                       <div className="mb-4">
                         <label className="block text-sm font-medium text-gray-700 mb-2">Delivery Type</label>
-                        <div className="flex space-x-4">
-                          <label className="flex items-center">
-                            <input
-                              type="radio"
-                              name="deliveryType"
-                              value="delivery"
-                              checked={deliveryType === 'delivery'}
-                              onChange={(e) => setDeliveryType(e.target.value as 'delivery')}
-                              className="mr-2"
-                            />
-                            <span className="text-sm">Delivery (+₱500)</span>
-                          </label>
-                          <label className="flex items-center">
-                            <input
-                              type="radio"
-                              name="deliveryType"
-                              value="pickup"
-                              checked={deliveryType === 'pickup'}
-                              onChange={(e) => setDeliveryType(e.target.value as 'pickup')}
-                              className="mr-2"
-                            />
-                            <span className="text-sm">Pickup (5% off)</span>
-                          </label>
-                        </div>
+                        {isRemoteStore ? (
+                          <div className="rounded-lg border border-purple-200 bg-purple-50 px-3 py-2">
+                            <p className="text-sm font-medium text-purple-800">Shipment</p>
+                            <p className="text-xs text-purple-700 mt-0.5">
+                              Remote store orders are shipped to your port.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="flex space-x-4">
+                            <label className="flex items-center">
+                              <input
+                                type="radio"
+                                name="deliveryType"
+                                value="delivery"
+                                checked={deliveryType === 'delivery'}
+                                onChange={(e) => setDeliveryType(e.target.value as 'delivery')}
+                                className="mr-2"
+                              />
+                              <span className="text-sm">Delivery (+₱500)</span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="radio"
+                                name="deliveryType"
+                                value="pickup"
+                                checked={deliveryType === 'pickup'}
+                                onChange={(e) => setDeliveryType(e.target.value as 'pickup')}
+                                className="mr-2"
+                              />
+                              <span className="text-sm">Pickup (5% off)</span>
+                            </label>
+                          </div>
+                        )}
                       </div>
 
                       {/* Subtotal and Total */}
@@ -2534,7 +2612,7 @@ export default function OrderPage() {
                           <span className="text-sm text-gray-600">Subtotal:</span>
                           <span className="text-sm text-gray-600">₱{calculateSubtotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                         </div>
-                        {deliveryType === 'delivery' && (
+                        {effectiveDeliveryType === 'delivery' && (
                           <div className="flex justify-between items-center">
                             <span className="text-sm text-gray-600">Delivery Fee:</span>
                             {calculateSubtotal() >= 10000 ? (
@@ -2544,13 +2622,13 @@ export default function OrderPage() {
                             )}
                           </div>
                         )}
-                        {deliveryType === 'pickup' && calculateSubtotal() >= 10000 && (
+                        {effectiveDeliveryType === 'pickup' && calculateSubtotal() >= 10000 && (
                           <div className="flex justify-between items-center">
                             <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
                             <span className="text-sm text-green-600">-₱{(calculateSubtotal() * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                           </div>
                         )}
-                        {deliveryType === 'pickup' && calculateSubtotal() < 10000 && (
+                        {effectiveDeliveryType === 'pickup' && calculateSubtotal() < 10000 && (
                           <div className="flex justify-between items-center">
                             <span className="text-sm text-gray-500">Pickup Discount:</span>
                             <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
@@ -2587,7 +2665,7 @@ export default function OrderPage() {
           <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg z-40">
             <div className="px-2 py-2">
               <div className="flex justify-between items-center mb-2 min-w-0">
-                <span className="font-medium text-sm truncate">Items: {calculateItemCount()} • {deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                <span className="font-medium text-sm truncate">Items: {calculateItemCount()} • {orderDeliveryTypeLabel(effectiveDeliveryType)}</span>
                 <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
               <button
@@ -2773,7 +2851,7 @@ export default function OrderPage() {
           <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg z-40">
             <div className="px-2 py-2">
               <div className="flex justify-between items-center mb-2 min-w-0">
-                <span className="font-medium text-sm text-gray-900 truncate">Draft: {calculateItemCount()} items • {deliveryType === 'delivery' ? 'Delivery' : 'Pickup'}</span>
+                <span className="font-medium text-sm text-gray-900 truncate">Draft: {calculateItemCount()} items • {orderDeliveryTypeLabel(effectiveDeliveryType)}</span>
                 <span className="font-bold text-base text-green-600 flex-shrink-0 ml-2">₱{calculateTotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
         </div>
               <button
@@ -2873,30 +2951,39 @@ export default function OrderPage() {
                 {/* Delivery Type Selection */}
                 <div className="mb-3 sm:mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-2">Delivery Type</label>
-                  <div className="flex space-x-4">
-                    <label className="flex items-center">
-                      <input
-                        type="radio"
-                        name="deliveryTypeModal"
-                        value="delivery"
-                        checked={deliveryType === 'delivery'}
-                        onChange={(e) => setDeliveryType(e.target.value as 'delivery')}
-                        className="mr-2"
-                      />
-                      <span className="text-sm">Delivery (+₱500)</span>
-                    </label>
-                    <label className="flex items-center">
-                      <input
-                        type="radio"
-                        name="deliveryTypeModal"
-                        value="pickup"
-                        checked={deliveryType === 'pickup'}
-                        onChange={(e) => setDeliveryType(e.target.value as 'pickup')}
-                        className="mr-2"
-                      />
-                      <span className="text-sm">Pickup (5% off)</span>
-                    </label>
-                  </div>
+                  {isRemoteStore ? (
+                    <div className="rounded-lg border border-purple-200 bg-purple-50 px-3 py-2">
+                      <p className="text-sm font-medium text-purple-800">Shipment</p>
+                      <p className="text-xs text-purple-700 mt-0.5">
+                        Remote store orders are shipped to your port.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex space-x-4">
+                      <label className="flex items-center">
+                        <input
+                          type="radio"
+                          name="deliveryTypeModal"
+                          value="delivery"
+                          checked={deliveryType === 'delivery'}
+                          onChange={(e) => setDeliveryType(e.target.value as 'delivery')}
+                          className="mr-2"
+                        />
+                        <span className="text-sm">Delivery (+₱500)</span>
+                      </label>
+                      <label className="flex items-center">
+                        <input
+                          type="radio"
+                          name="deliveryTypeModal"
+                          value="pickup"
+                          checked={deliveryType === 'pickup'}
+                          onChange={(e) => setDeliveryType(e.target.value as 'pickup')}
+                          className="mr-2"
+                        />
+                        <span className="text-sm">Pickup (5% off)</span>
+                      </label>
+                    </div>
+                  )}
                 </div>
 
                 {/* Returnable Pans Upload Section */}
@@ -2973,7 +3060,7 @@ export default function OrderPage() {
                     <span className="text-sm text-gray-600">Subtotal:</span>
                     <span className="text-sm text-gray-600">₱{calculateSubtotal().toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   </div>
-                  {deliveryType === 'delivery' && (
+                  {effectiveDeliveryType === 'delivery' && (
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-600">Delivery Fee:</span>
                       {calculateSubtotal() >= 10000 ? (
@@ -2983,13 +3070,13 @@ export default function OrderPage() {
                       )}
                     </div>
                   )}
-                  {deliveryType === 'pickup' && calculateSubtotal() >= 10000 && (
+                  {effectiveDeliveryType === 'pickup' && calculateSubtotal() >= 10000 && (
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-600">Pickup Discount (5%):</span>
                       <span className="text-sm text-green-600">-₱{(calculateSubtotal() * 0.05).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                   )}
-                  {deliveryType === 'pickup' && calculateSubtotal() < 10000 && (
+                  {effectiveDeliveryType === 'pickup' && calculateSubtotal() < 10000 && (
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-gray-500">Pickup Discount:</span>
                       <span className="text-sm text-gray-500">Not available (Order under ₱10k)</span>
@@ -3157,6 +3244,12 @@ export default function OrderPage() {
                               <div className="flex justify-between items-center text-sm">
                                 <span className="text-gray-500">Pickup Discount:</span>
                                 <span className="text-gray-500">Not available (Order under ₱10k)</span>
+                              </div>
+                            )}
+                            {order.delivery_type === 'shipment' && (
+                              <div className="flex justify-between items-center text-sm">
+                                <span className="text-purple-700">Delivery type:</span>
+                                <span className="font-medium text-purple-800">Shipment</span>
                               </div>
                             )}
                           </div>
