@@ -10,6 +10,46 @@ export function getBrandColorKey(brandName: string | undefined): BrandColorKey {
   return 'gray'
 }
 
+/** Chart / analytics hex palette keyed by brand slug or name. */
+export type BrandChartPalette = {
+  primary: string
+  secondary: string
+  soft: string
+}
+
+const DEFAULT_BRAND_CHART_PALETTE: BrandChartPalette = {
+  primary: '#2563eb',
+  secondary: '#64748b',
+  soft: '#dbeafe',
+}
+
+/**
+ * Franchise theme colors for charts and analytics:
+ * - MyChoice: green / yellow
+ * - Gelato Filipino: maroon / black
+ * - Mang Sorbetes: yellow / brown
+ */
+export function getBrandChartPalette(
+  brand: { slug?: string | null; name?: string | null } | string | null | undefined
+): BrandChartPalette {
+  const raw =
+    typeof brand === 'string'
+      ? brand
+      : `${brand?.slug || ''} ${brand?.name || ''}`
+  const key = raw.toLowerCase()
+
+  if (key.includes('mychoice')) {
+    return { primary: '#16a34a', secondary: '#eab308', soft: '#dcfce7' }
+  }
+  if (key.includes('gelato')) {
+    return { primary: '#9f1239', secondary: '#171717', soft: '#ffe4e6' }
+  }
+  if (key.includes('sorbetes')) {
+    return { primary: '#eab308', secondary: '#92400e', soft: '#fef9c3' }
+  }
+  return DEFAULT_BRAND_CHART_PALETTE
+}
+
 /** Theme slug for category headers (green / red / yellow / blue). */
 export function getBrandCategoryHeaderTheme(brandName: string | undefined): string {
   switch (getBrandColorKey(brandName)) {

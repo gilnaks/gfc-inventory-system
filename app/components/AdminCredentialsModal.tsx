@@ -92,7 +92,7 @@ export function AdminCredentialsModal({
 
   return (
     <Modal onClose={onClose} align="center">
-      <div className="mx-auto flex w-fit max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl max-h-[min(90vh,640px)]">
+      <div className="mx-auto flex w-full max-w-xl flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl max-h-[min(90vh,640px)]">
         <div className="flex shrink-0 items-start justify-between gap-3 border-b border-gray-200 px-5 py-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">GFC Admin Office</h2>
@@ -116,7 +116,7 @@ export function AdminCredentialsModal({
           ) : rows.length === 0 ? (
             <p className="px-5 py-8 text-center text-sm text-gray-500">No users found.</p>
           ) : (
-            <table className="w-max max-w-full text-sm">
+            <table className="w-full min-w-[480px] text-sm">
               <thead className="sticky top-0 z-10 border-b border-gray-200 bg-gray-50">
                 <tr>
                   <th className="px-4 py-2.5 text-left font-medium text-gray-600 whitespace-nowrap">User</th>

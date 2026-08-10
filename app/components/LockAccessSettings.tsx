@@ -63,7 +63,7 @@ export function LockAccessSettings({ locks, currentUsername, onChanged }: LockAc
   }
 
   return (
-    <div className="min-w-[480px] max-w-full border-t border-gray-200 bg-gray-50 px-5 py-4">
+    <div className="border-t border-gray-200 bg-gray-50 px-5 py-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">

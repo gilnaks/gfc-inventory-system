@@ -14,6 +14,7 @@ import { PurchasingManager, stashProcurementPoEdit } from '../components/Purchas
 import { FactoryManager } from '../components/FactoryManager'
 import { AttendanceManager } from '../components/AttendanceManager'
 import { FleetTrackingManager } from '../components/FleetTrackingManager'
+import { AnalyticsManager } from '../components/AnalyticsManager'
 import { AdminCredentialsModal } from '../components/AdminCredentialsModal'
 import { ModuleLockedNotice } from '../components/ModuleLockedNotice'
 import { useModuleAccessLocks } from '../hooks/useModuleAccessLocks'
@@ -45,6 +46,7 @@ import {
   Menu,
   Navigation,
   X,
+  LayoutDashboard,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -66,9 +68,9 @@ import {
   isGuestRole,
 } from '../../lib/dashboard-roles'
 
-const GUEST_RESTRICTED_TABS = ['accounting', 'payroll', 'reports', 'purchasing', 'attendance', 'fleet'] as const
+const GUEST_RESTRICTED_TABS = ['analytics', 'accounting', 'payroll', 'reports', 'purchasing', 'attendance', 'fleet'] as const
 const GFC_HIDDEN_TABS = ['products', 'orders', 'logistics', 'dsir', 'reports', 'branches'] as const
-type DashboardTab = 'products' | 'orders' | 'branches' | 'accounting' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing' | 'factory' | 'attendance' | 'fleet'
+type DashboardTab = 'analytics' | 'products' | 'orders' | 'branches' | 'accounting' | 'logistics' | 'dsir' | 'staff' | 'payroll' | 'reports' | 'purchasing' | 'factory' | 'attendance' | 'fleet'
 
 type DashboardNavItem = {
   id: DashboardTab
@@ -191,22 +193,29 @@ export default function DashboardPage() {
         setCurrentUsername((savedUsername || savedRole || '').trim())
       }
       
+      let savedBrandParsed: Brand | null = null
       if (savedBrand) {
         try {
-          setSelectedBrand(JSON.parse(savedBrand))
+          savedBrandParsed = JSON.parse(savedBrand)
+          setSelectedBrand(savedBrandParsed)
         } catch (error) {
           console.error('Error parsing saved brand:', error)
         }
       }
       
-      const allTabs: DashboardTab[] = ['products', 'orders', 'branches', 'accounting', 'logistics', 'dsir', 'staff', 'payroll', 'reports', 'purchasing', 'factory', 'attendance', 'fleet']
+      const allTabs: DashboardTab[] = ['analytics', 'products', 'orders', 'branches', 'accounting', 'logistics', 'dsir', 'staff', 'payroll', 'reports', 'purchasing', 'factory', 'attendance', 'fleet']
       let tabToApply = savedTab
       if (savedTab === 'billing') {
         tabToApply = 'accounting'
         localStorage.setItem('dashboard_active_tab', 'accounting')
         localStorage.setItem(ACCOUNTING_ACTIVE_SUBTAB_KEY, 'receivables')
       }
-      if (tabToApply && allTabs.includes(tabToApply as DashboardTab)) {
+      // Analytics is the GFC Main homepage: land on it on every fresh load
+      // (the saved tab only wins on retail brands or for guests).
+      if (savedBrandParsed && isFactoryBrand(savedBrandParsed) && !guest) {
+        setActiveTab('analytics')
+        localStorage.setItem('dashboard_active_tab', 'analytics')
+      } else if (tabToApply && allTabs.includes(tabToApply as DashboardTab)) {
         const blockedForGuest = guest && isGuestRestrictedTab(tabToApply)
         const blockedAccounting =
           tabToApply === 'accounting' &&
@@ -330,11 +339,12 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (isGfcMain && isGfcHiddenTab(activeTab)) {
-      setActiveTab('factory')
+      setActiveTab(isGuestSession ? 'factory' : 'analytics')
     }
     if (
       !isGfcMain &&
-      (activeTab === 'factory' ||
+      (activeTab === 'analytics' ||
+        activeTab === 'factory' ||
         activeTab === 'attendance' ||
         activeTab === 'fleet' ||
         activeTab === 'accounting' ||
@@ -343,7 +353,7 @@ export default function DashboardPage() {
     ) {
       setActiveTab('products')
     }
-  }, [isGfcMain, activeTab])
+  }, [isGfcMain, activeTab, isGuestSession])
 
   // Get brand-specific color theme
   const getBrandTheme = (brand: Brand | null) => {
@@ -402,6 +412,9 @@ export default function DashboardPage() {
 
     const items: DashboardNavItem[] = []
 
+    if (isGfcMain && !isGuestSession) {
+      items.push({ id: 'analytics', label: 'Analytics', icon: LayoutDashboard, onSelect: selectTab('analytics') })
+    }
     if (!isGfcMain) {
       items.push({ id: 'products', label: 'Inventory', icon: Package, onSelect: selectTab('products') })
       items.push({ id: 'orders', label: 'Orders', icon: ShoppingCart, onSelect: selectTab('orders') })
@@ -752,6 +765,12 @@ export default function DashboardPage() {
             />
           ) : (
             <>
+          {activeTab === 'analytics' && isGfcMain && !isGuestSession && (
+            <div className="p-4 sm:p-6">
+              <AnalyticsManager />
+            </div>
+          )}
+
           {activeTab === 'products' && selectedBrand && (
             <div className="p-4 sm:p-6">
               <ProductManager

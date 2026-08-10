@@ -33,6 +33,7 @@ export type LockableModule = {
  * sub-tabs are actually enforced declare them here.
  */
 export const LOCKABLE_MODULES: LockableModule[] = [
+  { key: 'analytics', label: 'Analytics', subTabs: [] },
   { key: 'products', label: 'Inventory', subTabs: [] },
   { key: 'orders', label: 'Orders', subTabs: [] },
   {
