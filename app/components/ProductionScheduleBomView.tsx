@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Calendar, ChevronDown, ChevronRight, Layers, Search } from 'lucide-react'
 import { getPhilippinesDate } from '../../lib/timezone'
-import { loadBrandProductionSchedule, type FactoryScheduleItem } from '../../lib/factory-schedule'
+import { loadGfcScheduleForBrand, type FactoryScheduleItem } from '../../lib/factory-schedule'
+import { isFactoryScheduleAggregateView } from '../../lib/gfc-production-catalog'
 import {
   computeLinesForScheduleItem,
   computeRunningBomTotals,
@@ -17,10 +18,19 @@ import {
   type ProductBomLine,
 } from '../../lib/production-schedule-bom'
 import { findBomStockShortages } from '../../lib/factory-bom-requirements'
+import {
+  DestinationBrandSelect,
+  type DestinationBrandOption,
+} from './DestinationBrandSelect'
 
 interface ProductionScheduleBomViewProps {
+  /** GFC factory brand id. */
   brandId: string
+  /** Destination consumer brand. */
+  forBrandId: string
   brandName?: string
+  destinationBrands?: DestinationBrandOption[]
+  onForBrandChange?: (brandId: string) => void
   theme?: string
   scheduleDate: string
   onScheduleDateChange: (date: string) => void
@@ -280,7 +290,10 @@ function DetailedBomTable({
 
 export function ProductionScheduleBomView({
   brandId,
+  forBrandId,
   brandName,
+  destinationBrands,
+  onForBrandChange,
   theme = 'blue',
   scheduleDate,
   onScheduleDateChange,
@@ -295,16 +308,16 @@ export function ProductionScheduleBomView({
   const [expandedProducts, setExpandedProducts] = useState<Record<string, boolean>>({})
 
   const loadSavedScheduleBom = useCallback(async () => {
-    if (!brandId || !scheduleDate) return
+    if (!forBrandId || !scheduleDate) return
     setLoading(true)
     try {
-      const items = await loadBrandProductionSchedule(brandId, scheduleDate)
+      const items = await loadGfcScheduleForBrand(forBrandId, scheduleDate, brandId)
       setScheduleItems(items)
 
       const productIds = items.map((i) => i.product_id)
       const [bomMap, requestQtys] = await Promise.all([
         fetchBomLinesByProductId(productIds, { factoryFloorOnly: true }),
-        fetchFactoryRequestQtysByMaterial(scheduleDate, { brandId }),
+        fetchFactoryRequestQtysByMaterial(scheduleDate),
       ])
       setBomByProductId(bomMap)
       setReleasedQtyByMaterial(requestQtys.released)
@@ -318,7 +331,7 @@ export function ProductionScheduleBomView({
     } finally {
       setLoading(false)
     }
-  }, [brandId, scheduleDate])
+  }, [forBrandId, scheduleDate])
 
   useEffect(() => {
     loadSavedScheduleBom()
@@ -406,9 +419,17 @@ export function ProductionScheduleBomView({
           type="date"
           value={scheduleDate}
           onChange={(e) => onScheduleDateChange(e.target.value)}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+          className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 shrink-0"
         />
-        {brandName ? <span className="text-sm text-gray-500">{brandName}</span> : null}
+        {destinationBrands && destinationBrands.length > 0 && onForBrandChange ? (
+          <DestinationBrandSelect
+            brands={destinationBrands}
+            value={forBrandId}
+            onChange={onForBrandChange}
+          />
+        ) : brandName ? (
+          <span className="text-sm text-gray-500 shrink-0">{brandName}</span>
+        ) : null}
       </div>
 
       {scheduleDate < today ? (

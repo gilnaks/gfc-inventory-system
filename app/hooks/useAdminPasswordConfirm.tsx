@@ -3,11 +3,36 @@
 import { useCallback, useRef, useState } from 'react'
 import { Lock } from 'lucide-react'
 import { validateAdminPassword } from '../../lib/admin-auth'
+import { isDashboardRole, isDeveloperRole } from '../../lib/dashboard-roles'
+import { Modal } from '../components/Modal'
 
 export type AdminPasswordConfirmOptions = {
   title: string
   message: string
   confirmLabel?: string
+}
+
+function getSessionDashboardRole() {
+  if (typeof window === 'undefined') return null
+  const saved = localStorage.getItem('dashboard_role')
+  return isDashboardRole(saved) ? saved : null
+}
+
+/** Strip password prompts so developers see a normal confirm dialog. */
+function developerConfirmText(opts: AdminPasswordConfirmOptions): string {
+  const cleaned = opts.message
+    .replace(/\s*Enter admin password[^\n]*/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+
+  if (cleaned) {
+    if (/are you sure/i.test(cleaned) || cleaned.includes('?')) {
+      return cleaned
+    }
+    return `${opts.title}\n\n${cleaned}`
+  }
+
+  return `${opts.title}\n\nAre you sure you want to continue?`
 }
 
 export function useAdminPasswordConfirm() {
@@ -29,6 +54,11 @@ export function useAdminPasswordConfirm() {
   }, [])
 
   const requestAdminPassword = useCallback((opts: AdminPasswordConfirmOptions) => {
+    // Developer role: skip admin password — use a normal browser confirm
+    if (isDeveloperRole(getSessionDashboardRole())) {
+      return Promise.resolve(window.confirm(developerConfirmText(opts)))
+    }
+
     return new Promise<boolean>((resolve) => {
       resolveRef.current = resolve
       setOptions(opts)
@@ -63,7 +93,7 @@ export function useAdminPasswordConfirm() {
 
   const AdminPasswordModal =
     open && options ? (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
+      <Modal onClose={() => close(false)} zIndex={100} align="center">
         <div
           className="w-full max-w-md rounded-lg bg-white shadow-xl"
           role="dialog"
@@ -131,7 +161,7 @@ export function useAdminPasswordConfirm() {
             </button>
           </div>
         </div>
-      </div>
+      </Modal>
     ) : null
 
   return { requestAdminPassword, AdminPasswordModal }

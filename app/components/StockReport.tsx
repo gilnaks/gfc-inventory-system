@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
 import { Calendar, TrendingUp, Package, Truck, CheckCircle, ChevronDown, ChevronRight, Eye, X } from 'lucide-react'
 import { toPhilippinesTime, toPhilippinesDateString, formatPhilippinesDateTime, isSameDayInPhilippines } from '../../lib/timezone'
+import { Modal } from './Modal'
 
 interface DailyStockSummary {
   id: string
@@ -507,8 +508,8 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
 
       {/* Order Details Modal */}
       {selectedOrder && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">
                 Order Details - #{selectedOrder.id.slice(-8)}
@@ -575,7 +576,7 @@ export default function StockReport({ selectedBrand, theme }: StockReportProps) 
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   )

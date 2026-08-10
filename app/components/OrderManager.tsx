@@ -1,9 +1,12 @@
 'use client'
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { supabase, Brand } from '../../lib/supabase'
-import { ShoppingCart, Package, CheckCircle, Check, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X, Upload } from 'lucide-react'
+import { ShoppingCart, Package, CheckCircle, Check, Clock, XCircle, Eye, Truck, Printer, Trash2, Edit, CreditCard, Building2, Store, X, Upload, History } from 'lucide-react'
+import { logCustomerOrderStatusChange, loadCustomerOrderStatusHistory } from '../../lib/customer-order-status-history'
+import type { CustomerOrderStatusHistory } from '../../lib/supabase'
+import { getBrandIconColorClass } from '../../lib/brand-colors'
 import { formatPhilippinesDateTime, formatPhilippinesTransferSheetDate } from '../../lib/timezone'
-import { TRANSFER_SHEET_PRINT_STYLES } from '../../lib/transferSheetPrintStyles'
+import { TRANSFER_SHEET_PRINT_STYLES, TRANSFER_SHEET_PRINT_SCRIPT } from '../../lib/transferSheetPrintStyles'
 import { renderTransferSheetItemsBlock } from '../../lib/transferSheetPrintItems'
 import { renderTransferSheetTotalsSection } from '../../lib/transferSheetPrintTotals'
 import { buildTransferSheetDsirPayload } from '../../lib/transferSheetDsirQr'
@@ -13,6 +16,8 @@ import {
   getCategoryPortalSettings,
   type CategoryPortalSettings,
 } from '../../lib/product-category-settings'
+import { Modal } from './Modal'
+import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
 
 interface Location {
   id: string
@@ -113,12 +118,20 @@ interface OrderManagerProps {
   selectedBrand: Brand | null
   onOrderUpdate?: () => void
   theme?: string
+  currentUsername?: string
 }
 
-export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: OrderManagerProps) {
+function formatOrderStatusLabel(status: string): string {
+  return status.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', currentUsername = '' }: OrderManagerProps) {
+  const { requestAdminPassword, AdminPasswordModal } = useAdminPasswordConfirm()
   const [orders, setOrders] = useState<CustomerOrder[]>([])
+  const ordersRef = useRef<CustomerOrder[]>([])
   const [loading, setLoading] = useState(false)
   const [updatingOrder, setUpdatingOrder] = useState<string | null>(null)
+  const updatingOrderRef = useRef<string | null>(null)
   const [selectedOrder, setSelectedOrder] = useState<CustomerOrder | null>(null)
   const [showOverrideModal, setShowOverrideModal] = useState(false)
   const [editingOrder, setEditingOrder] = useState<CustomerOrder | null>(null)
@@ -141,24 +154,43 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
   const [showDepositSlipModal, setShowDepositSlipModal] = useState(false)
   const [selectedDepositSlipImage, setSelectedDepositSlipImage] = useState<string | null>(null)
   const [selectedDepositSlipOrder, setSelectedDepositSlipOrder] = useState<CustomerOrder | null>(null)
+  const [statusHistoryOrder, setStatusHistoryOrder] = useState<CustomerOrder | null>(null)
+  const [statusHistory, setStatusHistory] = useState<CustomerOrderStatusHistory[]>([])
+  const [loadingStatusHistory, setLoadingStatusHistory] = useState(false)
 
-  // Helper function to get franchise icon color based on theme
-  const getFranchiseIconColor = () => {
-    switch (theme) {
-      case 'green':
-        return 'text-green-600'
-      case 'red':
-        return 'text-red-600'
-      case 'yellow':
-        return 'text-yellow-600'
-      default:
-        return 'text-blue-600'
+  useEffect(() => {
+    if (!statusHistoryOrder) {
+      setStatusHistory([])
+      return
     }
-  }
+    let cancelled = false
+    setLoadingStatusHistory(true)
+    loadCustomerOrderStatusHistory(statusHistoryOrder.id).then((rows) => {
+      if (!cancelled) {
+        setStatusHistory(rows)
+        setLoadingStatusHistory(false)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [statusHistoryOrder?.id])
+
+  // Location house/building icons follow that order's brand color
+  const getLocationIconColor = (order: CustomerOrder) =>
+    getBrandIconColorClass(order.brand?.name || order.location?.brand?.name)
 
   useEffect(() => {
     fetchOrders()
   }, [selectedBrand])
+
+  useEffect(() => {
+    ordersRef.current = orders
+  }, [orders])
+
+  useEffect(() => {
+    updatingOrderRef.current = updatingOrder
+  }, [updatingOrder])
 
   // Realtime subscription for customer orders changes
   useEffect(() => {
@@ -176,14 +208,21 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         },
         (payload) => {
           console.log('Customer orders realtime update:', payload)
-          
-          // Only refetch if we're not currently updating an order
-          // This prevents the realtime update from interfering with ongoing operations
-          if (!updatingOrder) {
-            fetchOrders()
-          } else {
+
+          if (updatingOrderRef.current) {
             console.log('Skipping realtime refetch - currently updating order')
+            return
           }
+
+          const row = payload.new as { id?: string; status?: string } | undefined
+          if (row?.id && row.status) {
+            const existing = ordersRef.current.find((o) => o.id === row.id)
+            if (existing?.status === row.status) {
+              return
+            }
+          }
+
+          fetchOrders({ silent: true })
         }
       )
       .subscribe()
@@ -191,10 +230,12 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [selectedBrand, updatingOrder])
+  }, [selectedBrand])
 
-  const fetchOrders = async () => {
-    setLoading(true)
+  const fetchOrders = async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setLoading(true)
+    }
     try {
       let query = supabase
         .from('customer_orders')
@@ -669,6 +710,40 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
         // Revert optimistic update on error
         fetchOrders()
         return
+      }
+
+      await logCustomerOrderStatusChange({
+        orderId,
+        oldStatus: orderData.status,
+        newStatus,
+        changedBy: currentUsername || 'system',
+      })
+
+      const brandId = orderData.brand_id as string | undefined
+      if (brandId && newStatus === 'cancelled') {
+        try {
+          const { reverseOrderAccountingOnCancel } = await import('../../lib/accounting-cogs')
+          await reverseOrderAccountingOnCancel(orderId, brandId, 'system')
+        } catch (postErr) {
+          console.warn('Accounting reversal on cancel skipped or failed:', postErr)
+        }
+      }
+      if (brandId && (newStatus === 'fulfilled' || newStatus === 'complete')) {
+        try {
+          const { postCustomerOrderRevenue, postCustomerOrderCash } = await import(
+            '../../lib/accounting-posting-rules'
+          )
+          if (newStatus === 'fulfilled') {
+            await postCustomerOrderRevenue(orderId, brandId, 'system')
+            const { postCogsForFulfilledOrder } = await import('../../lib/accounting-cogs')
+            await postCogsForFulfilledOrder(orderId, brandId, 'system')
+          }
+          if (newStatus === 'complete') {
+            await postCustomerOrderCash(orderId, brandId, 'system')
+          }
+        } catch {
+          // Posting errors are recorded in accounting_posting_errors for retry from Accounting.
+        }
       }
 
       // Trigger product refresh (no need to refetch orders - already updated optimistically)
@@ -1210,15 +1285,15 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                     <div className="flex items-center space-x-1">
                       {order.location?.company_owned ? (
                         <div title="Company Owned">
-                          <Building2 className="h-4 w-4 text-blue-600" />
+                          <Building2 className={`h-4 w-4 ${getLocationIconColor(order)}`} />
                         </div>
                       ) : isRemoteStoreLocation(order.location) ? (
                         <div title="Remote store">
-                          <Store className="h-4 w-4 text-purple-600" />
+                          <Store className={`h-4 w-4 ${getLocationIconColor(order)}`} />
                         </div>
                       ) : (
                         <div title="Franchise">
-                          <Store className={`h-4 w-4 ${getFranchiseIconColor()}`} />
+                          <Store className={`h-4 w-4 ${getLocationIconColor(order)}`} />
                         </div>
                       )}
                       <span>{order.location?.name}</span>
@@ -1291,6 +1366,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       if (totalPans > 0 && order.returnable_pans_image_url) {
                         return (
                           <button
+                            type="button"
                             onClick={() => {
                               setSelectedReturnablePansImage(order.returnable_pans_image_url)
                               setSelectedReturnablePansOrder(order)
@@ -1334,6 +1410,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     <div className="flex space-x-2">
                       <button
+                        type="button"
                         onClick={() => setSelectedOrder(order)}
                         className="p-1 rounded text-blue-600 hover:text-blue-900 hover:bg-blue-100"
                         title="View Details"
@@ -1343,6 +1420,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       
                       {order.status === 'pending' && (
                         <button
+                          type="button"
                           onClick={() => {
                             const needsReturnablePans = requiresReturnablePans(order)
                             const hasImage = !!order.returnable_pans_image_url
@@ -1379,6 +1457,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
                       {order.status === 'approved' && (
                         <button
+                          type="button"
                           onClick={() => {
                             if (confirm('Are you sure you want to dispatch this order? This action will move reserved inventory to released and cannot be undone.')) {
                               updateOrderStatus(order.id, 'in-transit')
@@ -1398,6 +1477,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       
                       {order.status === 'in-transit' && (
                         <button
+                          type="button"
                           onClick={() => {
                             if (confirm('Are you sure you want to mark this order as fulfilled? This action will subtract items from both initial stock and released inventory and cannot be undone.')) {
                               updateOrderStatus(order.id, 'fulfilled')
@@ -1422,6 +1502,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
                       {order.status === 'paid' && (
                         <button
+                          type="button"
                           onClick={() => {
                             if (!confirm('Are you sure you want to mark this order as complete?')) {
                               return
@@ -1452,6 +1533,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                       
                       {(order.status === 'pending' || order.status === 'approved' || order.status === 'in-transit') && (
                         <button
+                          type="button"
                           onClick={() => {
                             if (confirm('Are you sure you want to cancel this order? This action will return reserved stock to available inventory and cannot be undone.')) {
                               updateOrderStatus(order.id, 'cancelled')
@@ -1471,6 +1553,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
                       {order.status === 'fulfilled' && (
                         <button
+                          type="button"
                           onClick={() => {
                             if (confirm('Are you sure you want to mark this order as complete? This will skip the paid status and cannot be undone.')) {
                               updateOrderStatus(order.id, 'complete')
@@ -1495,13 +1578,17 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
                       {(order.status === 'cancelled' || order.status === 'fulfilled') && (
                         <button
-                          onClick={() => {
-                            const actionText = order.status === 'fulfilled' 
-                              ? 'delete this fulfilled order? This will restore the released quantities back to initial stock and cannot be undone.'
-                              : 'delete this order? This action cannot be undone.'
-                            if (confirm(`Are you sure you want to ${actionText}`)) {
-                              handleDeleteOrder(order.id)
-                            }
+                          type="button"
+                          onClick={async () => {
+                            const confirmed = await requestAdminPassword({
+                              title: 'Delete order',
+                              message:
+                                order.status === 'fulfilled'
+                                  ? 'Delete this fulfilled order? This will restore the released quantities back to initial stock and cannot be undone.\n\nEnter admin password to confirm.'
+                                  : 'Delete this order? This action cannot be undone.\n\nEnter admin password to confirm.',
+                              confirmLabel: 'Delete',
+                            })
+                            if (confirmed) handleDeleteOrder(order.id)
                           }}
                           disabled={updatingOrder === order.id}
                           className={`${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 'text-red-600 hover:text-red-900'}`}
@@ -1517,10 +1604,26 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
                       {order.status === 'complete' && (
                         <button
-                          onClick={() => {
-                            if (confirm('Are you sure you want to delete this complete order? This will permanently remove the order and all related data (logistics, images, etc.) but will NOT affect inventory. This action cannot be undone.')) {
-                              handleDeleteCompleteOrder(order.id)
-                            }
+                          type="button"
+                          onClick={() => setStatusHistoryOrder(order)}
+                          className="text-indigo-600 hover:text-indigo-900"
+                          title="Status history"
+                        >
+                          <History className="h-4 w-4" />
+                        </button>
+                      )}
+
+                      {order.status === 'complete' && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const confirmed = await requestAdminPassword({
+                              title: 'Delete complete order',
+                              message:
+                                'Delete this complete order? This permanently removes the order and all related data (logistics, images, etc.) but will NOT affect inventory.\n\nEnter admin password to confirm.',
+                              confirmLabel: 'Delete',
+                            })
+                            if (confirmed) handleDeleteCompleteOrder(order.id)
                           }}
                           disabled={updatingOrder === order.id}
                           className={`${updatingOrder === order.id ? 'text-gray-400 cursor-not-allowed' : 'text-red-600 hover:text-red-900'}`}
@@ -1545,6 +1648,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
           <div className="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
             <div className="flex-1 flex justify-between sm:hidden">
               <button
+                type="button"
                 onClick={() => onPageChange(Math.max(1, currentPage - 1))}
                 disabled={currentPage === 1}
                 className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1552,6 +1656,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                 Previous
               </button>
               <button
+                type="button"
                 onClick={() => onPageChange(Math.min(getTotalPages(orders[0]?.status || ''), currentPage + 1))}
                 disabled={currentPage === getTotalPages(orders[0]?.status || '')}
                 className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1569,6 +1674,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               <div>
                 <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                   <button
+                    type="button"
                     onClick={() => onPageChange(Math.max(1, currentPage - 1))}
                     disabled={currentPage === 1}
                     className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1576,6 +1682,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                     Previous
                   </button>
                   <button
+                    type="button"
                     onClick={() => onPageChange(Math.min(getTotalPages(orders[0]?.status || ''), currentPage + 1))}
                     disabled={currentPage === getTotalPages(orders[0]?.status || '')}
                     className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1633,7 +1740,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
     let dsirQrDataUrl = ''
     if (dsirPayloadText) {
       const QRCode = (await import('qrcode')).default
-      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 220, margin: 1 })
+      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 360, margin: 1 })
     }
 
     const printWindow = window.open('', '_blank')
@@ -1685,7 +1792,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               remarks: selectedOrder.notes,
               showLogisticsNone: true,
               qrDataUrl: dsirQrDataUrl,
-              qrCaption: 'DSIR ICE CREAM',
+              qrCaption: 'Receive stock',
             })}
             
             <div class="signatories">
@@ -1728,13 +1835,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
             </div>
             
           </div>
+          <script>${TRANSFER_SHEET_PRINT_SCRIPT}</script>
         </body>
         </html>
       `)
       printWindow.document.close()
-      printWindow.focus()
-      printWindow.print()
-      printWindow.close()
     }
   }
 
@@ -2364,8 +2469,8 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
 
       {/* Order Details Modal */}
       {selectedOrder && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Order Details #{selectedOrder.id.slice(0, 8)}
@@ -2441,15 +2546,15 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
                     <div className="flex items-center space-x-1 mt-1">
                       {selectedOrder.location?.company_owned ? (
                         <div title="Company Owned">
-                          <Building2 className="h-4 w-4 text-blue-600" />
+                          <Building2 className={`h-4 w-4 ${getLocationIconColor(selectedOrder)}`} />
                         </div>
                       ) : isRemoteStoreLocation(selectedOrder.location) ? (
                         <div title="Remote store">
-                          <Store className="h-4 w-4 text-purple-600" />
+                          <Store className={`h-4 w-4 ${getLocationIconColor(selectedOrder)}`} />
                         </div>
                       ) : (
                         <div title="Franchise">
-                          <Store className={`h-4 w-4 ${getFranchiseIconColor()}`} />
+                          <Store className={`h-4 w-4 ${getLocationIconColor(selectedOrder)}`} />
                         </div>
                       )}
                       <p className="text-sm font-semibold text-gray-900">{selectedOrder.location?.name || 'N/A'}</p>
@@ -2637,13 +2742,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               )}
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Override Modal */}
       {showOverrideModal && editingOrder && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-4/5 lg:w-3/4 xl:w-2/3 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-4/5 lg:w-3/4 xl:w-2/3 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Override Order #{editingOrder.id.slice(0, 8)}
@@ -3089,13 +3194,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Returnable Pans Image Modal */}
       {showReturnablePansModal && selectedReturnablePansImage && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Returnable Pans Image
@@ -3142,13 +3247,13 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               />
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Bill of Lading Image Modal */}
       {showBillOfLadingModal && selectedBillOfLadingUrl && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">Bill of Lading</h3>
               <button
@@ -3171,13 +3276,79 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               />
             </div>
           </div>
-        </div>
+        </Modal>
+      )}
+
+      {/* Order status history modal (complete orders) */}
+      {statusHistoryOrder && (
+        <Modal align="center" backdropClassName="bg-black/50">
+          <div className="bg-white rounded-lg max-w-lg w-full max-h-[85vh] overflow-y-auto shadow-lg">
+            <div className="p-5 border-b bg-gray-50 sticky top-0 flex justify-between items-start">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Status history</h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  {statusHistoryOrder.customer_name}
+                  {' · '}
+                  {formatPhilippinesDateTime(statusHistoryOrder.created_at)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStatusHistoryOrder(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            <div className="p-5">
+              {loadingStatusHistory ? (
+                <div className="flex justify-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600" />
+                </div>
+              ) : statusHistory.length === 0 ? (
+                <p className="text-sm text-gray-600 text-center py-6">
+                  No status changes recorded for this order yet.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {statusHistory.map((entry, index) => (
+                    <div key={entry.id} className="flex gap-3">
+                      <div className="flex flex-col items-center">
+                        <div className="w-2.5 h-2.5 rounded-full bg-indigo-500 ring-4 ring-indigo-100" />
+                        {index < statusHistory.length - 1 && (
+                          <div className="w-0.5 flex-1 min-h-[32px] bg-indigo-200" />
+                        )}
+                      </div>
+                      <div className="flex-1 pb-1">
+                        <p className="text-sm font-medium text-gray-900">
+                          {entry.old_status
+                            ? `${formatOrderStatusLabel(entry.old_status)} → ${formatOrderStatusLabel(entry.new_status)}`
+                            : formatOrderStatusLabel(entry.new_status)}
+                        </p>
+                        <p className="text-xs text-gray-600 mt-0.5">
+                          {entry.created_at
+                            ? formatPhilippinesDateTime(entry.created_at)
+                            : '—'}
+                          {' · '}
+                          <span className="font-medium">{entry.changed_by}</span>
+                        </p>
+                        {entry.notes && (
+                          <p className="text-xs text-gray-500 mt-1 italic">{entry.notes}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Modal>
       )}
 
       {/* Deposit Slip Image Modal */}
       {showDepositSlipModal && selectedDepositSlipImage && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Deposit Slip
@@ -3205,8 +3376,9 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue' }: O
               />
             </div>
           </div>
-        </div>
+        </Modal>
       )}
+      {AdminPasswordModal}
     </div>
   )
 }

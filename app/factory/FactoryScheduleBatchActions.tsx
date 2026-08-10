@@ -31,8 +31,11 @@ function formatQty(qty: number) {
 interface FactoryScheduleBatchActionsProps {
   item: FactoryScheduleItem
   workDate: string
-  onChanged?: () => void
+  onChanged?: () => void | Promise<void>
   compact?: boolean
+  /** When provided, skips per-row batch lookup (factory page prefetch). */
+  inProgressBatchId?: string | null
+  completedBatchesForSchedule?: FactoryBatchListItem[]
 }
 
 export function FactoryScheduleBatchActions({
@@ -40,38 +43,69 @@ export function FactoryScheduleBatchActions({
   workDate,
   onChanged,
   compact = false,
+  inProgressBatchId,
+  completedBatchesForSchedule,
 }: FactoryScheduleBatchActionsProps) {
-  const [loading, setLoading] = useState(true)
+  const [checkingStart, setCheckingStart] = useState(true)
   const [acting, setActing] = useState(false)
-  const [inProgressId, setInProgressId] = useState<string | null>(null)
+  const [inProgressId, setInProgressId] = useState<string | null>(inProgressBatchId ?? null)
   const [unitsRemaining, setUnitsRemaining] = useState(0)
   const [bomLines, setBomLines] = useState<BatchBomLine[]>([])
   const [canStart, setCanStart] = useState(false)
   const [shortages, setShortages] = useState<BatchMaterialShortage[]>([])
-  const [completedBatches, setCompletedBatches] = useState<FactoryBatchListItem[]>([])
+  const [completedBatches, setCompletedBatches] = useState<FactoryBatchListItem[]>(
+    completedBatchesForSchedule ?? []
+  )
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    try {
-      const [inProg, completed, check] = await Promise.all([
-        fetchInProgressBatchForSchedule(item.schedule_id, workDate),
-        fetchCompletedBatchesForSchedule(item.schedule_id, workDate),
-        checkBatchCanStart(item, workDate, 1),
-      ])
-      setInProgressId(inProg?.id ?? null)
-      setCompletedBatches(completed)
-      setUnitsRemaining(check.unitsRemaining)
-      setBomLines(check.bomLines)
-      setCanStart(check.ok)
-      setShortages(check.shortages)
-    } finally {
-      setLoading(false)
-    }
+  const applyCanStartCheck = useCallback(async () => {
+    const check = await checkBatchCanStart(item, workDate, 1)
+    setUnitsRemaining(check.unitsRemaining)
+    setBomLines(check.bomLines)
+    setCanStart(check.ok)
+    setShortages(check.shortages)
   }, [item, workDate])
 
+  const refreshFromServer = useCallback(async () => {
+    setCheckingStart(true)
+    try {
+      const [inProg, completedRows] = await Promise.all([
+        fetchInProgressBatchForSchedule(item.schedule_id, workDate),
+        fetchCompletedBatchesForSchedule(item.schedule_id, workDate),
+      ])
+      const inProgId = inProg?.id ?? null
+      setInProgressId(inProgId)
+      setCompletedBatches(completedRows)
+
+      if (inProgId) return
+
+      await applyCanStartCheck()
+    } finally {
+      setCheckingStart(false)
+    }
+  }, [item.schedule_id, workDate, applyCanStartCheck])
+
   useEffect(() => {
-    refresh()
-  }, [refresh])
+    if (acting) return
+    setInProgressId(inProgressBatchId ?? null)
+    setCompletedBatches(completedBatchesForSchedule ?? [])
+  }, [acting, inProgressBatchId, completedBatchesForSchedule])
+
+  useEffect(() => {
+    if (acting) return
+    if (inProgressBatchId) {
+      setCheckingStart(false)
+      return
+    }
+    void refreshFromServer()
+  }, [acting, inProgressBatchId, refreshFromServer])
+
+  const batchFinished =
+    !inProgressId && (unitsRemaining <= 0 || (completedBatches.length > 0 && !canStart && !checkingStart))
+
+  const notifyParentAndRefresh = useCallback(async () => {
+    await onChanged?.()
+    await refreshFromServer()
+  }, [onChanged, refreshFromServer])
 
   const handleStart = async () => {
     if (!confirm(`Start batch for ${item.product_name}? Materials will be deducted from the factory floor.`)) {
@@ -89,8 +123,7 @@ export function FactoryScheduleBatchActions({
         alert(result.message)
         return
       }
-      await refresh()
-      onChanged?.()
+      await notifyParentAndRefresh()
     } finally {
       setActing(false)
     }
@@ -100,13 +133,15 @@ export function FactoryScheduleBatchActions({
     if (!inProgressId) return
     setActing(true)
     try {
-      const result = await completeProductionBatch(inProgressId)
+      const result = await completeProductionBatch(inProgressId, {
+        postedBy: getFactoryRequestedBy(),
+      })
       if (result.ok === false) {
         alert(result.message || 'Could not complete batch')
         return
       }
-      await refresh()
-      onChanged?.()
+      setInProgressId(null)
+      await notifyParentAndRefresh()
     } finally {
       setActing(false)
     }
@@ -122,8 +157,8 @@ export function FactoryScheduleBatchActions({
         alert(result.message || 'Could not cancel batch')
         return
       }
-      await refresh()
-      onChanged?.()
+      setInProgressId(null)
+      await notifyParentAndRefresh()
     } finally {
       setActing(false)
     }
@@ -133,7 +168,7 @@ export function FactoryScheduleBatchActions({
     ? 'flex flex-col w-full min-h-[4.5rem] justify-between'
     : 'flex flex-col w-full min-h-[3.5rem]'
 
-  if (loading) {
+  if (checkingStart && !inProgressId) {
     return (
       <span className="inline-flex items-center gap-1 text-xs text-gray-400">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -142,29 +177,25 @@ export function FactoryScheduleBatchActions({
     )
   }
 
-  if (unitsRemaining <= 0 && !inProgressId) {
-    if (completedBatches.length === 0) {
-      return <span className="text-xs text-gray-500">All batches started</span>
-    }
+  if (batchFinished) {
+    const latestBatch = completedBatches[0]
+    const producedCount = Math.max(item.produced, latestBatch?.units ?? 0)
+
     return (
       <div className={shellClass}>
         <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full w-fit">
           <CheckCircle2 className="h-3.5 w-3.5" />
-          {completedBatches.length} batch{completedBatches.length === 1 ? '' : 'es'} completed
+          Batch completed
         </span>
-        <ul className="mt-1.5 space-y-0.5 text-[10px] text-gray-600 text-right">
-          {completedBatches.map((b) => (
-            <li key={b.id} className="tabular-nums">
-              {b.units} unit{b.units === 1 ? '' : 's'}
-              {b.completed_at
-                ? ` · ${new Date(b.completed_at).toLocaleTimeString([], {
-                    hour: 'numeric',
-                    minute: '2-digit',
-                  })}`
-                : null}
-            </li>
-          ))}
-        </ul>
+        <p className="mt-1.5 text-[10px] text-gray-600 text-right tabular-nums">
+          {producedCount} produced
+          {latestBatch?.completed_at
+            ? ` · ${new Date(latestBatch.completed_at).toLocaleTimeString([], {
+                hour: 'numeric',
+                minute: '2-digit',
+              })}`
+            : null}
+        </p>
       </div>
     )
   }
@@ -172,10 +203,7 @@ export function FactoryScheduleBatchActions({
   if (inProgressId) {
     return (
       <div className={shellClass}>
-        <span className="inline-flex items-center gap-1 text-xs font-medium text-indigo-800 bg-indigo-100 px-2 py-0.5 rounded-full w-fit">
-          Batch in progress
-        </span>
-        <div className="flex flex-wrap justify-end gap-2 pt-2 mt-auto">
+        <div className="flex flex-wrap justify-end gap-2 mt-auto">
           <button
             type="button"
             disabled={acting}
@@ -183,7 +211,7 @@ export function FactoryScheduleBatchActions({
             className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md bg-emerald-700 text-white hover:bg-emerald-800 disabled:opacity-50 touch-manipulation"
           >
             <CheckCircle2 className="h-3.5 w-3.5" />
-            Complete
+            {acting ? 'Completing…' : 'Complete'}
           </button>
           <button
             type="button"
@@ -205,19 +233,18 @@ export function FactoryScheduleBatchActions({
         {completedBatches.length > 0 ? (
           <p className="text-[10px] text-emerald-700 max-w-[220px]">
             {completedBatches.length} completed
-            {unitsRemaining > 0 ? ` · ${unitsRemaining} left to run` : ''}
           </p>
         ) : null}
         {bomLines.length > 0 ? (
           <p className="text-[10px] text-gray-500 max-w-[220px]">
-            {unitsRemaining} left · floor BOM per unit:{' '}
+            Floor BOM per unit:{' '}
             {bomLines
               .slice(0, 2)
               .map((l) => `${formatQty(l.qty_per_unit)} ${l.unit}`)
               .join(', ')}
             {bomLines.length > 2 ? '…' : ''}
           </p>
-        ) : (
+        ) : checkingStart ? null : (
           <p className="text-[10px] text-gray-500">No factory-floor BOM — batch tracking only</p>
         )}
         {shortages.length > 0 ? (
@@ -242,7 +269,7 @@ export function FactoryScheduleBatchActions({
       <div className="flex justify-end pt-2 mt-auto">
         <button
           type="button"
-          disabled={acting || !canStart}
+          disabled={acting || !canStart || checkingStart}
           onClick={handleStart}
           title={
             !canStart && shortages.length

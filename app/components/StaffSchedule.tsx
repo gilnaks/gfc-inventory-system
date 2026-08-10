@@ -31,7 +31,6 @@ interface StaffSchedule {
   location_id: string
   staff_registration_id: string
   schedule_date: string
-  is_rest_day: boolean
   staff_registration?: StaffRegistration
 }
 
@@ -214,8 +213,7 @@ export function StaffSchedule({ locationId, locationName, currentBranchBrandName
   const getScheduledStaffForBranchAndDate = (branchId: string, date: string) => {
     return schedules.filter(s => 
       s.location_id === branchId && 
-      s.schedule_date === date &&
-      !s.is_rest_day // Only show working days in UI
+      s.schedule_date === date
     ).map(s => s.staff_registration).filter(Boolean)
   }
 
@@ -228,7 +226,6 @@ export function StaffSchedule({ locationId, locationName, currentBranchBrandName
         .select('*, location:locations(name)')
         .eq('staff_registration_id', staffId)
         .eq('schedule_date', date)
-        .eq('is_rest_day', false)
 
       if (checkError) throw checkError
 
@@ -241,13 +238,7 @@ export function StaffSchedule({ locationId, locationName, currentBranchBrandName
           return
         }
         
-        // If they're already scheduled to the same branch, update to working day
-        const { error: updateError } = await supabase
-          .from('staff_schedules')
-          .update({ is_rest_day: false })
-          .eq('id', existingSchedule.id)
-
-        if (updateError) throw updateError
+        // Already scheduled to the same branch on this date — nothing to change.
       } else {
         // If no existing schedule, create a new one
         const { error: insertError } = await supabase
@@ -255,8 +246,7 @@ export function StaffSchedule({ locationId, locationName, currentBranchBrandName
           .insert({
             location_id: branchId,
             staff_registration_id: staffId,
-            schedule_date: date,
-            is_rest_day: false
+            schedule_date: date
           })
 
         if (insertError) throw insertError
@@ -471,8 +461,7 @@ export function StaffSchedule({ locationId, locationName, currentBranchBrandName
                               // Check if staff is already scheduled to ANY branch on this date
                               const scheduledToAnyBranch = schedules.find(s => 
                                 s.staff_registration_id === staff.id && 
-                                s.schedule_date === dateStr &&
-                                !s.is_rest_day
+                                s.schedule_date === dateStr
                               )
                               
                               // Don't show staff who are already scheduled to any branch on this date

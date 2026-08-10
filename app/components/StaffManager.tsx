@@ -2,6 +2,18 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Plus, Edit3, X, MapPin, Building2, User, Phone, Hash, Trash2, Check, Calendar, ChevronLeft, ChevronRight, RefreshCw, CalendarX, MessageSquare, Megaphone, Mail, Copy } from 'lucide-react'
+import { Modal } from './Modal'
+import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
+import { getBrandHighlightClasses } from '../../lib/brand-colors'
+import { isFactoryBrand } from '../../lib/brand-roles'
+import { isAdminLevelRole, isDashboardRole } from '../../lib/dashboard-roles'
+import {
+  gfcMainHasExplicitScheduleHours,
+  isRetailFactoryBranch,
+  normalizeLocationBrand,
+  normalizeScheduleLocation,
+  staffMemberIsGfcMain,
+} from '../../lib/gfc-main-branches'
 
 
 interface StaffRegistration {
@@ -22,9 +34,13 @@ interface Location {
   id: string
   name: string
   brand_id: string
+  company_owned?: boolean
+  is_factory_floor?: boolean
   brand?: {
     id: string
     name: string
+    brand_role?: string
+    slug?: string
   }
 }
 
@@ -62,7 +78,269 @@ interface StaffManagerProps {
   theme?: string
 }
 
+const STAFF_NAME_SKELETON_WIDTHS = [
+  'max-w-[6rem]',
+  'max-w-[8rem]',
+  'max-w-[5.5rem]',
+  'max-w-[7rem]',
+  'max-w-[6.5rem]',
+  'max-w-[7.5rem]',
+] as const
+
+function StaffManagerPageSkeleton() {
+  const rowPatterns = [
+    { assignments: 1, leaveWide: false },
+    { assignments: 2, leaveWide: true },
+    { assignments: 1, leaveWide: false },
+    { assignments: 3, leaveWide: false },
+    { assignments: 1, leaveWide: true },
+    { assignments: 2, leaveWide: false },
+    { assignments: 2, leaveWide: false },
+    { assignments: 1, leaveWide: true },
+    { assignments: 3, leaveWide: false },
+  ]
+
+  const groupHeaderWidths = ['w-36', 'w-28', 'w-32'] as const
+
+  return (
+    <div className="space-y-6 animate-pulse">
+      <div className="flex flex-col space-y-4 sm:flex-row sm:items-center sm:justify-between sm:space-y-0">
+        <div>
+          <div className="mb-2 h-8 w-48 rounded bg-gray-200" />
+          <div className="h-4 w-64 rounded bg-gray-200" />
+        </div>
+        <div className="flex flex-col space-y-2 sm:flex-row sm:space-x-3 sm:space-y-0">
+          <div className="h-10 w-32 rounded bg-gray-200" />
+          <div className="h-10 w-32 rounded bg-gray-200" />
+          <div className="h-10 w-32 rounded bg-gray-200" />
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-lg bg-white shadow">
+        <table className="w-full table-fixed divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              {['Staff Member', 'Contact', 'Assignments', 'Leave Balance / Warnings', 'Status', 'Actions'].map(
+                (header) => (
+                  <th
+                    key={header}
+                    className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
+                  >
+                    <div className="h-3 rounded bg-gray-200 w-20 max-w-full" />
+                  </th>
+                )
+              )}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-200 bg-white">
+            {[0, 1, 2].map((groupIndex) => (
+              <React.Fragment key={groupIndex}>
+                <tr className="bg-gray-100">
+                  <td colSpan={6} className="px-6 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="h-4 w-4 rounded bg-gray-200" />
+                      <div className={`h-4 rounded bg-gray-300 ${groupHeaderWidths[groupIndex]}`} />
+                      <div className="h-3 w-20 rounded bg-gray-200" />
+                    </div>
+                  </td>
+                </tr>
+                {rowPatterns.slice(groupIndex * 3, groupIndex * 3 + 3).map((pattern, rowIndex) => {
+                  const absoluteIndex = groupIndex * 3 + rowIndex
+                  return (
+                    <tr key={absoluteIndex}>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center">
+                          <div className="h-10 w-10 shrink-0 rounded-full bg-gray-200" />
+                          <div className="ml-4 min-w-0">
+                            <div
+                              className={`mb-1 h-4 rounded bg-gray-300 ${STAFF_NAME_SKELETON_WIDTHS[absoluteIndex % STAFF_NAME_SKELETON_WIDTHS.length]}`}
+                            />
+                            <div className="h-3 w-16 rounded bg-gray-200" />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="h-4 w-24 rounded bg-gray-200" />
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="space-y-1">
+                          {Array.from({ length: pattern.assignments }).map((_, assignmentIndex) => (
+                            <div
+                              key={assignmentIndex}
+                              className={`h-3 rounded bg-gray-200 ${
+                                assignmentIndex === 0 ? 'w-full max-w-[8rem]' : 'w-full max-w-[6rem]'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="space-y-2">
+                          <div className={`h-5 rounded-full bg-gray-200 ${pattern.leaveWide ? 'w-16' : 'w-14'}`} />
+                          <div className="h-5 w-12 rounded-full bg-gray-200" />
+                        </div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="h-6 w-14 rounded-full bg-gray-200" />
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2">
+                          <div className="h-4 w-4 rounded bg-gray-200" />
+                          <div className="h-4 w-4 rounded bg-gray-200" />
+                          <div className="h-4 w-4 rounded bg-gray-200" />
+                          <div className="h-4 w-4 rounded bg-gray-200" />
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function StaffModalHistorySkeleton({
+  rows = 4,
+  variant = 'default',
+}: {
+  rows?: number
+  variant?: 'default' | 'compact'
+}) {
+  const patterns = [
+    { title: 'w-40', body: 'h-10', meta: 'w-16' },
+    { title: 'w-32', body: 'h-14', meta: 'w-20' },
+    { title: 'w-48', body: 'h-8', meta: 'w-14' },
+    { title: 'w-36', body: 'h-12', meta: 'w-16' },
+    { title: 'w-28', body: 'h-9', meta: 'w-12' },
+  ]
+
+  return (
+    <div className="space-y-3 animate-pulse">
+      {Array.from({ length: rows }).map((_, index) => {
+        const pattern = patterns[index % patterns.length]
+        return (
+          <div
+            key={index}
+            className={`rounded-lg border border-gray-200 bg-gray-50 ${variant === 'compact' ? 'p-3' : 'p-4'}`}
+          >
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div className={`h-4 rounded bg-gray-200 ${pattern.title}`} />
+              <div className={`h-3 rounded bg-gray-200 ${pattern.meta}`} />
+            </div>
+            <div className={`rounded bg-gray-200 ${pattern.body} w-full`} />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function StaffLeaveHistorySkeleton() {
+  const patterns = [
+    { title: 'w-36', badge: 'w-16', rows: ['w-28', 'w-24'] },
+    { title: 'w-44', badge: 'w-20', rows: ['w-32', 'w-20', 'w-24'] },
+    { title: 'w-32', badge: 'w-14', rows: ['w-24', 'w-28'] },
+    { title: 'w-40', badge: 'w-20', rows: ['max-w-[7.5rem]', 'max-w-[5.5rem]', 'max-w-[6.5rem]'] },
+  ]
+
+  return (
+    <div className="space-y-4 animate-pulse">
+      {patterns.map((pattern, index) => (
+        <div key={index} className="rounded-lg border border-gray-200 p-4">
+          <div className="mb-3 flex items-start justify-between">
+            <div className="flex items-center gap-2">
+              <div className={`h-5 rounded bg-gray-200 ${pattern.title}`} />
+              <div className={`h-5 rounded-full bg-gray-200 ${pattern.badge}`} />
+            </div>
+            <div className="h-8 w-8 rounded bg-gray-200" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {pattern.rows.map((width, rowIndex) => (
+              <div key={rowIndex} className={`h-3 rounded bg-gray-200 ${width}`} />
+            ))}
+          </div>
+          <div className="mt-3 h-8 w-full rounded bg-gray-100" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StaffScheduleModalSkeleton() {
+  const storePatterns = [
+    { name: 'w-32', brand: 'w-20', cells: [1, 0, 2, 0, 1, 0, 1] },
+    { name: 'w-24', brand: 'w-16', cells: [0, 1, 0, 1, 0, 2, 0] },
+    { name: 'w-36', brand: 'w-24', cells: [2, 1, 0, 1, 1, 0, 0] },
+    { name: 'w-28', brand: 'w-16', cells: [0, 0, 1, 0, 0, 1, 2] },
+    { name: 'max-w-[7.5rem]', brand: 'w-20', cells: [1, 1, 0, 0, 1, 0, 1] },
+    { name: 'max-w-[6.5rem]', brand: 'w-14', cells: [0, 2, 1, 0, 0, 1, 0] },
+  ]
+
+  return (
+    <div className="animate-pulse min-w-[1264px]">
+      <table className="w-full">
+        <thead>
+          <tr className="border-b border-white bg-gray-50">
+            <th className="w-64 min-w-64 border-r border-white px-6 py-4">
+              <div className="h-4 w-16 rounded bg-gray-200" />
+            </th>
+            {Array.from({ length: 7 }).map((_, index) => (
+              <th key={index} className="w-36 border-r border-white px-2 py-3 last:border-r-0">
+                <div className="mx-auto mb-1 h-5 w-6 rounded bg-gray-200" />
+                <div className="mx-auto h-3 w-10 rounded bg-gray-200" />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white">
+          <tr className="bg-slate-200">
+            <td colSpan={8} className="px-6 py-2">
+              <div className="h-3 w-24 rounded bg-slate-300" />
+            </td>
+          </tr>
+          {storePatterns.map((store, rowIndex) => (
+            <tr key={rowIndex} className="bg-white">
+              <td className="w-64 min-w-64 border-r border-white px-6 py-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-8 w-8 rounded-lg bg-gray-200" />
+                  <div>
+                    <div className={`mb-1 h-4 rounded bg-gray-300 ${store.name}`} />
+                    <div className={`h-3 rounded bg-gray-200 ${store.brand}`} />
+                  </div>
+                </div>
+              </td>
+              {store.cells.map((chipCount, dayIndex) => (
+                <td key={dayIndex} className="w-36 border-r border-white px-2 py-3 align-top last:border-r-0">
+                  <div className="flex min-h-[3rem] flex-col gap-1">
+                    {chipCount === 0 ? (
+                      <div className="h-8 rounded bg-gray-100" />
+                    ) : (
+                      Array.from({ length: chipCount }).map((_, chipIndex) => (
+                        <div
+                          key={chipIndex}
+                          className={`rounded bg-gray-200 ${chipIndex === 0 ? 'h-7' : 'h-6'} ${
+                            chipIndex === 0 ? 'w-full max-w-[5.5rem]' : 'w-full max-w-[4.5rem]'
+                          }`}
+                        />
+                      ))
+                    )}
+                  </div>
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
+  const { requestAdminPassword, AdminPasswordModal } = useAdminPasswordConfirm()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -105,6 +383,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [messageHistory, setMessageHistory] = useState<any[]>([])
   const [loadingAnnouncementHistory, setLoadingAnnouncementHistory] = useState(false)
   const [loadingMessageHistory, setLoadingMessageHistory] = useState(false)
+  const [loadingLeaveHistory, setLoadingLeaveHistory] = useState(false)
+  const [loadingScheduleData, setLoadingScheduleData] = useState(false)
   const [announcementFieldErrors, setAnnouncementFieldErrors] = useState({ title: false, message: false })
   const [messageFieldErrors, setMessageFieldErrors] = useState({ title: false, message: false })
   
@@ -132,8 +412,11 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [originalSchedule, setOriginalSchedule] = useState<{[key: string]: {[key: string]: string[]}}>({})
   const [staffHours, setStaffHours] = useState<{[key: string]: {[key: string]: {[key: string]: number}}}>({})
   const [originalStaffHours, setOriginalStaffHours] = useState<{[key: string]: {[key: string]: {[key: string]: number}}}>({})
+  const [scheduleHoursOverridden, setScheduleHoursOverridden] = useState<Set<string>>(new Set())
+  const [originalScheduleHoursOverridden, setOriginalScheduleHoursOverridden] = useState<Set<string>>(new Set())
   const [companyLocations, setCompanyLocations] = useState<Location[]>([])
   const [companyStaff, setCompanyStaff] = useState<StaffWithAssignments[]>([])
+  const [isScheduleAdmin, setIsScheduleAdmin] = useState(false)
   const [todaySchedules, setTodaySchedules] = useState<{[key: string]: any}>({})
   const [showOnlyTodayStaff, setShowOnlyTodayStaff] = useState(false)
   const [dayStatus, setDayStatus] = useState<{[key: string]: 'default' | 'regular-holiday' | 'special-holiday'}>({})
@@ -142,6 +425,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   const [hoveredStaffId, setHoveredStaffId] = useState<string | null>(null) // Track hovered staff for highlighting
   const [scheduleJustSaved, setScheduleJustSaved] = useState(false) // Track if schedule was just saved
   const [selectedStaffForSchedule, setSelectedStaffForSchedule] = useState<string | null>(null) // Main staff selector for quick-add
+  const scheduleModalOpenedRef = useRef(false)
   
   // New staff form
   const [newStaff, setNewStaff] = useState({
@@ -194,12 +478,34 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     loadData()
     loadTodaySchedules()
     loadLeaveRequests()
+    const savedRole = localStorage.getItem('dashboard_role')
+    setIsScheduleAdmin(isDashboardRole(savedRole) && isAdminLevelRole(savedRole))
   }, [])
 
   // Load schedule when week changes (like in StaffSchedule component)
   useEffect(() => {
-    if (isScheduleModalOpen) {
-      loadExistingSchedule()
+    if (!isScheduleModalOpen) {
+      scheduleModalOpenedRef.current = false
+      return
+    }
+
+    if (!scheduleModalOpenedRef.current) {
+      scheduleModalOpenedRef.current = true
+      return
+    }
+
+    let cancelled = false
+    void (async () => {
+      setLoadingScheduleData(true)
+      try {
+        await loadExistingSchedule()
+      } finally {
+        if (!cancelled) setLoadingScheduleData(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
     }
   }, [currentWeek, isScheduleModalOpen])
 
@@ -399,8 +705,10 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
   const openLeaveHistoryModal = async (staff: StaffWithAssignments) => {
     setSelectedStaffForHistory(staff)
+    setStaffLeaveHistory([])
     setIsLeaveHistoryModalOpen(true)
-    
+    setLoadingLeaveHistory(true)
+
     try {
       const { data, error } = await supabase
         .from('leave_requests')
@@ -416,6 +724,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     } catch (error) {
       console.error('Error loading staff leave history:', error)
       setError('Failed to load leave history')
+    } finally {
+      setLoadingLeaveHistory(false)
     }
   }
 
@@ -692,8 +1002,6 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   }
 
   const deleteStaff = async (staffId: string) => {
-    if (!confirm('Are you sure you want to delete this staff member? This will also remove all their assignments.')) return
-
     setSaving(true)
     try {
       // First delete all assignments
@@ -980,12 +1288,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
   const loadCompanyData = async () => {
     try {
+      const savedRole = localStorage.getItem('dashboard_role')
+      const isAdmin = isDashboardRole(savedRole) && isAdminLevelRole(savedRole)
+      setIsScheduleAdmin(isAdmin)
+
       // Load both queries in parallel for faster performance
       const [locationsResult, staffResult] = await Promise.all([
         supabase
           .from('locations')
-          .select('id, name, brand_id, company_owned, brand:brands!locations_brand_id_fkey(id, name)')
-          .eq('company_owned', true)
+          .select('id, name, brand_id, company_owned, is_factory_floor, brand:brands!locations_brand_id_fkey(id, name, brand_role, slug)')
           .order('name'),
         
         supabase
@@ -1003,7 +1314,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 company_owned,
                 brand:brands!locations_brand_id_fkey (
                   id,
-                  name
+                  name,
+                  brand_role,
+                  slug
                 )
               )
             )
@@ -1015,22 +1328,51 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       if (locationsResult.error) throw locationsResult.error
       if (staffResult.error) throw staffResult.error
 
-      // Filter for company-owned locations only, excluding factory branches
-      const companyLocs = (locationsResult.data?.filter(loc => 
-        !loc.name.toLowerCase().includes('factory')
-      ) || []) as any as Location[]
+      const normalizedLocs = (locationsResult.data || []).map((loc) =>
+        normalizeScheduleLocation(loc as unknown as Location)
+      )
 
-      const companyLocationIds = new Set(companyLocs.map(loc => loc.id))
+      const gfcMainLocs = normalizedLocs
+        .filter((loc) => isFactoryBrand(loc.brand ?? null))
+        .sort((a, b) => a.name.localeCompare(b.name))
 
-      // Filter staff assigned to company-owned locations only
-      const companyStaffList = (staffResult.data?.filter(staff => 
-        staff.staff_assignments.some((assignment: any) => 
-          assignment.location?.company_owned && 
-          companyLocationIds.has(assignment.location_id)
+      const retailLocs = normalizedLocs
+        .filter(
+          (loc) =>
+            !isFactoryBrand(loc.brand ?? null) &&
+            loc.company_owned &&
+            !isRetailFactoryBranch(loc)
         )
-      ) || []) as any as StaffWithAssignments[]
+        .sort((a, b) => {
+          const brandA = a.brand?.name || ''
+          const brandB = b.brand?.name || ''
+          if (brandA !== brandB) return brandA.localeCompare(brandB)
+          return a.name.localeCompare(b.name)
+        })
 
-      setCompanyLocations(companyLocs)
+      const visibleLocs = isAdmin ? [...gfcMainLocs, ...retailLocs] : retailLocs
+      const visibleLocationIds = new Set(visibleLocs.map((loc) => loc.id))
+      const gfcLocationIds = new Set(gfcMainLocs.map((loc) => loc.id))
+
+      const companyStaffList = ((staffResult.data || []) as unknown as StaffWithAssignments[])
+        .filter((staffMember) =>
+          staffMember.staff_assignments.some((assignment: StaffAssignment) =>
+            visibleLocationIds.has(assignment.location_id)
+          )
+        )
+        .filter((staffMember) => isAdmin || !staffMemberIsGfcMain(staffMember))
+        .sort((a, b) => {
+          const aGfc = a.staff_assignments.some((assignment) =>
+            gfcLocationIds.has(assignment.location_id)
+          )
+          const bGfc = b.staff_assignments.some((assignment) =>
+            gfcLocationIds.has(assignment.location_id)
+          )
+          if (aGfc !== bGfc) return aGfc ? -1 : 1
+          return a.full_name.localeCompare(b.full_name)
+        })
+
+      setCompanyLocations(visibleLocs)
       setCompanyStaff(companyStaffList)
     } catch (error) {
       console.error('Error loading company data:', error)
@@ -1128,7 +1470,17 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       
       const { data, error } = await supabase
         .from('staff_schedules')
-        .select('staff_registration_id, location_id, schedule_date, hours, is_absent, day_type')
+        .select(`
+          staff_registration_id,
+          location_id,
+          schedule_date,
+          hours,
+          is_absent,
+          day_type,
+          location:locations!staff_schedules_location_id_fkey (
+            brand:brands!locations_brand_id_fkey (brand_role, slug)
+          )
+        `)
         .gte('schedule_date', startDate)
         .lte('schedule_date', endDate)
         .order('schedule_date')
@@ -1140,6 +1492,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       const newStaffHours: {[key: string]: {[key: string]: {[key: string]: number}}} = {}
       const newDayStatus: {[key: string]: 'default' | 'regular-holiday' | 'special-holiday'} = {}
       const newAbsentStaff: {[key: string]: {[key: string]: {[key: string]: boolean}}} = {}
+      const newHoursOverridden = new Set<string>()
       
       // Process all records in a single optimized loop
       data?.forEach((item) => {
@@ -1165,8 +1518,23 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
             newSchedule[locId][dayKey].push(staffId)
           }
 
-          // Set hours and absence data
-          newStaffHours[locId][dayKey][staffId] = item.hours || 11
+          // Set hours and absence data (GFC Main defaults to 0 = use fingerprint attendance)
+          const locBrand = normalizeLocationBrand(
+            (item.location as { brand?: unknown } | null)?.brand as Parameters<typeof isFactoryBrand>[0]
+          )
+          const isGfcLoc = isFactoryBrand(locBrand)
+          const defaultHours = isGfcLoc ? 0 : 11
+          const overrideKey = `${locId}|${dayKey}|${staffId}`
+          const hasExplicitHours = isGfcLoc
+            ? gfcMainHasExplicitScheduleHours(item.hours)
+            : item.hours != null
+
+          if (hasExplicitHours) {
+            newHoursOverridden.add(overrideKey)
+            newStaffHours[locId][dayKey][staffId] = Number(item.hours)
+          } else {
+            newStaffHours[locId][dayKey][staffId] = defaultHours
+          }
           newAbsentStaff[locId][dayKey][staffId] = item.is_absent || false
           
           // Set day status (use the first occurrence for each day)
@@ -1188,6 +1556,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       setOriginalSchedule(deepCopy(newSchedule))
       setStaffHours(newStaffHours)
       setOriginalStaffHours(deepCopy(newStaffHours))
+      setScheduleHoursOverridden(newHoursOverridden)
+      setOriginalScheduleHoursOverridden(new Set(newHoursOverridden))
       setDayStatus(newDayStatus)
       setOriginalDayStatus(deepCopy(newDayStatus))
       setAbsentStaff(newAbsentStaff)
@@ -1199,21 +1569,20 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
   const openScheduleModal = async () => {
     console.log('🚀 Opening schedule modal...')
-    setSuccess('') // Clear any previous success message
-    
-    // Set current week to today's week for default view
+    setSuccess('')
+
     setCurrentWeek(new Date())
-    
-    // Open modal immediately for better UX
     setIsScheduleModalOpen(true)
-    
-    console.log('📥 Loading company data and existing schedule...')
-    // Load data in parallel for faster loading
-    await Promise.all([
-      loadCompanyData(),
-      loadExistingSchedule()
-    ])
-    console.log('✅ Schedule modal data loaded!')
+    setLoadingScheduleData(true)
+
+    try {
+      console.log('📥 Loading company data and existing schedule...')
+      await loadCompanyData()
+      await loadExistingSchedule()
+      console.log('✅ Schedule modal data loaded!')
+    } finally {
+      setLoadingScheduleData(false)
+    }
   }
 
   const hasScheduleChanges = () => {
@@ -1259,8 +1628,14 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         const allStaffIds = Array.from(new Set([...currentArray, ...originalArray]))
         for (const staffId of allStaffIds) {
           const currentHours = getStaffHours(locationId, dayKey, staffId)
-          const originalHours = originalStaffHours[locationId]?.[dayKey]?.[staffId] || 8
+          const originalHours =
+            originalStaffHours[locationId]?.[dayKey]?.[staffId] ??
+            getDefaultStaffHours(locationId)
           if (currentHours !== originalHours) return true
+          const overrideKey = scheduleHoursOverrideKey(locationId, dayKey, staffId)
+          if (scheduleHoursOverridden.has(overrideKey) !== originalScheduleHoursOverridden.has(overrideKey)) {
+            return true
+          }
         }
       }
     }
@@ -1329,6 +1704,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
   const getStoreColor = (location: Location) => {
     const brandName = location.brand?.name?.toLowerCase() || ''
+    if (isFactoryBrand(location.brand ?? null)) {
+      return 'bg-slate-100'
+    }
     if (brandName.includes('mychoice')) {
       return 'bg-green-100' // Mychoice - Green background only
     } else if (brandName.includes('gelatofilipino')) {
@@ -1336,6 +1714,34 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     }
     return 'bg-gray-100' // Default
   }
+
+  const scheduleGfcMainStaff = useMemo(
+    () => companyStaff.filter((staffMember) => staffMemberIsGfcMain(staffMember)),
+    [companyStaff]
+  )
+
+  const scheduleRetailStaff = useMemo(
+    () => companyStaff.filter((staffMember) => !staffMemberIsGfcMain(staffMember)),
+    [companyStaff]
+  )
+
+  const scheduleLocationSections = useMemo(() => {
+    const gfcMainLocations = companyLocations.filter((location) => isFactoryBrand(location.brand ?? null))
+    const retailLocations = companyLocations.filter((location) => !isFactoryBrand(location.brand ?? null))
+    const sections: Array<{ title?: string; locations: Location[] }> = []
+
+    if (isScheduleAdmin && gfcMainLocations.length > 0) {
+      sections.push({ title: 'GFC Main', locations: gfcMainLocations })
+    }
+    if (retailLocations.length > 0) {
+      sections.push({
+        title: isScheduleAdmin && gfcMainLocations.length > 0 ? 'Retail Stores' : undefined,
+        locations: retailLocations,
+      })
+    }
+
+    return sections
+  }, [companyLocations, isScheduleAdmin])
 
   const getStaffForLocation = (locationId: string) => {
     return companyStaff.filter(staff => 
@@ -1381,14 +1787,14 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         }
       }))
 
-      // Initialize hours for this staff member (default to 11 hours)
+      // Initialize hours (GFC Main: 0 = fingerprint attendance; retail: 11)
       setStaffHours(prev => ({
         ...prev,
         [locationId]: {
           ...prev[locationId],
           [dayKey]: {
             ...prev[locationId]?.[dayKey],
-            [staffId]: 11
+            [staffId]: getDefaultStaffHours(locationId)
           }
         }
       }))
@@ -1420,11 +1826,30 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
     }))
   }
 
+  const scheduleHoursOverrideKey = (locationId: string, dayKey: string, staffId: string) =>
+    `${locationId}|${dayKey}|${staffId}`
+
+  const isScheduleHoursOverridden = (locationId: string, dayKey: string, staffId: string) =>
+    scheduleHoursOverridden.has(scheduleHoursOverrideKey(locationId, dayKey, staffId))
+
+  const isGfcMainLocation = (locationId: string) => {
+    const location = companyLocations.find((loc) => loc.id === locationId)
+    return location ? isFactoryBrand(location.brand ?? null) : false
+  }
+
+  const getDefaultStaffHours = (locationId: string) => (isGfcMainLocation(locationId) ? 0 : 11)
+
   const getStaffHours = (locationId: string, dayKey: string, staffId: string) => {
-    return staffHours[locationId]?.[dayKey]?.[staffId] || 11 // Default to 11 hours
+    return staffHours[locationId]?.[dayKey]?.[staffId] ?? getDefaultStaffHours(locationId)
   }
 
   const updateStaffHours = (locationId: string, dayKey: string, staffId: string, hours: number) => {
+    const overrideKey = scheduleHoursOverrideKey(locationId, dayKey, staffId)
+    setScheduleHoursOverridden((prev) => {
+      const next = new Set(prev)
+      next.add(overrideKey)
+      return next
+    })
     setStaffHours(prev => ({
       ...prev,
       [locationId]: {
@@ -1465,7 +1890,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
       // Confirmation for unmarking
       const currentWarnings = staffMember.total_warnings ?? 0
       const currentBalance = staffMember.leave_balance ?? 10
-      if (!confirm(`Remove absence for ${staffMember.full_name} on ${formattedDate}?\n\nThis will:\n• Restore hours to 11\n• Delete the warning\n• Remove 1 warning (${currentWarnings} → ${Math.max(0, currentWarnings - 1)})\n• Refund 1 day to leave balance (${currentBalance} → ${Math.min(10, currentBalance + 1)} days)`)) {
+      const restoredHours = getDefaultStaffHours(locationId)
+      if (!confirm(`Remove absence for ${staffMember.full_name} on ${formattedDate}?\n\nThis will:\n• Restore hours to ${restoredHours}\n• Delete the warning\n• Remove 1 warning (${currentWarnings} → ${Math.max(0, currentWarnings - 1)})\n• Refund 1 day to leave balance (${currentBalance} → ${Math.min(10, currentBalance + 1)} days)`)) {
         return
       }
     }
@@ -1553,8 +1979,8 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
         console.error('Error handling absence:', error)
       }
     } else {
-      // If unmarking absence, restore to default 11 hours
-      updateStaffHours(locationId, dayKey, staffId, 11)
+      // If unmarking absence, restore to branch default hours
+      updateStaffHours(locationId, dayKey, staffId, getDefaultStaffHours(locationId))
       
       // Delete the auto-created leave request and refund balance
       try {
@@ -1717,12 +2143,20 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 const hours = getStaffHours(locationId, dayKey, staffId)
                 const dayStatus = getDayStatus(dayKey)
                 const isAbsent = isStaffAbsent(locationId, dayKey, staffId)
+                const hoursForDb =
+                  isAbsent
+                    ? 0
+                    : isGfcMainLocation(locationId) &&
+                        !isScheduleHoursOverridden(locationId, dayKey, staffId) &&
+                        hours === 0
+                      ? null
+                      : hours
                 
                 const recordToSave = {
                   location_id: locationId,
                   staff_registration_id: staffId,
                   schedule_date: formatDateLocal(scheduleDate),
-                  hours: isAbsent ? 0 : hours, // Ensure hours is 0 if absent
+                  hours: hoursForDb,
                   day_type: dayStatus,
                   is_absent: isAbsent
                 }
@@ -1779,6 +2213,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
        // Update original schedule and hours to match current after successful save
        setOriginalSchedule(JSON.parse(JSON.stringify(schedule)))
        setOriginalStaffHours(JSON.parse(JSON.stringify(staffHours)))
+       setOriginalScheduleHoursOverridden(new Set(scheduleHoursOverridden))
        setOriginalDayStatus(JSON.parse(JSON.stringify(dayStatus)))
        
        // Set schedule just saved flag
@@ -1802,50 +2237,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
   }
 
   if (loading) {
-    return (
-      <div className="space-y-6">
-        {/* Header Skeleton */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
-          <div>
-            <div className="h-8 bg-gray-200 rounded w-48 mb-2 animate-pulse"></div>
-            <div className="h-4 bg-gray-200 rounded w-64 animate-pulse"></div>
-          </div>
-          <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-3">
-            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
-            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
-            <div className="h-10 bg-gray-200 rounded w-32 animate-pulse"></div>
-          </div>
-        </div>
-        
-        {/* Staff List Skeleton */}
-        <div className="bg-white rounded-lg shadow overflow-hidden">
-          <div>
-            <table className="w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  {['Staff Member', 'Contact', 'Assignments', 'Leave Balance / Warnings', 'Status', 'Actions'].map((header, idx) => (
-                    <th key={idx} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      {header}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {[...Array(8)].map((_, idx) => (
-                  <tr key={idx}>
-                    {[...Array(6)].map((_, cellIdx) => (
-                      <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
-                        <div className="h-8 bg-gray-200 rounded animate-pulse"></div>
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    )
+    return <StaffManagerPageSkeleton />
   }
 
   return (
@@ -2064,21 +2456,20 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                            {staffMember.staff_assignments.map((assignment) => {
                              const todaySchedule = isStaffScheduledToday(staffMember.id)
                              const isTodayAssignment = todaySchedule && todaySchedule.location_id === assignment.location_id
+                             const highlight = isTodayAssignment
+                               ? getBrandHighlightClasses(assignment.location.brand?.name)
+                               : null
                              
                              return (
                                <div 
                                  key={assignment.id} 
-                                 className={`flex items-center space-x-2 p-1 rounded ${
-                                   isTodayAssignment 
-                                     ? 'bg-blue-100 border border-blue-300' 
-                                     : ''
-                                 }`}
+                                 className={`flex items-center space-x-2 p-1 rounded ${highlight?.row ?? ''}`}
                                >
-                                 <MapPin className={`h-3 w-3 ${isTodayAssignment ? 'text-blue-600' : 'text-gray-400'}`} />
-                                 <span className={`text-xs ${isTodayAssignment ? 'text-blue-800 font-medium' : ''}`}>
+                                 <MapPin className={`h-3 w-3 ${highlight ? highlight.icon : 'text-gray-400'}`} />
+                                 <span className={`text-xs ${highlight ? highlight.text : ''}`}>
                                    {assignment.location.name} ({assignment.location.brand?.name})
-                                   {isTodayAssignment && (
-                                     <span className="ml-1 text-blue-600 font-semibold">• Today</span>
+                                   {isTodayAssignment && highlight && (
+                                     <span className={`ml-1 ${highlight.accent}`}>• Today</span>
                                    )}
                                  </span>
                                </div>
@@ -2159,7 +2550,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
       {/* Add Staff Modal */}
       {isAddModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => setIsAddModalOpen(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Add New Staff Member</h3>
@@ -2255,12 +2646,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Edit Staff Modal */}
       {isEditModalOpen && selectedStaff && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => setIsEditModalOpen(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">Edit Staff Member</h3>
@@ -2413,7 +2804,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   {selectedStaff.is_active ? 'Deactivate' : 'Activate'}
                 </button>
                 <button
-                  onClick={() => deleteStaff(selectedStaff.id)}
+                  onClick={async () => {
+                    const confirmed = await requestAdminPassword({
+                      title: 'Delete staff member',
+                      message:
+                        'Delete this staff member? This will also remove all their assignments.\n\nEnter admin password to confirm.',
+                      confirmLabel: 'Delete',
+                    })
+                    if (confirmed) deleteStaff(selectedStaff.id)
+                  }}
                   className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
                 >
                   Delete Staff
@@ -2436,12 +2835,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Add Assignment Modal */}
       {isAddAssignmentOpen && selectedStaff && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => setIsAddAssignmentOpen(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Assign Staff to Location</h3>
@@ -2517,14 +2916,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Schedule Staff Modal */}
       {isScheduleModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-lg max-w-screen-2xl w-full h-[90vh] flex flex-col border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between p-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50 flex-shrink-0">
+        <Modal onClose={() => { setIsScheduleModalOpen(false); setHoveredStaffId(null); setSelectedStaffForSchedule(null) }} align="center">
+          <div className="bg-white rounded-xl shadow-lg w-[calc(100vw-2rem)] max-w-screen-2xl h-[90vh] flex flex-col border border-gray-200 overflow-hidden">
+            <div className="flex-shrink-0 overflow-x-auto border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
+            <div className="flex items-center justify-between p-4 sm:p-6 min-w-[720px]">
               <div className="flex items-center space-x-4">
                 <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
                   <Calendar className="h-5 w-5 text-blue-600" />
@@ -2544,9 +2944,20 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                     className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[180px]"
                   >
                     <option value=""></option>
-                    {companyStaff.map((staff) => (
-                      <option key={staff.id} value={staff.id}>{staff.full_name}</option>
-                    ))}
+                    {isScheduleAdmin && scheduleGfcMainStaff.length > 0 && (
+                      <optgroup label="GFC Main">
+                        {scheduleGfcMainStaff.map((staffMember) => (
+                          <option key={staffMember.id} value={staffMember.id}>{staffMember.full_name}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {scheduleRetailStaff.length > 0 && (
+                      <optgroup label={isScheduleAdmin && scheduleGfcMainStaff.length > 0 ? 'Retail' : 'Staff'}>
+                        {scheduleRetailStaff.map((staffMember) => (
+                          <option key={staffMember.id} value={staffMember.id}>{staffMember.full_name}</option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
                 </div>
                 <div className="flex items-center space-x-2">
@@ -2588,11 +2999,15 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 </button>
               </div>
             </div>
+            </div>
             
-            <div className="flex-1 overflow-hidden bg-white">
-              <div className="h-full overflow-y-auto overflow-x-hidden p-6">
-                <div className="min-h-0">
-                <table className="w-full table-fixed">
+            <div className="flex-1 min-h-0 overflow-hidden bg-white">
+              <div className="h-full overflow-auto p-4 sm:p-6">
+                <div className="min-w-[1264px]">
+                {loadingScheduleData ? (
+                  <StaffScheduleModalSkeleton />
+                ) : (
+                <table className="w-full">
                   <thead>
                     <tr className="bg-gray-50 border-b border-white">
                       <th className="px-6 py-4 text-left text-sm font-semibold text-gray-900 border-r border-white w-64 min-w-64">
@@ -2659,17 +3074,19 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                         </td>
                       </tr>
                     ) : (
-                      companyLocations
-                        .sort((a, b) => {
-                          // Sort by brand name first, then by location name
-                          const brandA = a.brand?.name || ''
-                          const brandB = b.brand?.name || ''
-                          if (brandA !== brandB) {
-                            return brandA.localeCompare(brandB)
-                          }
-                          return a.name.localeCompare(b.name)
-                        })
-                        .map((location) => (
+                      scheduleLocationSections.map((section) => (
+                        <React.Fragment key={section.title || 'retail-stores'}>
+                          {section.title && (
+                            <tr className="bg-slate-200">
+                              <td
+                                colSpan={8}
+                                className="px-6 py-2 text-xs font-bold uppercase tracking-wide text-slate-700 border-r border-white"
+                              >
+                                {section.title}
+                              </td>
+                            </tr>
+                          )}
+                          {section.locations.map((location) => (
                         <tr key={location.id} className={`hover:bg-gray-50 transition-colors ${getStoreColor(location)}`}>
                           <td className={`px-6 py-4 text-sm font-medium text-gray-900 border-r border-white w-64 min-w-64 ${getStoreColor(location)}`}>
                             <div className="flex items-center space-x-3">
@@ -2804,7 +3221,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                                               value={isAbsent ? 0 : staffHours}
                                               onChange={(e) => updateStaffHours(location.id, dayKey, staff.id, parseFloat(e.target.value) || 0)}
                                               className={`w-12 text-xs border-0 bg-white hover:bg-gray-50 focus:bg-white focus:outline-none ${isAbsent ? 'border-red-300 focus:ring-red-500' : ''} rounded px-1 py-0.5 text-center font-medium`}
-                                              placeholder="11"
+                                              placeholder={String(getDefaultStaffHours(location.id))}
                                               disabled={saving || isAbsent}
                                             />
                                             <button
@@ -2825,15 +3242,19 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                             )
                           })}
                         </tr>
+                          ))}
+                        </React.Fragment>
                       ))
                     )}
                   </tbody>
                 </table>
+                )}
                 </div>
               </div>
             </div>
             
-            <div className="flex items-center justify-between p-6 border-t border-gray-200 bg-white flex-shrink-0">
+            <div className="flex-shrink-0 overflow-x-auto border-t border-gray-200 bg-white">
+            <div className="flex items-center justify-between p-4 sm:p-6 min-w-[720px]">
               {/* Color Legend */}
               <div className="flex items-center space-x-6">
                 <div className="flex items-center space-x-2">
@@ -2877,8 +3298,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                 </button>
               </div>
             </div>
+            </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Status Messages */}
@@ -2896,7 +3318,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
 
       {/* Leave Request Approval Modal */}
       {isLeaveRequestModalOpen && selectedLeaveRequest && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => setIsLeaveRequestModalOpen(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Review Leave Request</h3>
@@ -3062,12 +3484,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Leave History Modal */}
       {isLeaveHistoryModalOpen && selectedStaffForHistory && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => { setIsLeaveHistoryModalOpen(false); setSelectedStaffForHistory(null); setStaffLeaveHistory([]) }} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
               <div>
@@ -3108,7 +3530,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
             </div>
             
             <div className="p-6">
-              {staffLeaveHistory.length === 0 ? (
+              {loadingLeaveHistory ? (
+                <StaffLeaveHistorySkeleton />
+              ) : staffLeaveHistory.length === 0 ? (
                 <div className="text-center py-12">
                   <Calendar className="h-16 w-16 text-gray-300 mx-auto mb-4" />
                   <p className="text-gray-600">No leave requests found for this staff member.</p>
@@ -3215,12 +3639,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* General Announcement Modal */}
       {isAnnouncementModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => { setIsAnnouncementModalOpen(false); setAnnouncementForm({ title: '', message: '', type: 'general' }) }} align="center">
           <div className="bg-white rounded-lg shadow-xl w-[1000px] h-[700px] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">General Announcements</h3>
@@ -3321,10 +3745,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   <h4 className="font-semibold text-gray-900">Recent Announcements</h4>
                   <div className="space-y-3 flex-1 overflow-y-auto">
                     {loadingAnnouncementHistory ? (
-                      <div className="text-center py-8 text-gray-500">
-                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-2"></div>
-                        <p className="text-sm">Loading announcements...</p>
-                      </div>
+                      <StaffModalHistorySkeleton rows={5} variant="compact" />
                     ) : announcementHistory.length === 0 ? (
                       <div className="text-center py-8 text-gray-500">
                         <Megaphone className="h-12 w-12 text-gray-300 mx-auto mb-2" />
@@ -3386,12 +3807,12 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Staff Message Modal */}
       {isMessageModalOpen && selectedStaffForMessage && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal onClose={() => { setIsMessageModalOpen(false); setSelectedStaffForMessage(null); setMessageForm({ title: '', message: '', type: 'notice' }) }} align="center">
           <div className="bg-white rounded-lg shadow-xl w-[1000px] h-[700px] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <div>
@@ -3512,10 +3933,7 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
                   <h4 className="font-semibold text-gray-900">Message History</h4>
                   <div className="space-y-3 flex-1 overflow-y-auto">
                     {loadingMessageHistory ? (
-                      <div className="text-center py-8 text-gray-500">
-                        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-2"></div>
-                        <p className="text-sm">Loading messages...</p>
-                      </div>
+                      <StaffModalHistorySkeleton rows={5} variant="compact" />
                     ) : messageHistory.length === 0 ? (
                       <div className="text-center py-8 text-gray-500">
                         <Mail className="h-12 w-12 text-gray-300 mx-auto mb-2" />
@@ -3585,8 +4003,9 @@ export function StaffManager({ theme = 'blue' }: StaffManagerProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
+      {AdminPasswordModal}
     </div>
   )
 }

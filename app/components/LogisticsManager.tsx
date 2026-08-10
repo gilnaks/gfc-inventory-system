@@ -39,6 +39,136 @@ interface LogisticsManagerProps {
   theme?: string
 }
 
+type LogisticsAssignmentCardSkeleton = {
+  locationWidth: string
+  dateWidth: string
+  height: string
+}
+
+type LogisticsDaySkeletonPattern = {
+  minHeight: string
+  morning: LogisticsAssignmentCardSkeleton[]
+  afternoon: LogisticsAssignmentCardSkeleton[]
+}
+
+const LOGISTICS_DAY_SKELETON_PATTERNS: LogisticsDaySkeletonPattern[] = [
+  { minHeight: 'min-h-[120px]', morning: [], afternoon: [] },
+  {
+    minHeight: 'min-h-[132px]',
+    morning: [{ locationWidth: 'max-w-[4rem]', dateWidth: 'w-10', height: 'h-9' }],
+    afternoon: [],
+  },
+  {
+    minHeight: 'min-h-[132px]',
+    morning: [],
+    afternoon: [{ locationWidth: 'max-w-[5.5rem]', dateWidth: 'w-12', height: 'h-10' }],
+  },
+  {
+    minHeight: 'min-h-[156px]',
+    morning: [{ locationWidth: 'max-w-[5rem]', dateWidth: 'w-11', height: 'h-10' }],
+    afternoon: [{ locationWidth: 'max-w-[3.5rem]', dateWidth: 'w-10', height: 'h-8' }],
+  },
+  {
+    minHeight: 'min-h-[168px]',
+    morning: [
+      { locationWidth: 'max-w-[4.5rem]', dateWidth: 'w-10', height: 'h-9' },
+      { locationWidth: 'max-w-[6rem]', dateWidth: 'w-12', height: 'h-10' },
+    ],
+    afternoon: [],
+  },
+  {
+    minHeight: 'min-h-[168px]',
+    morning: [],
+    afternoon: [
+      { locationWidth: 'max-w-[4rem]', dateWidth: 'w-11', height: 'h-9' },
+      { locationWidth: 'max-w-[5rem]', dateWidth: 'w-10', height: 'h-8' },
+    ],
+  },
+  {
+    minHeight: 'min-h-[188px]',
+    morning: [{ locationWidth: 'max-w-[6rem]', dateWidth: 'w-14', height: 'h-11' }],
+    afternoon: [
+      { locationWidth: 'max-w-[4rem]', dateWidth: 'w-10', height: 'h-9' },
+      { locationWidth: 'max-w-[5.5rem]', dateWidth: 'w-12', height: 'h-10' },
+    ],
+  },
+  {
+    minHeight: 'min-h-[188px]',
+    morning: [
+      { locationWidth: 'max-w-[3.5rem]', dateWidth: 'w-10', height: 'h-8' },
+      { locationWidth: 'max-w-[5rem]', dateWidth: 'w-11', height: 'h-10' },
+    ],
+    afternoon: [{ locationWidth: 'max-w-[4.5rem]', dateWidth: 'w-12', height: 'h-9' }],
+  },
+  {
+    minHeight: 'min-h-[144px]',
+    morning: [{ locationWidth: 'max-w-[5.5rem]', dateWidth: 'w-12', height: 'h-10' }],
+    afternoon: [],
+  },
+  {
+    minHeight: 'min-h-[176px]',
+    morning: [{ locationWidth: 'max-w-[4rem]', dateWidth: 'w-10', height: 'h-9' }],
+    afternoon: [{ locationWidth: 'max-w-[6rem]', dateWidth: 'w-14', height: 'h-11' }],
+  },
+]
+
+function LogisticsAssignmentCardSkeletonBlock({
+  card,
+}: {
+  card: LogisticsAssignmentCardSkeleton
+}) {
+  return (
+    <div className={`rounded bg-gray-200 p-1 animate-pulse ${card.height}`}>
+      <div className={`h-3 rounded bg-gray-300 ${card.locationWidth}`} />
+      <div className={`mt-1 h-2 rounded bg-gray-300 ${card.dateWidth}`} />
+    </div>
+  )
+}
+
+function LogisticsSlotSkeleton({
+  labelWidth,
+  cards,
+}: {
+  labelWidth: string
+  cards: LogisticsAssignmentCardSkeleton[]
+}) {
+  return (
+    <div className="mb-2 last:mb-0">
+      <div className="mb-1 flex items-center justify-between">
+        <div className={`h-3 rounded bg-gray-200 animate-pulse ${labelWidth}`} />
+        <div className="h-3 w-3 rounded bg-gray-200 animate-pulse" />
+      </div>
+      {cards.length > 0 ? (
+        <div className="space-y-1">
+          {cards.map((card, index) => (
+            <LogisticsAssignmentCardSkeletonBlock key={index} card={card} />
+          ))}
+        </div>
+      ) : (
+        <div className="h-6 rounded bg-gray-100 animate-pulse" />
+      )}
+    </div>
+  )
+}
+
+function LogisticsCalendarDaySkeleton({ dayIndex }: { dayIndex: number }) {
+  const pattern =
+    LOGISTICS_DAY_SKELETON_PATTERNS[dayIndex % LOGISTICS_DAY_SKELETON_PATTERNS.length]
+  const dayNumberWidth = dayIndex % 3 === 0 ? 'w-5' : dayIndex % 3 === 1 ? 'w-4' : 'w-6'
+  const morningLabelWidth = dayIndex % 2 === 0 ? 'w-14' : 'w-12'
+  const afternoonLabelWidth = dayIndex % 2 === 0 ? 'w-16' : 'w-14'
+
+  return (
+    <div
+      className={`rounded-lg border border-gray-200 bg-white p-2 ${pattern.minHeight}`}
+    >
+      <div className={`mb-2 h-4 rounded bg-gray-200 animate-pulse ${dayNumberWidth}`} />
+      <LogisticsSlotSkeleton labelWidth={morningLabelWidth} cards={pattern.morning} />
+      <LogisticsSlotSkeleton labelWidth={afternoonLabelWidth} cards={pattern.afternoon} />
+    </div>
+  )
+}
+
 export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsManagerProps) {
   const [currentDate, setCurrentDate] = useState(new Date())
   const [assignments, setAssignments] = useState<LogisticsAssignment[]>([])
@@ -477,19 +607,7 @@ export function LogisticsManager({ selectedBrand, theme = 'blue' }: LogisticsMan
             
             {/* Skeleton days */}
             {[...Array(35)].map((_, idx) => (
-              <div key={idx} className="p-2 border rounded-lg min-h-[120px] bg-white border-gray-200">
-                <div className="h-4 bg-gray-200 rounded w-6 mb-2 animate-pulse"></div>
-                {/* Morning slot skeleton */}
-                <div className="mb-2">
-                  <div className="h-3 bg-gray-200 rounded w-16 mb-1 animate-pulse"></div>
-                  <div className="h-8 bg-gray-200 rounded animate-pulse"></div>
-                </div>
-                {/* Afternoon slot skeleton */}
-                <div>
-                  <div className="h-3 bg-gray-200 rounded w-16 mb-1 animate-pulse"></div>
-                  <div className="h-8 bg-gray-200 rounded animate-pulse"></div>
-                </div>
-              </div>
+              <LogisticsCalendarDaySkeleton key={idx} dayIndex={idx} />
             ))}
           </div>
         ) : (

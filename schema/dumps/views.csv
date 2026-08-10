@@ -1,0 +1,65 @@
+table_name,view_definition
+inventory_summary," SELECT p.id AS product_id,
+    p.brand_id,
+    p.name AS product_name,
+    p.sku,
+    p.category,
+    p.unit,
+    COALESCE(p.price, 0.00) AS price,
+    COALESCE(p.initial_stock, 0) AS initial_stock,
+    COALESCE(p.production, 0) AS production,
+    COALESCE(p.released, 0) AS released,
+    COALESCE(p.reserved, 0) AS reserved,
+    b.name AS brand_name,
+    b.slug AS brand_slug,
+    ((COALESCE(p.initial_stock, 0) + COALESCE(p.production, 0)) - COALESCE(p.released, 0)) AS final_stock,
+    (((COALESCE(p.initial_stock, 0) + COALESCE(p.production, 0)) - COALESCE(p.released, 0)) - COALESCE(p.reserved, 0)) AS available_stock,
+    p.created_at,
+    p.updated_at
+   FROM (products p
+     JOIN brands b ON ((p.brand_id = b.id)));"
+materials_stock_view," SELECT rm.id,
+    rm.brand_id,
+    rm.supplier_id,
+    rm.material_name,
+    rm.sku,
+    rm.category,
+    rm.unit,
+    rm.unit_cost,
+    rm.minimum_stock,
+    rm.current_stock,
+    rm.is_active,
+    b.name AS brand_name,
+    s.name AS supplier_name,
+        CASE
+            WHEN (rm.current_stock <= (0)::numeric) THEN 'out_of_stock'::text
+            WHEN (rm.current_stock <= rm.minimum_stock) THEN 'low_stock'::text
+            WHEN (rm.current_stock > (rm.minimum_stock * (3)::numeric)) THEN 'overstock'::text
+            ELSE 'normal'::text
+        END AS stock_status,
+    (rm.current_stock * rm.unit_cost) AS stock_value,
+    rm.created_at,
+    rm.updated_at
+   FROM ((raw_materials rm
+     JOIN brands b ON ((rm.brand_id = b.id)))
+     LEFT JOIN suppliers s ON ((rm.supplier_id = s.id)));"
+po_summary_view," SELECT po.id,
+    po.po_number,
+    po.brand_id,
+    b.name AS brand_name,
+    po.supplier_id,
+    s.name AS supplier_name,
+    po.order_date,
+    po.expected_delivery_date,
+    po.status,
+    po.total_amount,
+    po.paid_amount,
+    po.balance_amount,
+    po.payment_timing,
+    count(poi.id) AS item_count,
+    po.created_at
+   FROM (((purchase_orders po
+     JOIN suppliers s ON ((po.supplier_id = s.id)))
+     JOIN brands b ON ((po.brand_id = b.id)))
+     LEFT JOIN purchase_order_items poi ON ((po.id = poi.po_id)))
+  GROUP BY po.id, b.name, s.name;"

@@ -1,12 +1,22 @@
 'use client'
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
-import { MapPin, Plus, Edit, Trash2, Save, X, FileText, Printer, Eye, Copy } from 'lucide-react'
+import { MapPin, Plus, Edit, Trash2, Save, X, FileText, Printer, Eye, Copy, ShoppingCart } from 'lucide-react'
 import { formatPhilippinesDateTime, formatPhilippinesTransferSheetDate } from '../../lib/timezone'
-import { TRANSFER_SHEET_PRINT_STYLES } from '../../lib/transferSheetPrintStyles'
+import { TRANSFER_SHEET_PRINT_STYLES, TRANSFER_SHEET_PRINT_SCRIPT } from '../../lib/transferSheetPrintStyles'
 import { renderTransferSheetItemsBlock } from '../../lib/transferSheetPrintItems'
 import { renderTransferSheetTotalsSection } from '../../lib/transferSheetPrintTotals'
 import { buildTransferSheetDsirPayload } from '../../lib/transferSheetDsirQr'
+import { Modal } from './Modal'
+import {
+  DEFAULT_INCENTIVE_BASE_AMOUNT,
+  DEFAULT_INCENTIVE_HOLIDAY_SALES_THRESHOLD,
+  DEFAULT_INCENTIVE_INCREMENT_AMOUNT,
+  DEFAULT_INCENTIVE_INCREMENT_SALES,
+  DEFAULT_INCENTIVE_REGULAR_SALES_THRESHOLD,
+  hasCustomIncentiveSettings,
+  resolveLocationIncentiveSettings,
+} from '../../lib/payroll-incentive'
 
 interface Location {
   id: string
@@ -18,6 +28,9 @@ interface Location {
   company_owned?: boolean
   can_access_order_features?: boolean
   is_remote?: boolean
+  incentive_regular_sales_threshold?: number | null
+  incentive_holiday_sales_threshold?: number | null
+  incentive_base_amount?: number | null
   created_at: string
   updated_at: string
   brand?: {
@@ -65,9 +78,10 @@ interface CustomerOrder {
 interface BranchManagerProps {
   selectedBrand: any | null
   theme?: string
+  guestMode?: boolean
 }
 
-export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerProps) {
+export function BranchManager({ selectedBrand, theme = 'blue', guestMode = false }: BranchManagerProps) {
   const [locations, setLocations] = useState<Location[]>([])
   const [brands, setBrands] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
@@ -83,6 +97,14 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
   const [showReturnablePansModal, setShowReturnablePansModal] = useState(false)
   const [selectedReturnablePansImage, setSelectedReturnablePansImage] = useState<string | null>(null)
   const [selectedReturnablePansOrder, setSelectedReturnablePansOrder] = useState<CustomerOrder | null>(null)
+  const [incentiveModalLocation, setIncentiveModalLocation] = useState<Location | null>(null)
+  const [incentiveForm, setIncentiveForm] = useState({
+    regularSalesThreshold: '',
+    holidaySalesThreshold: '',
+    baseAmount: '',
+  })
+  const [savingIncentiveSettings, setSavingIncentiveSettings] = useState(false)
+  const [orderModalLocation, setOrderModalLocation] = useState<Location | null>(null)
   const [newLocation, setNewLocation] = useState({
     name: '',
     passkey: '',
@@ -269,6 +291,111 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     }
   }
 
+  const formatIncentiveAmount = (amount: number) =>
+    amount.toLocaleString('en-PH', { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+
+  const openIncentiveSettingsModal = (location: Location) => {
+    const settings = resolveLocationIncentiveSettings(location)
+    setIncentiveForm({
+      regularSalesThreshold: String(settings.regularSalesThreshold),
+      holidaySalesThreshold: String(settings.holidaySalesThreshold),
+      baseAmount: String(settings.baseAmount),
+    })
+    setIncentiveModalLocation(location)
+  }
+
+  const closeIncentiveSettingsModal = () => {
+    setIncentiveModalLocation(null)
+    setSavingIncentiveSettings(false)
+  }
+
+  const normalizeIncentiveDbValue = (
+    value: string,
+    defaultValue: number
+  ): number | null => {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed) || parsed < 0) return null
+    return parsed === defaultValue ? null : parsed
+  }
+
+  const handleSaveIncentiveSettings = async () => {
+    if (!incentiveModalLocation) return
+
+    const regularSalesThreshold = Number(incentiveForm.regularSalesThreshold)
+    const holidaySalesThreshold = Number(incentiveForm.holidaySalesThreshold)
+    const baseAmount = Number(incentiveForm.baseAmount)
+
+    if (
+      !Number.isFinite(regularSalesThreshold) ||
+      regularSalesThreshold <= 0 ||
+      !Number.isFinite(holidaySalesThreshold) ||
+      holidaySalesThreshold <= 0 ||
+      !Number.isFinite(baseAmount) ||
+      baseAmount < 0
+    ) {
+      alert('Please enter valid incentive amounts greater than zero for sales thresholds.')
+      return
+    }
+
+    setSavingIncentiveSettings(true)
+    try {
+      const payload = {
+        incentive_regular_sales_threshold: normalizeIncentiveDbValue(
+          incentiveForm.regularSalesThreshold,
+          DEFAULT_INCENTIVE_REGULAR_SALES_THRESHOLD
+        ),
+        incentive_holiday_sales_threshold: normalizeIncentiveDbValue(
+          incentiveForm.holidaySalesThreshold,
+          DEFAULT_INCENTIVE_HOLIDAY_SALES_THRESHOLD
+        ),
+        incentive_base_amount: normalizeIncentiveDbValue(
+          incentiveForm.baseAmount,
+          DEFAULT_INCENTIVE_BASE_AMOUNT
+        ),
+        updated_at: new Date().toISOString(),
+      }
+
+      const { data, error } = await supabase
+        .from('locations')
+        .update(payload)
+        .eq('id', incentiveModalLocation.id)
+        .select(`
+          *,
+          brand:brands(*)
+        `)
+        .single()
+
+      if (error) {
+        console.error('Error saving incentive settings:', error)
+        alert('Error saving incentive settings')
+        return
+      }
+
+      if (data) {
+        setLocations((prev) =>
+          prev.map((loc) => (loc.id === data.id ? { ...data, brand: loc.brand || data.brand } : loc))
+        )
+        closeIncentiveSettingsModal()
+      }
+    } catch (error) {
+      console.error('Error saving incentive settings:', error)
+      alert('Error saving incentive settings')
+    } finally {
+      setSavingIncentiveSettings(false)
+    }
+  }
+
+  const handleResetIncentiveDefaults = () => {
+    setIncentiveForm({
+      regularSalesThreshold: String(DEFAULT_INCENTIVE_REGULAR_SALES_THRESHOLD),
+      holidaySalesThreshold: String(DEFAULT_INCENTIVE_HOLIDAY_SALES_THRESHOLD),
+      baseAmount: String(DEFAULT_INCENTIVE_BASE_AMOUNT),
+    })
+  }
+
+  const getOrderPortalEmbedUrl = (location: Location) =>
+    `/order?embed=1&locationId=${encodeURIComponent(location.id)}&passkey=${encodeURIComponent(location.passkey)}`
+
   const fetchLocationOrders = async (locationId: string) => {
     setLoading(true)
     try {
@@ -446,7 +573,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
     let dsirQrDataUrl = ''
     if (dsirPayloadText) {
       const QRCode = (await import('qrcode')).default
-      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 220, margin: 1 })
+      dsirQrDataUrl = await QRCode.toDataURL(dsirPayloadText, { width: 360, margin: 1 })
     }
 
     const printWindow = window.open('', '_blank')
@@ -500,18 +627,16 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               grandTotal: order.total_amount,
               remarks: order.notes,
               qrDataUrl: dsirQrDataUrl,
-              qrCaption: 'DSIR ICE CREAM',
+              qrCaption: 'Receive stock',
             })}
           </div>
           
           </div>
+          <script>${TRANSFER_SHEET_PRINT_SCRIPT}</script>
         </body>
         </html>
       `)
       printWindow.document.close()
-      printWindow.focus()
-      printWindow.print()
-      printWindow.close()
     }
   }
 
@@ -681,8 +806,8 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
         {/* Order Details Modal - Only show in order history view */}
         {showOrderDetails && selectedOrder && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-            <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
+          <Modal backdropClassName="bg-gray-600/50">
+            <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col overflow-hidden">
               <div className="flex justify-between items-center mb-4 flex-shrink-0">
                 <h3 className="text-lg font-semibold text-gray-900">
                   Order Details #{selectedOrder.id.slice(0, 8)}
@@ -855,13 +980,13 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 </div>
               </div>
             </div>
-          </div>
+          </Modal>
         )}
 
         {/* Deposit Slip Image Modal */}
         {showDepositSlipModal && selectedDepositSlipImage && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-            <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+          <Modal backdropClassName="bg-gray-600/50">
+            <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
               <div className="flex justify-between items-center mb-4 flex-shrink-0">
                 <h3 className="text-lg font-semibold text-gray-900">
                   Deposit Slip
@@ -885,13 +1010,13 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 />
               </div>
             </div>
-          </div>
+          </Modal>
         )}
 
         {/* Returnable Pans Image Modal */}
         {showReturnablePansModal && selectedReturnablePansImage && (
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-            <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+          <Modal backdropClassName="bg-gray-600/50">
+            <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
               <div className="flex justify-between items-center mb-4 flex-shrink-0">
                 <h3 className="text-lg font-semibold text-gray-900">
                   Returnable Pans Image
@@ -920,7 +1045,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                 />
               </div>
             </div>
-          </div>
+          </Modal>
         )}
       </div>
     )
@@ -950,8 +1075,8 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
 
       {/* Add Branch Modal */}
       {showAddForm && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-md shadow-lg rounded-md bg-white">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 max-w-md shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Add New Branch</h3>
               <button
@@ -997,7 +1122,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                       onChange={(e) => setNewLocation({...newLocation, can_access_order_features: e.target.checked})}
                       className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
                     />
-                    <span>Allow Features</span>
+                    <span>Features</span>
                   </label>
                   <label className="flex items-center space-x-2 text-sm text-gray-700">
                     <input
@@ -1006,7 +1131,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                       onChange={(e) => setNewLocation({...newLocation, is_remote: e.target.checked})}
                       className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
                     />
-                    <span>Remote Branch</span>
+                    <span>Remote</span>
                   </label>
                 </div>
               </div>
@@ -1094,7 +1219,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               </div>
             </form>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Branches List */}
@@ -1104,7 +1229,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             <table className="w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  {['Branch Name', 'Passkey', 'Franchisee', 'Contact', 'Type', 'Access Features', 'Remote Branch', 'Actions'].map((header, idx) => (
+                  {['Branch Name', 'Passkey', 'Franchisee', 'Contact #', 'Type', 'Remote', 'Actions'].map((header, idx) => (
                     <th key={idx} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       {header}
                     </th>
@@ -1114,7 +1239,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
               <tbody className="bg-white divide-y divide-gray-200">
                 {[...Array(5)].map((_, idx) => (
                   <tr key={idx}>
-                    {[...Array(8)].map((_, cellIdx) => (
+                    {[...Array(7)].map((_, cellIdx) => (
                       <td key={cellIdx} className="px-6 py-4 whitespace-nowrap">
                         <div className="h-6 bg-gray-200 rounded animate-pulse"></div>
                       </td>
@@ -1141,16 +1266,13 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                     Franchisee
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-40">
-                    Contact
+                    Contact #
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-36">
                     Type
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-36">
-                    Access Features
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-36">
-                    Remote Branch
+                    Remote
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-32">
                     Actions
@@ -1169,7 +1291,29 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                           className="w-full px-2 py-1 border border-gray-300 rounded"
                         />
                       ) : (
-                        location.name
+                        <div className="flex items-center gap-2 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => openIncentiveSettingsModal(location)}
+                            className={`text-left truncate hover:underline ${
+                              theme === 'green'
+                                ? 'hover:text-green-700'
+                                : theme === 'red'
+                                  ? 'hover:text-red-700'
+                                  : theme === 'yellow'
+                                    ? 'hover:text-yellow-700'
+                                    : 'hover:text-blue-700'
+                            }`}
+                            title="Configure sales incentive settings"
+                          >
+                            {location.name}
+                          </button>
+                          {hasCustomIncentiveSettings(location) && (
+                            <span className="shrink-0 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                              Custom
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
@@ -1244,32 +1388,11 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                         <label className="flex items-center space-x-2">
                           <input
                             type="checkbox"
-                            checked={editingLocation.can_access_order_features || false}
-                            onChange={(e) => setEditingLocation({...editingLocation, can_access_order_features: e.target.checked})}
-                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                          />
-                          <span className="text-xs text-gray-600">Allow Features</span>
-                        </label>
-                      ) : (
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                          location.can_access_order_features 
-                            ? 'bg-green-100 text-green-800' 
-                            : 'bg-red-100 text-red-800'
-                        }`}>
-                          {location.can_access_order_features ? 'Allowed' : 'Restricted'}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 align-middle">
-                      {editingLocation?.id === location.id ? (
-                        <label className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
                             checked={editingLocation.is_remote || false}
                             onChange={(e) => setEditingLocation({...editingLocation, is_remote: e.target.checked})}
                             className="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded"
                           />
-                          <span className="text-xs text-gray-600">Remote Branch</span>
+                          <span className="text-xs text-gray-600">Remote</span>
                         </label>
                       ) : (
                         <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
@@ -1320,12 +1443,20 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                               <Edit className="h-4 w-4" />
                             </button>
                             <button
+                              onClick={() => setOrderModalLocation(location)}
+                              className="p-1 rounded text-emerald-600 hover:text-emerald-900 hover:bg-emerald-50 transition-all duration-200 ease-in-out"
+                              title="Open order portal"
+                            >
+                              <ShoppingCart className="h-4 w-4" />
+                            </button>
+                            <button
                               onClick={() => handleViewOrderHistory(location)}
                               className="p-1 rounded text-blue-600 hover:text-blue-900 hover:bg-blue-50 transition-all duration-200 ease-in-out"
                               title="View Order History"
                             >
                               <Eye className="h-4 w-4" />
                             </button>
+                            {!guestMode ? (
                             <button
                               onClick={() => handleDeleteLocation(location.id)}
                               className="p-1 rounded text-red-600 hover:text-red-900 hover:bg-red-50 transition-all duration-200 ease-in-out"
@@ -1333,6 +1464,7 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
+                            ) : null}
                           </>
                         )}
                       </div>
@@ -1343,6 +1475,176 @@ export function BranchManager({ selectedBrand, theme = 'blue' }: BranchManagerPr
             </table>
           </div>
         </div>
+      )}
+
+      {orderModalLocation && (
+        <Modal
+          onClose={() => setOrderModalLocation(null)}
+          zIndex={60}
+          contentClassName="p-2 sm:p-4"
+          positionClassName="items-stretch"
+        >
+          <div className="flex h-[92vh] w-[96vw] max-w-7xl flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-4 py-3">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Order Portal</h3>
+                <p className="text-sm text-gray-600">{orderModalLocation.name}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOrderModalLocation(null)}
+                className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                aria-label="Close order portal"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <iframe
+              key={orderModalLocation.id}
+              src={getOrderPortalEmbedUrl(orderModalLocation)}
+              title={`Order portal - ${orderModalLocation.name}`}
+              className="h-full w-full flex-1 border-0 bg-gray-50"
+            />
+          </div>
+        </Modal>
+      )}
+
+      {incentiveModalLocation && (
+        <Modal onClose={closeIncentiveSettingsModal} backdropClassName="bg-gray-600/50">
+          <div className="w-full max-w-lg rounded-lg bg-white shadow-xl border border-gray-200">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-6 py-4">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Sales Incentive Settings</h3>
+                <p className="mt-1 text-sm text-gray-600">{incentiveModalLocation.name}</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeIncentiveSettingsModal}
+                className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="space-y-5 px-6 py-5">
+              <p className="text-sm text-gray-600">
+                Set branch-specific incentive thresholds. Leave values at the system defaults unless
+                this branch needs different targets.
+              </p>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">
+                    Regular Day — Daily Gross Sales Required
+                  </label>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    Default: ₱{formatIncentiveAmount(DEFAULT_INCENTIVE_REGULAR_SALES_THRESHOLD)}
+                  </p>
+                  <input
+                    type="number"
+                    min="0"
+                    step="100"
+                    value={incentiveForm.regularSalesThreshold}
+                    onChange={(e) =>
+                      setIncentiveForm((prev) => ({
+                        ...prev,
+                        regularSalesThreshold: e.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">
+                    Holiday — Daily Gross Sales Required
+                  </label>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    Default: ₱{formatIncentiveAmount(DEFAULT_INCENTIVE_HOLIDAY_SALES_THRESHOLD)}
+                  </p>
+                  <input
+                    type="number"
+                    min="0"
+                    step="100"
+                    value={incentiveForm.holidaySalesThreshold}
+                    onChange={(e) =>
+                      setIncentiveForm((prev) => ({
+                        ...prev,
+                        holidaySalesThreshold: e.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">
+                    Base Incentive Amount
+                  </label>
+                  <p className="mt-0.5 text-xs text-gray-500">
+                    Default: ₱{formatIncentiveAmount(DEFAULT_INCENTIVE_BASE_AMOUNT)} when the sales
+                    threshold is reached
+                  </p>
+                  <input
+                    type="number"
+                    min="0"
+                    step="10"
+                    value={incentiveForm.baseAmount}
+                    onChange={(e) =>
+                      setIncentiveForm((prev) => ({
+                        ...prev,
+                        baseAmount: e.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-gray-500">
+                Additional incentive of ₱{formatIncentiveAmount(DEFAULT_INCENTIVE_INCREMENT_AMOUNT)}{' '}
+                applies for every ₱{formatIncentiveAmount(DEFAULT_INCENTIVE_INCREMENT_SALES)} in gross
+                sales above the threshold.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-200 px-6 py-4">
+              <button
+                type="button"
+                onClick={handleResetIncentiveDefaults}
+                className="text-sm font-medium text-gray-600 hover:text-gray-900"
+              >
+                Reset to defaults
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={closeIncentiveSettingsModal}
+                  className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveIncentiveSettings}
+                  disabled={savingIncentiveSettings}
+                  className={`rounded-md px-4 py-2 text-sm font-medium text-white disabled:opacity-50 ${
+                    theme === 'green'
+                      ? 'bg-green-600 hover:bg-green-700'
+                      : theme === 'red'
+                        ? 'bg-red-600 hover:bg-red-700'
+                        : theme === 'yellow'
+                          ? 'bg-yellow-600 hover:bg-yellow-700'
+                          : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
+                >
+                  {savingIncentiveSettings ? 'Saving…' : 'Save settings'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
       )}
 
     </div>

@@ -88,7 +88,7 @@ interface DiscountItem {
 
 interface ExpenseItem {
   id?: string
-  particulars: string
+  description: string
   amount: number
 }
 
@@ -249,27 +249,10 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
       setPredefinedDenominations(denominations)
     } catch (error) {
       console.error('Error loading predefined items:', error)
-      // Fallback to default items if database fails
-      setPredefinedSalesItems([
-        { name: 'BIG CUP', price: 90 },
-        { name: 'SMALL CUP', price: 80 },
-        { name: 'WATER', price: 0 },
-        { name: 'CHOCO-COATED', price: 0 },
-        { name: '500ML', price: 0 },
-        { name: '1 PAN', price: 500 }
-      ])
+      setPredefinedSalesItems([])
       setPredefinedIceCreamFlavors([])
-      setPredefinedMaterials(['DSR FORM', 'SPOONS', 'TISSUE', 'GLOVES', 'TRASHBAG', 'SOAP', 'POPSICLE STICKS'])
-      setPredefinedDenominations([
-        { name: '1,000', value: 1000 },
-        { name: '500', value: 500 },
-        { name: '200', value: 200 },
-        { name: '100', value: 100 },
-        { name: '50', value: 50 },
-        { name: '20', value: 20 },
-        { name: 'COINS', value: 0 },
-        { name: 'GCASH', value: 0 }
-      ])
+      setPredefinedMaterials([])
+      setPredefinedDenominations([])
     }
   }
 
@@ -508,12 +491,12 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
 
     // Save expense items
     for (const item of expenses) {
-      if (item.particulars?.trim()) {
+      if (item.description?.trim()) {
         if (item.id) {
           await supabase
             .from('dsir_expenses')
             .update({
-              particulars: item.particulars,
+              description: item.description,
               amount: item.amount
             })
             .eq('id', item.id)
@@ -522,7 +505,7 @@ export function DSIRForm({ report, onReportUpdate }: DSIRFormProps) {
             .from('dsir_expenses')
             .insert({
               dsir_report_id: report.id,
-              particulars: item.particulars,
+              description: item.description,
               amount: item.amount
             })
             .select()

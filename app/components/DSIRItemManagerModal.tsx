@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Brand } from '../../lib/supabase'
 import { Plus, Trash2, Save, Edit3, X, Check, X as CloseIcon } from 'lucide-react'
+import { Modal } from './Modal'
 
 interface DSIRPredefinedItem {
   id?: string
@@ -224,7 +225,7 @@ export function DSIRItemManagerModal({ isOpen, onClose, selectedBrand, theme }: 
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <Modal onClose={onClose} align="center" backdropClassName="bg-black/50">
       <div className="bg-white rounded-lg shadow-xl max-w-6xl w-full max-h-[90vh] overflow-hidden">
         {/* Modal Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
@@ -409,6 +410,6 @@ export function DSIRItemManagerModal({ isOpen, onClose, selectedBrand, theme }: 
           )}
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

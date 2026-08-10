@@ -1,7 +1,15 @@
 'use client'
 import { Fragment, useState, useEffect, useCallback, useRef } from 'react'
+import dynamic from 'next/dynamic'
 import { supabase } from '../../lib/supabase'
 import { TRANSFER_SHEET_DSIR_QR_PREFIX } from '../../lib/transferSheetDsirQr'
+import { applyTransferReceive, applyDsirPullOutsOnSubmit } from '../../lib/dsir-store-inventory'
+
+const TransferSheetQrScannerModal = dynamic(
+  () =>
+    import('./TransferSheetQrScannerModal').then((m) => m.TransferSheetQrScannerModal),
+  { ssr: false }
+)
 
 interface DSIRReport {
   id: string
@@ -119,6 +127,13 @@ function normalizeCategoryKey(category: string | null | undefined): string {
   return (category || '').trim().toLowerCase().replace(/[\s_-]+/g, '')
 }
 
+function formatReportDate(dateStr: string): string {
+  const [datePart] = dateStr.split('T')
+  const [year, month, day] = datePart.split('-')
+  if (!year || !month || !day) return datePart
+  return `${Number(month)}/${Number(day)}/${year}`
+}
+
 export function DSIRViewer({ 
   report, 
   onReportUpdate, 
@@ -164,7 +179,9 @@ export function DSIRViewer({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [saving, setSaving] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [transferScanValue, setTransferScanValue] = useState('')
+  const [showQrScanner, setShowQrScanner] = useState(false)
+  const [qrPasteText, setQrPasteText] = useState('')
+  const [clientReady, setClientReady] = useState(false)
   
   // Legacy editing state (keeping for compatibility with existing UI)
   const [editingField, setEditingField] = useState<string | null>(null)
@@ -212,7 +229,7 @@ export function DSIRViewer({
     }`
   }
 
-  const applyTransferSheetScan = useCallback((rawScanValue: string) => {
+  const applyTransferSheetScan = useCallback(async (rawScanValue: string) => {
     const raw = rawScanValue.trim()
     if (!raw.startsWith(TRANSFER_SHEET_DSIR_QR_PREFIX)) {
       alert('Invalid transfer QR format.')
@@ -235,6 +252,7 @@ export function DSIRViewer({
 
     let appliedCount = 0
     const nextFormData: Record<string, any> = {}
+    const receiveItems: Array<{ flavor: string; quantity: number }> = []
 
     for (const row of parsed.items) {
       const flavor = String(row.flavor || '').trim().toUpperCase()
@@ -250,6 +268,7 @@ export function DSIRViewer({
 
       const fieldId = `icecream-${itemId}-arrival`
       nextFormData[fieldId] = arrivalToAdd
+      receiveItems.push({ flavor, quantity: arrivalToAdd })
       appliedCount += 1
     }
 
@@ -263,8 +282,56 @@ export function DSIRViewer({
       ...nextFormData,
     }))
     setHasUnsavedChanges(true)
-    alert(`Transfer QR applied to ${appliedCount} flavor(s). Save draft to persist.`)
-  }, [iceCreamInventory, predefinedIceCreamFlavors, formData])
+
+    const brandId =
+      (report?.location as { brand_id?: string; brand?: { id?: string } } | undefined)?.brand_id ||
+      (report?.location as { brand?: { id?: string } } | undefined)?.brand?.id ||
+      ''
+
+    if (!report?.location_id || !brandId) {
+      alert(
+        `Transfer QR applied to ${appliedCount} flavor(s) on the form, but store inventory could not be updated (missing location/brand). Save draft to persist Arrival.`
+      )
+      return
+    }
+
+    try {
+      const result = await applyTransferReceive({
+        locationId: report.location_id,
+        brandId,
+        reportDate: report.report_date,
+        items: receiveItems,
+        staffRegistrationId: report.staff_registration_id,
+        staffName: currentStaffName || report.staff_name,
+        dsirReportId: report.id,
+      })
+      if (result.status === 'duplicate') {
+        alert(
+          `Transfer QR applied to ${appliedCount} flavor(s) on the form. Store inventory was already updated for this sheet today (no double receive). Save draft to persist Arrival.`
+        )
+        return
+      }
+      if (result.status === 'applied') {
+        alert(
+          `Transfer QR applied to ${appliedCount} flavor(s). Store inventory +${result.totalQty} pan(s). Save draft to persist Arrival.`
+        )
+        return
+      }
+      alert(`Transfer QR applied to ${appliedCount} flavor(s). Save draft to persist.`)
+    } catch (e) {
+      console.error(e)
+      alert(
+        `Transfer QR applied to the form, but store inventory update failed: ${
+          e instanceof Error ? e.message : 'unknown error'
+        }. Save draft to persist Arrival.`
+      )
+    }
+  }, [
+    iceCreamInventory,
+    predefinedIceCreamFlavors,
+    report,
+    currentStaffName,
+  ])
 
   // Helper function to handle cell clicks
   const handleCellClick = (e: React.MouseEvent, fieldId: string, currentValue: any) => {
@@ -731,20 +798,10 @@ export function DSIRViewer({
       setPredefinedDenominations(denominations)
     } catch (error) {
       console.error('Error loading predefined items:', error)
-      // Fallback to default items if database fails
-      setPredefinedSalesItems([
-        {name: 'BIG CUP', price: 90}, {name: 'SMALL CUP', price: 80}, {name: 'WATER', price: 0}, 
-        {name: 'CHOCO-COATED', price: 0}, {name: '500ML', price: 0}, {name: '1 PAN', price: 500}
-      ])
+      setPredefinedSalesItems([])
       setPredefinedIceCreamFlavors([])
-      setPredefinedMaterials([
-        {name: 'DSR FORM', price: null}, {name: 'SPOONS', price: null}, {name: 'TISSUE', price: null}, 
-        {name: 'GLOVES', price: null}, {name: 'TRASHBAG', price: null}, {name: 'SOAP', price: null}, {name: 'POPSICLE STICKS', price: null}
-      ])
-      setPredefinedDenominations([
-        {name: '1,000', price: null}, {name: '500', price: null}, {name: '200', price: null}, {name: '100', price: null}, 
-        {name: '50', price: null}, {name: '20', price: null}, {name: 'COINS', price: null}, {name: 'GCASH', price: null}
-      ])
+      setPredefinedMaterials([])
+      setPredefinedDenominations([])
     }
   }, [report])
 
@@ -773,6 +830,10 @@ export function DSIRViewer({
   useEffect(() => {
     loadReportData()
   }, [loadReportData])
+
+  useEffect(() => {
+    setClientReady(true)
+  }, [])
 
   const getItemValue = (items: any[], itemName: string, field: string) => {
     const item = items.find(i => i.item_name === itemName || i.flavor === itemName || i.material_name === itemName)
@@ -1763,12 +1824,17 @@ export function DSIRViewer({
     return originalValue.toString()
   }
 
-  const saveDraft = async (showSuccessMessage = true) => {
+  const saveDraft = async (
+    showSuccessMessage = true,
+    formDataOverride?: Record<string, any>
+  ) => {
     if (forceReadOnly) return
     if (!report?.id) {
       console.error('Cannot save: No report ID')
       return
     }
+
+    const dataToSave = formDataOverride ?? formData
     
     setSaving(true)
     try {
@@ -1783,7 +1849,7 @@ export function DSIRViewer({
         throw new Error('Report not found in database. Please refresh the page and try again.')
       }
       
-      console.log('Saving draft with data:', formData)
+      console.log('Saving draft with data:', dataToSave)
       
       // Process all form data and save to database
       const headerUpdates: any = {}
@@ -1795,7 +1861,7 @@ export function DSIRViewer({
       const salesReconUpdates: any[] = []
       
       // Process form data by field ID
-      Object.entries(formData).forEach(([fieldId, value]) => {
+      Object.entries(dataToSave).forEach(([fieldId, value]) => {
         // Define numeric fields that should convert empty strings to 0
         const numericFields = ['beginning_inventory', 'arrival', 'pull_out', 'ending_inventory', 'quantity', 'amount', 'order_amount', 'beginning', 'ending']
         
@@ -1879,7 +1945,7 @@ export function DSIRViewer({
             const discountExists = discounts.some(d => d.id === itemId)
             
             // Only process if this field has been edited (has form data) AND the item still exists
-            if (formData[fieldId] !== undefined && discountExists) {
+            if (dataToSave[fieldId] !== undefined && discountExists) {
               let item = discountUpdates.find(u => u.itemId === itemId)
               if (!item) {
                 item = { itemId, updates: {} }
@@ -1899,7 +1965,7 @@ export function DSIRViewer({
             const expenseExists = expenses.some(e => e.id === itemId)
             
             // Only process if this field has been edited (has form data) AND the item still exists
-            if (formData[fieldId] !== undefined && expenseExists) {
+            if (dataToSave[fieldId] !== undefined && expenseExists) {
               let item = expenseUpdates.find(u => u.itemId === itemId)
               if (!item) {
                 item = { itemId, updates: {} }
@@ -2449,6 +2515,7 @@ export function DSIRViewer({
     } catch (error) {
       console.error('Error saving draft:', error)
       alert('Error saving draft. Please try again.')
+      throw error
     } finally {
       setSaving(false)
     }
@@ -2460,8 +2527,98 @@ export function DSIRViewer({
     
     setSubmitting(true)
     try {
+      // Flush in-progress cell edit so pull-out isn't lost if Submit is clicked mid-edit
+      const pendingField = editingField
+      const pendingValue = editingValue
+      if (pendingField) {
+        updateFormData(pendingField, pendingValue)
+        setEditingField(null)
+        setEditingValue('')
+      }
+
+      const formDataForSave: Record<string, any> = {
+        ...formData,
+        ...(pendingField ? { [pendingField]: pendingValue } : {}),
+      }
+
       // First save the draft (without showing success message)
-      await saveDraft(false)
+      await saveDraft(false, formDataForSave)
+
+      let brandId =
+        (report?.location as { brand_id?: string; brand?: { id?: string } } | undefined)?.brand_id ||
+        (report?.location as { brand?: { id?: string } } | undefined)?.brand?.id ||
+        ''
+
+      if (!brandId && report.location_id) {
+        const { data: locRow } = await supabase
+          .from('locations')
+          .select('brand_id')
+          .eq('id', report.location_id)
+          .maybeSingle()
+        brandId = (locRow?.brand_id as string) || ''
+      }
+
+      // Read pull-outs from DB after save — React iceCreamInventory/formData are stale post-saveDraft
+      const { data: iceRows, error: iceErr } = await supabase
+        .from('dsir_ice_cream_inventory')
+        .select('flavor, pull_out')
+        .eq('dsir_report_id', report.id)
+      if (iceErr) throw iceErr
+
+      const pullOuts: Array<{ flavor: string; quantity: number }> = []
+      for (const row of iceRows || []) {
+        const qty = Math.max(0, Math.floor(Number(row.pull_out) || 0))
+        if (qty > 0 && row.flavor) {
+          pullOuts.push({ flavor: String(row.flavor), quantity: qty })
+        }
+      }
+
+      // Fallback: form keys if a DB row insert was skipped
+      for (const [fieldId, value] of Object.entries(formDataForSave)) {
+        const match = fieldId.match(/^icecream-(.+)-pull_out$/)
+        if (!match) continue
+        const qty = Math.max(0, Math.floor(Number(value) || 0))
+        if (qty <= 0) continue
+        const itemId = match[1]
+        let flavor = ''
+        if (itemId.startsWith('new-')) {
+          const idx = parseInt(itemId.replace('new-', ''), 10)
+          flavor = predefinedIceCreamFlavors[idx]?.name || ''
+        } else {
+          flavor = iceCreamInventory.find((i) => i.id === itemId)?.flavor || ''
+        }
+        if (!flavor) continue
+        const already = pullOuts.some(
+          (p) => p.flavor.trim().toUpperCase() === flavor.trim().toUpperCase()
+        )
+        if (!already) pullOuts.push({ flavor, quantity: qty })
+      }
+
+      let pullOutPosted = 0
+      if (pullOuts.length > 0) {
+        if (!brandId) {
+          throw new Error('Cannot post pull-outs: store brand is missing on this report.')
+        }
+        const pullResult = await applyDsirPullOutsOnSubmit({
+          locationId: report.location_id,
+          brandId,
+          dsirReportId: report.id,
+          staffRegistrationId: report.staff_registration_id,
+          staffName: currentStaffName || report.staff_name,
+          pullOuts,
+        })
+        if (pullResult.status === 'insufficient') {
+          alert(
+            `Cannot submit: pull-out for ${pullResult.flavor} (${pullResult.pullOut}) exceeds store on hand (${pullResult.onHand}).`
+          )
+          return
+        }
+        if (pullResult.status === 'applied') {
+          pullOutPosted = pullResult.flavors
+        }
+      } else {
+        console.warn('DSIR submit: no ice cream pull-outs to post to store inventory')
+      }
       
       // Calculate final values
       const grossSales = getGrossSales()
@@ -2522,10 +2679,16 @@ export function DSIRViewer({
           onReportSubmitted()
         }
 
-      alert('Report submitted successfully!')
+      alert(
+        pullOutPosted > 0
+          ? `Report submitted successfully! Store inventory: pull-out posted for ${pullOutPosted} flavor(s).`
+          : 'Report submitted successfully!'
+      )
     } catch (error) {
       console.error('Error submitting report:', error)
-      alert('Error submitting report. Please try again.')
+      alert(
+        `Error submitting report: ${error instanceof Error ? error.message : 'Please try again.'}`
+      )
     } finally {
       setSubmitting(false)
     }
@@ -2588,7 +2751,7 @@ export function DSIRViewer({
           <div className="text-left">
             <div className="text-xs sm:text-sm font-semibold text-black">DATE:</div>
             <div className="border-b border-black h-5 sm:h-6 flex items-center justify-center text-xs sm:text-sm">
-              {report.report_date ? new Date(report.report_date).toLocaleDateString() : ''}
+              {report.report_date ? formatReportDate(report.report_date) : ''}
             </div>
         </div>
           <div className="text-left">
@@ -2910,37 +3073,50 @@ export function DSIRViewer({
           <div className="lg:col-span-7 space-y-4">
           {/* Section B: Ice Cream Inventory */}
           <div className="border border-black">
-            <div className="bg-gray-100 px-2 py-1 border-b border-black">
+            <div className="bg-gray-100 px-2 py-1 border-b border-black flex items-center justify-between gap-2">
               <span className="font-bold text-sm">B. ICE CREAM INVENTORY</span>
+              {!isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => setShowQrScanner(true)}
+                  className="flex items-center gap-2 px-2 py-1 text-xs bg-black text-white rounded shrink-0"
+                >
+                  Scan QR
+                </button>
+              )}
             </div>
             {!isReadOnly && (
-              <div className="px-2 py-2 border-b border-black bg-white">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={transferScanValue}
-                    onChange={(e) => setTransferScanValue(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        applyTransferSheetScan(transferScanValue)
-                        setTransferScanValue('')
-                      }
-                    }}
-                    placeholder="Scan transfer-sheet QR for ice cream arrivals"
-                    className="flex-1 border border-gray-300 px-2 py-1 text-xs rounded"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      applyTransferSheetScan(transferScanValue)
-                      setTransferScanValue('')
-                    }}
-                    className="px-2 py-1 text-xs bg-black text-white rounded"
-                  >
-                    Apply QR
-                  </button>
-                </div>
+              <div className="px-2 py-1.5 border-b border-black bg-amber-50 flex flex-col sm:flex-row gap-1.5 sm:items-center">
+                <label className="text-[10px] font-semibold text-amber-900 uppercase shrink-0 whitespace-nowrap">
+                  Temp QR paste
+                </label>
+                <input
+                  type="text"
+                  value={qrPasteText}
+                  onChange={(e) => setQrPasteText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      const raw = qrPasteText.trim()
+                      if (!raw) return
+                      void applyTransferSheetScan(raw).then(() => setQrPasteText(''))
+                    }
+                  }}
+                  placeholder="Paste DSIR_TRANSFER_V1|… payload"
+                  className="flex-1 min-w-0 border border-amber-300 rounded px-2 py-1 text-xs bg-white"
+                />
+                <button
+                  type="button"
+                  disabled={!qrPasteText.trim()}
+                  onClick={() => {
+                    const raw = qrPasteText.trim()
+                    if (!raw) return
+                    void applyTransferSheetScan(raw).then(() => setQrPasteText(''))
+                  }}
+                  className="px-2 py-1 text-xs font-medium bg-amber-800 text-white rounded disabled:opacity-50 shrink-0"
+                >
+                  Apply
+                </button>
               </div>
             )}
             <div className="overflow-x-auto">
@@ -3882,6 +4058,16 @@ export function DSIRViewer({
           </div>
         </div>
       </div>
+
+      {clientReady && showQrScanner && (
+        <TransferSheetQrScannerModal
+          onClose={() => setShowQrScanner(false)}
+          onScan={(raw) => {
+            setShowQrScanner(false)
+            void applyTransferSheetScan(raw)
+          }}
+        />
+      )}
     </div>
   )
 }

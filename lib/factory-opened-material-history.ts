@@ -8,11 +8,11 @@ import {
 
 export type OpenedMaterialHistoryEntry = {
   id: string
-  kind: 'opened' | 'production'
+  kind: 'opened' | 'production' | 'adjustment' | 'depleted' | 'discarded'
   at: string
   title: string
   subtitle?: string
-  quantity: number
+  quantity: number | null
   unit: string
 }
 
@@ -102,7 +102,52 @@ export function buildOpenedMaterialHistory(
     }
   })
 
-  return [...productionEntries, openedEntry].sort(
+  const productionUsedStock = batchRows.reduce(
+    (sum, usage) => sum + (Number(usage.quantity_used) || 0),
+    0
+  )
+  const remainingStock = Number(row.quantity_remaining) || 0
+  const openedStock = Number(row.quantity_opened) || 0
+  const writtenOffStock = Math.max(0, openedStock - remainingStock - productionUsedStock)
+
+  const lifecycleEntries: OpenedMaterialHistoryEntry[] = []
+
+  if (writtenOffStock > 1e-6) {
+    lifecycleEntries.push({
+      id: `writeoff-${row.id}`,
+      kind: row.status === 'discarded' ? 'discarded' : 'adjustment',
+      at: row.updated_at || row.opened_at,
+      title: row.status === 'discarded' ? 'Discarded' : 'Adjusted / written off',
+      subtitle:
+        row.status === 'discarded'
+          ? 'Remaining stock removed from WIP'
+          : 'Remaining quantity corrected',
+      quantity: toDisplay(writtenOffStock),
+      unit: displayUnit,
+    })
+  } else if (row.status === 'depleted' && remainingStock <= 1e-6) {
+    lifecycleEntries.push({
+      id: `depleted-${row.id}`,
+      kind: 'depleted',
+      at: row.updated_at || row.opened_at,
+      title: 'Marked empty',
+      subtitle: productionUsedStock > 1e-6 ? 'All remaining used in production' : undefined,
+      quantity: null,
+      unit: displayUnit,
+    })
+  } else if (row.status === 'discarded' && remainingStock <= 1e-6 && writtenOffStock <= 1e-6) {
+    lifecycleEntries.push({
+      id: `discarded-${row.id}`,
+      kind: 'discarded',
+      at: row.updated_at || row.opened_at,
+      title: 'Discarded',
+      subtitle: 'Package removed from floor',
+      quantity: null,
+      unit: displayUnit,
+    })
+  }
+
+  return [...productionEntries, ...lifecycleEntries, openedEntry].sort(
     (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime()
   )
 }

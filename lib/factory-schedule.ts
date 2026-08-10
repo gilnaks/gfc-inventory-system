@@ -1,13 +1,16 @@
 import { supabase } from './supabase'
 import { isActiveSticker } from './production-sticker'
 import { getPhilippinesDate } from './timezone'
+import { isFactoryScheduleAggregateView } from './gfc-production-catalog'
 
 export type FactoryScheduleItem = {
   schedule_id: string
   product_id: string
   product_name: string
   sku?: string
+  /** Destination consumer brand (for_brand_id display name). */
   brand_name: string
+  for_brand_id?: string
   batch_number: string
   notes?: string
   quantity_required: number
@@ -49,22 +52,50 @@ function defaultBatchNumber(scheduleDate: string, sku?: string): string {
   return `BATCH-${scheduleDate.replace(/-/g, '')}${skuPart ? '-' + skuPart : ''}`
 }
 
-export async function loadTodayFactorySchedule(
-  scheduleDate = getPhilippinesDate()
-): Promise<FactoryScheduleItem[]> {
-  const { data: scheduleData } = await supabase
-    .from('production_schedules')
-    .select('id, product_id, quantity_required, batch_number, notes')
-    .eq('schedule_date', scheduleDate)
-    .eq('status', 'active')
+type ScheduleRow = {
+  id: string
+  product_id: string
+  quantity_required: number
+  batch_number?: string
+  notes?: string | null
+  for_brand_id?: string | null
+}
 
-  if (!scheduleData?.length) return []
+async function buildScheduleItems(
+  scheduleData: ScheduleRow[],
+  scheduleDate: string,
+  _statusFilter: 'active' | 'draft_or_active'
+): Promise<FactoryScheduleItem[]> {
+  if (!scheduleData.length) return []
 
   const pids = scheduleData.map((s) => s.product_id)
-  const { data: products } = await supabase
-    .from('products')
-    .select('id, name, sku, brands(name)')
-    .in('id', pids)
+  const forBrandIds = Array.from(
+    new Set(scheduleData.map((s) => s.for_brand_id).filter(Boolean))
+  ) as string[]
+
+  const prodSince = new Date()
+  prodSince.setDate(prodSince.getDate() - 2)
+
+  const [{ data: products }, { data: forBrands }, { data: printed }, { data: producedLogs }] =
+    await Promise.all([
+      supabase.from('products').select('id, name, sku, brand_id, brands(name)').in('id', pids),
+      forBrandIds.length
+        ? supabase.from('brands').select('id, name').in('id', forBrandIds)
+        : Promise.resolve({ data: [] as { id: string; name: string }[] }),
+      supabase
+        .from('production_sticker_logs')
+        .select('product_id, schedule_id, voided_at')
+        .eq('manufacture_date', scheduleDate)
+        .is('voided_at', null),
+      supabase
+        .from('production_sticker_logs')
+        .select('product_id, schedule_id, produced_at, voided_at')
+        .not('produced_at', 'is', null)
+        .is('voided_at', null)
+        .gte('produced_at', prodSince.toISOString()),
+    ])
+
+  const forBrandMap = new Map((forBrands || []).map((b) => [b.id, b.name]))
 
   const prodMap = new Map(
     (products || []).map((p) => [
@@ -79,53 +110,68 @@ export async function loadTodayFactorySchedule(
     ])
   )
 
-  const { data: printed } = await supabase
-    .from('production_sticker_logs')
-    .select('product_id, schedule_id, voided_at')
-    .eq('manufacture_date', scheduleDate)
-    .is('voided_at', null)
+  const scheduleByProduct = new Map<string, ScheduleRow[]>()
+  for (const row of scheduleData) {
+    const list = scheduleByProduct.get(row.product_id)
+    if (list) list.push(row)
+    else scheduleByProduct.set(row.product_id, [row])
+  }
 
-  const prodSince = new Date()
-  prodSince.setDate(prodSince.getDate() - 2)
-  const { data: producedLogs } = await supabase
-    .from('production_sticker_logs')
-    .select('product_id, schedule_id, produced_at, voided_at')
-    .not('produced_at', 'is', null)
-    .is('voided_at', null)
-    .gte('produced_at', prodSince.toISOString())
+  const printedCount = new Map<string, number>()
+  const producedCount = new Map<string, number>()
+
+  for (const sticker of printed || []) {
+    if (!isActiveSticker(sticker)) continue
+    const productId = sticker.product_id as string
+    const stickerScheduleId = sticker.schedule_id as string | null | undefined
+    const targets = stickerScheduleId
+      ? scheduleData.filter((row) => row.id === stickerScheduleId && row.product_id === productId)
+      : scheduleByProduct.get(productId) || []
+    for (const row of targets) {
+      printedCount.set(row.id, (printedCount.get(row.id) || 0) + 1)
+    }
+  }
+
+  for (const sticker of producedLogs || []) {
+    if (!isActiveSticker(sticker)) continue
+    if (!sticker.produced_at || !producedOnScheduleDate(sticker.produced_at as string, scheduleDate)) {
+      continue
+    }
+    const productId = sticker.product_id as string
+    const stickerScheduleId = sticker.schedule_id as string | null | undefined
+    const targets = stickerScheduleId
+      ? scheduleData.filter((row) => row.id === stickerScheduleId && row.product_id === productId)
+      : scheduleByProduct.get(productId) || []
+    for (const row of targets) {
+      if (
+        matchesScheduleRow(
+          { product_id: productId, schedule_id: stickerScheduleId },
+          { schedule_id: row.id, product_id: row.product_id }
+        )
+      ) {
+        producedCount.set(row.id, (producedCount.get(row.id) || 0) + 1)
+      }
+    }
+  }
 
   return scheduleData
     .map((row) => {
       const p = prodMap.get(row.product_id)
-      const printedN =
-        printed?.filter(
-          (x) =>
-            isActiveSticker(x) &&
-            x.product_id === row.product_id &&
-            (x.schedule_id === row.id || !x.schedule_id)
-        ).length ?? 0
-      const producedN =
-        producedLogs?.filter(
-          (x) =>
-            isActiveSticker(x) &&
-            matchesScheduleRow(
-              { product_id: x.product_id, schedule_id: x.schedule_id },
-              { schedule_id: row.id, product_id: row.product_id }
-            ) && producedOnScheduleDate(x.produced_at as string, scheduleDate)
-        ).length ?? 0
+      const destName = row.for_brand_id
+        ? forBrandMap.get(row.for_brand_id) || '—'
+        : p?.brand_name || '—'
       return {
         schedule_id: row.id,
         product_id: row.product_id,
         product_name: p?.name || '—',
         sku: p?.sku,
-        brand_name: p?.brand_name || '—',
-        batch_number:
-          (row as { batch_number?: string }).batch_number ||
-          defaultBatchNumber(scheduleDate, p?.sku),
-        notes: (row as { notes?: string | null }).notes?.trim() || undefined,
+        brand_name: destName,
+        for_brand_id: row.for_brand_id || undefined,
+        batch_number: row.batch_number || defaultBatchNumber(scheduleDate, p?.sku),
+        notes: row.notes?.trim() || undefined,
         quantity_required: row.quantity_required,
-        printed: printedN,
-        produced: producedN,
+        printed: printedCount.get(row.id) ?? 0,
+        produced: producedCount.get(row.id) ?? 0,
       }
     })
     .sort((a, b) => {
@@ -133,6 +179,18 @@ export async function loadTodayFactorySchedule(
       if (byBrand !== 0) return byBrand
       return a.product_name.localeCompare(b.product_name, undefined, { sensitivity: 'base' })
     })
+}
+
+export async function loadTodayFactorySchedule(
+  scheduleDate = getPhilippinesDate()
+): Promise<FactoryScheduleItem[]> {
+  const { data: scheduleData } = await supabase
+    .from('production_schedules')
+    .select('id, product_id, quantity_required, batch_number, notes, for_brand_id')
+    .eq('schedule_date', scheduleDate)
+    .eq('status', 'active')
+
+  return buildScheduleItems((scheduleData || []) as ScheduleRow[], scheduleDate, 'active')
 }
 
 export function groupScheduleByBrand(
@@ -182,108 +240,76 @@ export async function loadScannedSerialsForScheduleItem(
     }))
 }
 
-/** Saved production schedule rows for one brand on a given date (no sticker data). */
-export async function loadBrandProductionSchedule(
-  brandId: string,
+/** Scanned finished-goods count for a schedule line (matches factory floor / schedule UI). */
+export async function countProducedForScheduleItem(
+  item: Pick<FactoryScheduleItem, 'schedule_id' | 'product_id'>,
   scheduleDate: string
+): Promise<number> {
+  const serials = await loadScannedSerialsForScheduleItem(item, scheduleDate)
+  return serials.length
+}
+
+/** GFC schedule lines for a destination consumer brand on a given date (or all brands on GFC Main). */
+export async function loadGfcScheduleForBrand(
+  forBrandId: string,
+  scheduleDate: string,
+  factoryBrandId?: string
 ): Promise<FactoryScheduleItem[]> {
-  const { data: products } = await supabase
-    .from('products')
-    .select('id')
-    .eq('brand_id', brandId)
+  const { data: gfcBrand } = await supabase.from('brands').select('id').eq('slug', 'gfc').maybeSingle()
+  if (!gfcBrand?.id) return []
 
-  const productIds = (products || []).map((p: { id: string }) => p.id)
-  if (productIds.length === 0) return []
+  const aggregateView = isFactoryScheduleAggregateView(forBrandId, factoryBrandId ?? gfcBrand.id)
 
-  const { data: scheduleData, error } = await supabase
+  let productIds: string[] = []
+  if (aggregateView) {
+    const { data: retailBrands } = await supabase
+      .from('brands')
+      .select('id')
+      .eq('brand_role', 'retail')
+    const retailIds = (retailBrands || []).map((r) => r.id as string)
+    if (!retailIds.length) return []
+    const { data: retailProducts } = await supabase
+      .from('products')
+      .select('id')
+      .in('brand_id', retailIds)
+    productIds = (retailProducts || []).map((r) => r.id as string)
+  } else {
+    const { data: retailProducts } = await supabase
+      .from('products')
+      .select('id')
+      .eq('brand_id', forBrandId)
+    productIds = (retailProducts || []).map((r) => r.id as string)
+  }
+
+  if (!productIds.length) return []
+
+  let scheduleQuery = supabase
     .from('production_schedules')
-    .select('id, product_id, quantity_required, batch_number, notes')
+    .select('id, product_id, quantity_required, batch_number, notes, for_brand_id')
     .eq('schedule_date', scheduleDate)
-    .in('status', ['draft', 'active'])
     .in('product_id', productIds)
+    .in('status', ['draft', 'active'])
+
+  if (!aggregateView) {
+    scheduleQuery = scheduleQuery.eq('for_brand_id', forBrandId)
+  }
+
+  const { data: scheduleData, error } = await scheduleQuery
 
   if (error) {
     console.warn('production_schedules:', error.message)
     return []
   }
-  if (!scheduleData?.length) return []
 
-  const scheduledIds = scheduleData.map((s) => s.product_id)
-  const { data: productRows } = await supabase
-    .from('products')
-    .select('id, name, sku, brands(name)')
-    .in('id', scheduledIds)
-    .eq('brand_id', brandId)
+  return buildScheduleItems((scheduleData || []) as ScheduleRow[], scheduleDate, 'draft_or_active')
+}
 
-  const prodMap = new Map(
-    (productRows || []).map((p) => [
-      p.id as string,
-      {
-        name: p.name as string,
-        sku: p.sku as string | undefined,
-        brand_name: productBrandName(
-          p.brands as { name: string } | { name: string }[] | null | undefined
-        ),
-      },
-    ])
-  )
-
-  const { data: printed } = await supabase
-    .from('production_sticker_logs')
-    .select('product_id, schedule_id, voided_at')
-    .eq('manufacture_date', scheduleDate)
-    .is('voided_at', null)
-
-  const prodSince = new Date()
-  prodSince.setDate(prodSince.getDate() - 2)
-  const { data: producedLogs } = await supabase
-    .from('production_sticker_logs')
-    .select('product_id, schedule_id, produced_at, voided_at')
-    .not('produced_at', 'is', null)
-    .is('voided_at', null)
-    .gte('produced_at', prodSince.toISOString())
-
-  const rows = scheduleData
-    .map((row) => {
-      const p = prodMap.get(row.product_id)
-      if (!p) return null
-      const printedN =
-        printed?.filter(
-          (x) =>
-            isActiveSticker(x) &&
-            x.product_id === row.product_id &&
-            (x.schedule_id === row.id || !x.schedule_id)
-        ).length ?? 0
-      const producedN =
-        producedLogs?.filter(
-          (x) =>
-            isActiveSticker(x) &&
-            matchesScheduleRow(
-              { product_id: x.product_id, schedule_id: x.schedule_id },
-              { schedule_id: row.id, product_id: row.product_id }
-            ) && producedOnScheduleDate(x.produced_at as string, scheduleDate)
-        ).length ?? 0
-      const item: FactoryScheduleItem = {
-        schedule_id: row.id,
-        product_id: row.product_id,
-        product_name: p.name,
-        sku: p.sku,
-        brand_name: p.brand_name,
-        batch_number:
-          (row as { batch_number?: string }).batch_number ||
-          defaultBatchNumber(scheduleDate, p.sku),
-        notes: (row as { notes?: string | null }).notes?.trim() || undefined,
-        quantity_required: row.quantity_required,
-        printed: printedN,
-        produced: producedN,
-      }
-      return item
-    })
-    .filter((row): row is FactoryScheduleItem => row !== null)
-
-  return rows.sort((a, b) =>
-    a.product_name.localeCompare(b.product_name, undefined, { sensitivity: 'base' })
-  )
+/** @deprecated Use loadGfcScheduleForBrand */
+export async function loadBrandProductionSchedule(
+  brandId: string,
+  scheduleDate: string
+): Promise<FactoryScheduleItem[]> {
+  return loadGfcScheduleForBrand(brandId, scheduleDate)
 }
 
 export function isScheduleItemScanComplete(

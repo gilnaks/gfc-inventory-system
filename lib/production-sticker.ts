@@ -28,20 +28,6 @@ export async function voidProductionSticker(stickerId: string): Promise<void> {
     throw new Error('This sticker is already voided')
   }
 
-  if (sticker.produced_at) {
-    const { data: product } = await supabase
-      .from('products')
-      .select('production')
-      .eq('id', sticker.product_id)
-      .single()
-
-    const nextProduction = Math.max(0, (product?.production || 0) - 1)
-    await supabase
-      .from('products')
-      .update({ production: nextProduction })
-      .eq('id', sticker.product_id)
-  }
-
   const { error: updateError } = await supabase
     .from('production_sticker_logs')
     .update({ voided_at: new Date().toISOString() })

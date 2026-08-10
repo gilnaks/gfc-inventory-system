@@ -5,7 +5,7 @@ import {
   type MaterialCycleCountLine,
   type RawMaterial,
 } from './supabase'
-import { stockUnitsPerPurchase, formatStockAsPurchaseWithRemainder, formatStockUnitTotal } from './raw-material-uom'
+import { stockUnitsPerPurchase, formatStockAsPurchaseWithRemainder, formatStockUnitTotal, getPurchaseUnitLabel } from './raw-material-uom'
 
 export function purchaseQtyToStockUnits(qty: number, material: RawMaterial): number {
   return qty * stockUnitsPerPurchase(material)
@@ -21,6 +21,37 @@ export function lineVarianceStock(line: MaterialCycleCountLine): number | null {
   return Number(line.counted_stock) - Number(line.system_stock)
 }
 
+/** Variance in purchase units (same unit as physical count entry). */
+export function purchaseQtyVariance(
+  purchaseQty: number | null | undefined,
+  systemStock: number,
+  material: RawMaterial
+): number | null {
+  if (purchaseQty == null || purchaseQty === undefined) return null
+  const systemPurchase = stockUnitsToPurchaseQty(Number(systemStock), material)
+  return purchaseQty - systemPurchase
+}
+
+export function purchaseQtyVarianceFromStock(
+  countedStock: number | null | undefined,
+  systemStock: number,
+  material: RawMaterial
+): number | null {
+  if (countedStock == null || countedStock === undefined) return null
+  return (
+    stockUnitsToPurchaseQty(Number(countedStock), material) -
+    stockUnitsToPurchaseQty(Number(systemStock), material)
+  )
+}
+
+export function formatPurchaseUnitQty(qty: number, material: RawMaterial): string {
+  const n = Number(qty)
+  if (!Number.isFinite(n)) return `0 ${getPurchaseUnitLabel(material)}`
+  const abs = Math.abs(n)
+  const formatted = Number.isInteger(abs) ? abs.toLocaleString() : abs.toFixed(2)
+  return `${formatted} ${getPurchaseUnitLabel(material)}`
+}
+
 export function formatCycleCountQty(
   stockQty: number,
   material: RawMaterial
@@ -29,6 +60,23 @@ export function formatCycleCountQty(
     purchase: formatStockAsPurchaseWithRemainder(stockQty, material),
     stockNote: formatStockUnitTotal(stockQty, material),
   }
+}
+
+export function formatCycleCountMovementNotes(params: {
+  countDate: string
+  materialName: string
+  systemStock: number
+  countedStock: number
+  material?: RawMaterial | null
+}): string {
+  const { countDate, materialName, systemStock, countedStock, material } = params
+  const systemLabel = material
+    ? formatCycleCountQty(systemStock, material).purchase
+    : String(systemStock)
+  const countedLabel = material
+    ? formatCycleCountQty(countedStock, material).purchase
+    : String(countedStock)
+  return `Cycle count ${countDate} — ${materialName}: system ${systemLabel} → counted ${countedLabel}`
 }
 
 /** Materials visible on the brand's materials inventory tab (same owner rules as procurement UI). */
@@ -224,6 +272,13 @@ export async function postMaterialCycleCount(options: {
     }
 
     const materialName = line.material?.material_name || 'Material'
+    const notes = formatCycleCountMovementNotes({
+      countDate: header.count_date,
+      materialName,
+      systemStock: Number(line.system_stock),
+      countedStock: Number(line.counted_stock),
+      material: line.material,
+    })
     const { data: movement, error: movErr } = await supabase
       .from('material_stock_movements')
       .insert({
@@ -233,7 +288,7 @@ export async function postMaterialCycleCount(options: {
         reference_type: 'cycle_count',
         reference_id: header.id,
         reference_number: refNumber,
-        notes: `Cycle count ${header.count_date} — ${materialName}: system ${line.system_stock} → counted ${line.counted_stock}`,
+        notes,
         movement_date: movementDate,
         created_by: options.postedBy,
       })
@@ -242,6 +297,16 @@ export async function postMaterialCycleCount(options: {
 
     if (movErr) {
       throw new Error(`${materialName}: ${movErr.message}`)
+    }
+
+    if (movement?.id) {
+      const { postMaterialMovementJournalWithNotice } = await import('./accounting-movement-posting')
+      await postMaterialMovementJournalWithNotice(
+        movement.id,
+        header.brand_id,
+        options.postedBy,
+        'cycle count'
+      )
     }
 
     const { error: lineUpdErr } = await supabase

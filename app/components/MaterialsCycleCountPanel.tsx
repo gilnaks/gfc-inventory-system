@@ -11,6 +11,7 @@ import {
   Play,
   History,
 } from 'lucide-react'
+import { Modal } from './Modal'
 import type { Brand, MaterialCycleCount, MaterialCycleCountLine, RawMaterial } from '../../lib/supabase'
 import {
   cancelMaterialCycleCount,
@@ -18,10 +19,12 @@ import {
   fetchCycleCountLines,
   fetchInProgressCycleCount,
   formatCycleCountQty,
-  lineVarianceStock,
+  formatPurchaseUnitQty,
   materialsVisibleToBrand,
   postMaterialCycleCount,
   purchaseQtyToStockUnits,
+  purchaseQtyVariance,
+  purchaseQtyVarianceFromStock,
   saveCycleCountLineDrafts,
   startMaterialCycleCount,
   stockUnitsToPurchaseQty,
@@ -170,8 +173,8 @@ export function MaterialsCycleCountPanel({
       if (showVarianceOnly) {
         const purchase = parsePurchaseQtyInput(drafts[line.id]?.purchaseQty ?? '')
         if (purchase == null) return false
-        const counted = purchaseQtyToStockUnits(purchase, m)
-        if (Math.abs(counted - Number(line.system_stock)) < 0.0001) return false
+        const variancePurchase = purchaseQtyVariance(purchase, Number(line.system_stock), m)
+        if (variancePurchase == null || Math.abs(variancePurchase) < 0.0001) return false
       }
       if (!q) return true
       return (
@@ -191,8 +194,8 @@ export function MaterialsCycleCountPanel({
       const purchase = parsePurchaseQtyInput(drafts[line.id]?.purchaseQty ?? '')
       if (purchase == null) continue
       counted++
-      const countedStock = purchaseQtyToStockUnits(purchase, m)
-      if (Math.abs(countedStock - Number(line.system_stock)) >= 0.0001) withVariance++
+      const variancePurchase = purchaseQtyVariance(purchase, Number(line.system_stock), m)
+      if (variancePurchase != null && Math.abs(variancePurchase) >= 0.0001) withVariance++
     }
     return { counted, withVariance, total: lines.length }
   }, [lines, drafts])
@@ -331,7 +334,7 @@ export function MaterialsCycleCountPanel({
   const readOnly = view === 'posted'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
         <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-gray-200 bg-gradient-to-r from-slate-50 to-white shrink-0">
           <div>
@@ -552,15 +555,13 @@ export function MaterialsCycleCountPanel({
                     const systemFmt = formatCycleCountQty(Number(line.system_stock), m)
                     const draft = drafts[line.id] || { purchaseQty: '', notes: '' }
                     const purchase = parsePurchaseQtyInput(draft.purchaseQty)
-                    const countedStock =
-                      purchase != null ? purchaseQtyToStockUnits(purchase, m) : null
-                    const variance =
-                      countedStock != null
-                        ? countedStock - Number(line.system_stock)
-                        : lineVarianceStock(line)
+                    const variancePurchase =
+                      purchase != null
+                        ? purchaseQtyVariance(purchase, Number(line.system_stock), m)
+                        : purchaseQtyVarianceFromStock(line.counted_stock, Number(line.system_stock), m)
                     const purchaseUnit = getPurchaseUnitLabel(m)
                     const hasVariance =
-                      variance != null && Math.abs(variance) >= 0.0001
+                      variancePurchase != null && Math.abs(variancePurchase) >= 0.0001
 
                     return (
                       <tr
@@ -606,18 +607,18 @@ export function MaterialsCycleCountPanel({
                           )}
                         </td>
                         <td className="px-3 py-2.5 text-right tabular-nums">
-                          {variance == null ? (
+                          {variancePurchase == null ? (
                             <span className="text-gray-400">—</span>
                           ) : hasVariance ? (
                             <span
                               className={
-                                variance > 0
+                                variancePurchase > 0
                                   ? 'text-emerald-700 font-medium'
                                   : 'text-red-700 font-medium'
                               }
                             >
-                              {variance > 0 ? '+' : ''}
-                              {formatCycleCountQty(variance, m).stockNote}
+                              {variancePurchase > 0 ? '+' : '−'}
+                              {formatPurchaseUnitQty(Math.abs(variancePurchase), m)}
                             </span>
                           ) : (
                             <span className="text-gray-500">0</span>
@@ -696,6 +697,6 @@ export function MaterialsCycleCountPanel({
           </>
         )}
       </div>
-    </div>
+    </Modal>
   )
 }

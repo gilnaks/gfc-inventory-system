@@ -45,6 +45,11 @@ export function isBomComponentProductCategory(sortIndex: number | undefined): bo
   return sortIndex === BOM_COMPONENT_CATEGORY_SORT_INDEX
 }
 
+/** Supplies (0) and components (100) use per-category cycle counts; other categories use the main count. */
+export function usesCategoryScopedCycleCount(sortIndex: number | undefined): boolean {
+  return isConsumableSupplyCategory(sortIndex) || isBomComponentProductCategory(sortIndex)
+}
+
 export function isProductBomComponent(
   product: { category?: string | null },
   sortOrdersByDisplayName: Record<string, number>
@@ -93,7 +98,8 @@ export function batchesToScheduleQty(batches: number, yieldPerBatch: number): nu
 export function scheduleQtyToBatches(qty: number, yieldPerBatch: number): number {
   const y = yieldPerBatch > 0 ? yieldPerBatch : 1
   if (y === 1) return qty
-  return qty / y
+  const batches = qty / y
+  return Math.abs(batches - Math.round(batches)) < 1e-6 ? Math.round(batches) : batches
 }
 
 export function buildCategoryPortalMap(

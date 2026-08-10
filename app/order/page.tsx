@@ -13,6 +13,7 @@ import {
   productCategoryDisplayName,
   type CategoryPortalSettings,
 } from '../../lib/product-category-settings'
+import { Modal } from '../components/Modal'
 
 interface Location {
   id: string
@@ -73,6 +74,7 @@ export default function OrderPage() {
     Record<string, CategoryPortalSettings>
   >({})
   const [redirectedFromDSIR, setRedirectedFromDSIR] = useState(false)
+  const [isEmbedMode, setIsEmbedMode] = useState(false)
   
   // Data state
   const [products, setProducts] = useState<Product[]>([])
@@ -129,6 +131,46 @@ export default function OrderPage() {
   useEffect(() => {
     const initializeApp = async () => {
       setInitialLoading(true)
+
+      const searchParams = new URLSearchParams(window.location.search)
+      const embedMode = searchParams.get('embed') === '1'
+      const embedLocationId = searchParams.get('locationId')
+      const embedPasskey = searchParams.get('passkey')
+
+      if (embedMode && embedLocationId && embedPasskey) {
+        setIsEmbedMode(true)
+        try {
+          const { data: locationData, error } = await supabase
+            .from('locations')
+            .select(`
+              *,
+              brand:brands(*)
+            `)
+            .eq('id', embedLocationId)
+            .eq('passkey', embedPasskey)
+            .single()
+
+          if (error || !locationData) {
+            console.error('Error authenticating embedded order portal:', error)
+            setError('Unable to open the order portal for this branch.')
+            clearSession({ keepLocalStorage: true })
+          } else {
+            await bootstrapAuthenticatedLocation(locationData, {
+              persist: false,
+              passcodeValue: embedPasskey,
+            })
+          }
+        } catch (error) {
+          console.error('Error with embedded order portal login:', error)
+          setError('Unable to open the order portal for this branch.')
+          clearSession({ keepLocalStorage: true })
+        }
+
+        setTimeout(() => {
+          setInitialLoading(false)
+        }, 800)
+        return
+      }
       
       // Check for automatic login from DSIR page
       const locationPasscode = sessionStorage.getItem('locationPasscode')
@@ -151,21 +193,10 @@ export default function OrderPage() {
             console.error('Error authenticating with passcode:', error)
             clearSession()
           } else {
-            setLocation(locationData)
-            setIsAuthenticated(true)
-            setPasscode(locationPasscode)
-            setRedirectedFromDSIR(true) // Mark as redirected from DSIR
-            
-            // Save to localStorage for persistence
-            localStorage.setItem('order_authenticated', 'true')
-            localStorage.setItem('order_location', JSON.stringify(locationData))
-            
-            // Load all data in parallel
-            await Promise.all([
-              checkPendingOrders(locationData.id),
-              fetchPastOrders(locationData.id),
-              loadProductsForLocation(locationData)
-            ])
+            await bootstrapAuthenticatedLocation(locationData, {
+              passcodeValue: locationPasscode,
+              fromDsir: true,
+            })
             
             // Clear sessionStorage after successful login
             sessionStorage.removeItem('locationPasscode')
@@ -285,7 +316,7 @@ export default function OrderPage() {
 
   const currentTheme = getBrandTheme(location)
 
-  const clearSession = () => {
+  const clearSession = (options?: { keepLocalStorage?: boolean }) => {
     setIsAuthenticated(false)
     setLocation(null)
     setProducts([])
@@ -298,9 +329,35 @@ export default function OrderPage() {
     setRedirectedFromDSIR(false)
     setCartReturnablePansImage(null)
     setCartReturnablePansPreview(null)
-    localStorage.removeItem('order_authenticated')
-    localStorage.removeItem('order_location')
-    localStorage.removeItem('order_cart_draft')
+    if (!options?.keepLocalStorage) {
+      localStorage.removeItem('order_authenticated')
+      localStorage.removeItem('order_location')
+      localStorage.removeItem('order_cart_draft')
+    }
+  }
+
+  const bootstrapAuthenticatedLocation = async (
+    locationData: Location,
+    options?: { persist?: boolean; passcodeValue?: string; fromDsir?: boolean }
+  ) => {
+    setLocation(locationData)
+    setIsAuthenticated(true)
+    if (options?.passcodeValue) {
+      setPasscode(options.passcodeValue)
+    }
+    if (options?.fromDsir) {
+      setRedirectedFromDSIR(true)
+    }
+    if (options?.persist !== false) {
+      localStorage.setItem('order_authenticated', 'true')
+      localStorage.setItem('order_location', JSON.stringify(locationData))
+    }
+
+    await Promise.all([
+      checkPendingOrders(locationData.id),
+      fetchPastOrders(locationData.id),
+      loadProductsForLocation(locationData),
+    ])
   }
 
   const refreshLocationData = async () => {
@@ -786,6 +843,17 @@ export default function OrderPage() {
 
       if (orderError) throw orderError
 
+      const { logCustomerOrderStatusChange } = await import(
+        '../../lib/customer-order-status-history'
+      )
+      await logCustomerOrderStatusChange({
+        orderId: orderData[0].id,
+        oldStatus: null,
+        newStatus: 'pending',
+        changedBy: 'franchise_portal',
+        notes: 'Order placed',
+      })
+
       // Create order details
       const orderDetails = cartItems.map(item => ({
         order_id: orderData[0].id,
@@ -1177,18 +1245,37 @@ export default function OrderPage() {
         .from('deposit-slips')
         .getPublicUrl(fileName)
       
-      // Update order with deposit slip URL and change status to 'paid'
+      const { data: beforeOrder } = await supabase
+        .from('customer_orders')
+        .select('status')
+        .eq('id', orderId)
+        .single()
+
+      // Deposit slip → paid (awaiting confirmation). Do not post customer_order_cash here;
+      // cash journal posts when Receivables marks the order complete.
       const { error: updateError } = await supabase
         .from('customer_orders')
-        .update({ 
+        .update({
           deposit_slip_url: publicUrl,
+          deposit_slip_uploaded_at: new Date().toISOString(),
           status: 'paid',
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq('id', orderId)
       
       if (updateError) throw updateError
-      
+
+      const { logCustomerOrderStatusChange } = await import(
+        '../../lib/customer-order-status-history'
+      )
+      await logCustomerOrderStatusChange({
+        orderId,
+        oldStatus: beforeOrder?.status,
+        newStatus: 'paid',
+        changedBy: 'franchise_portal',
+        notes: 'Deposit slip uploaded',
+      })
+
       setSuccess('Deposit slip uploaded successfully! Order status updated to Paid.')
       
       // Refresh orders
@@ -1813,7 +1900,7 @@ export default function OrderPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 overflow-x-hidden">
+    <div className={`${isEmbedMode ? 'min-h-full' : 'min-h-screen'} bg-gray-50 overflow-x-hidden`}>
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-2 sm:px-4 py-3 sm:py-4">
@@ -1834,13 +1921,15 @@ export default function OrderPage() {
                       <MapPin className="h-3 w-3 sm:h-4 sm:w-4 mr-1 flex-shrink-0" />
                       <span className="truncate">{location?.name}</span>
                     </p>
-                    <button
-                      onClick={() => setShowBranchSwitcherModal(true)}
-                      className="text-blue-600 hover:text-blue-800 p-1"
-                      title="Switch branch"
-                    >
-                      <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4" />
-                    </button>
+                    {!isEmbedMode && (
+                      <button
+                        onClick={() => setShowBranchSwitcherModal(true)}
+                        className="text-blue-600 hover:text-blue-800 p-1"
+                        title="Switch branch"
+                      >
+                        <RefreshCw className="h-3 w-3 sm:h-4 sm:w-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1940,18 +2029,20 @@ export default function OrderPage() {
                   <span className="hidden sm:inline">Past Orders</span>
                 </button>
               )}
-              <button
-                onClick={clearSession}
-                className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
-                  currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
-                  currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
-                  currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
-                  'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
-                }`}
-              >
-                <LogOut className="h-4 w-4 sm:h-5 sm:w-5" />
-                <span className="hidden sm:inline">Logout</span>
-              </button>
+              {!isEmbedMode && (
+                <button
+                  onClick={() => clearSession()}
+                  className={`flex items-center justify-center space-x-1 px-2 sm:px-4 py-2 rounded-lg transition-colors text-xs sm:text-sm whitespace-nowrap flex-1 sm:flex-none ${
+                    currentTheme === 'green' ? 'text-gray-600 hover:text-green-800 hover:bg-green-100' :
+                    currentTheme === 'red' ? 'text-gray-600 hover:text-red-800 hover:bg-red-100' :
+                    currentTheme === 'yellow' ? 'text-gray-600 hover:text-yellow-800 hover:bg-yellow-100' :
+                    'text-gray-600 hover:text-blue-800 hover:bg-blue-100'
+                  }`}
+                >
+                  <LogOut className="h-4 w-4 sm:h-5 sm:w-5" />
+                  <span className="hidden sm:inline">Logout</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2878,7 +2969,7 @@ export default function OrderPage() {
 
       {/* Cart Modal - Only show if no pending order or in modify mode */}
       {showCartModal && (!pendingOrder || currentView === 'modify') && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+        <Modal align="end" contentClassName="p-0 sm:p-4" backdropClassName="bg-black/50">
           <div className="bg-white rounded-t-lg sm:rounded-lg w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden">
             {/* Modal Header */}
             <div className="flex items-center justify-between p-3 sm:p-4 border-b min-w-0 flex-shrink-0">
@@ -3158,12 +3249,12 @@ export default function OrderPage() {
               </div>
             )}
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Past Orders Modal */}
       {showPastOrders && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+        <Modal onClose={() => setShowPastOrders(false)} align="center">
           <div className="bg-white rounded-lg w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
             <div className="flex items-center justify-between p-4 border-b flex-shrink-0">
               <h2 className="text-lg font-semibold">Past Orders</h2>
@@ -3291,7 +3382,7 @@ export default function OrderPage() {
               )}
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Staff Codes View */}
@@ -3346,7 +3437,7 @@ export default function OrderPage() {
 
       {/* Returnable Pans Modal */}
       {showReturnablePansModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <Modal onClose={() => setShowReturnablePansModal(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               <div className="flex items-center justify-between mb-4">
@@ -3457,13 +3548,13 @@ export default function OrderPage() {
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Deposit Slip Image Modal */}
       {showDepositSlipModal && selectedDepositSlipImage && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-4 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
             <div className="flex justify-between items-center mb-4 flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900">
                 Deposit Slip
@@ -3489,7 +3580,7 @@ export default function OrderPage() {
               />
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   )

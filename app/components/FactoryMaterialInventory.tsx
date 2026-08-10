@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   supabase,
   Brand,
@@ -14,9 +14,10 @@ import {
   FACTORY_INVENTORY_META,
   materialMatchesFactoryInventoryKind,
 } from '../../lib/factory-inventory'
+import { isFactoryBrand } from '../../lib/brand-roles'
 import {
   releasedRequestAvailable,
-  releasedRequestMaxOpenStockUnits,
+  requestOpenProgress,
   validateOpenStockForReleasedRequest,
 } from '../../lib/factory-material-requests'
 import {
@@ -25,7 +26,10 @@ import {
   factoryRequestQtyToStockUnits,
   formatFactoryRequestQtyDisplay,
   getBomDisplayUnitLabel,
+  getPurchaseUnitLabel,
+  getStockUnitLabel,
   stockQtyToBomDisplayQty,
+  stockUnitsPerPurchase,
   type RawMaterialUomFields,
 } from '../../lib/raw-material-uom'
 import {
@@ -38,7 +42,8 @@ import {
   fetchProductBomSettingsByProductId,
   parseProductBomSettings,
 } from '../../lib/product-bom'
-import { History, Layers, PackageOpen, Search, SlidersHorizontal, X } from 'lucide-react'
+import { ClipboardCheck, History, Layers, X } from 'lucide-react'
+import { Modal } from './Modal'
 
 interface FactoryMaterialInventoryProps {
   /** When omitted, shows all brands (factory floor kiosk). */
@@ -46,6 +51,9 @@ interface FactoryMaterialInventoryProps {
   inventoryKind: FactoryInventoryKind
   theme?: string
   currentUsername?: string
+  /** Mobile-first layout for /factory/inventory floor kiosk. */
+  variant?: 'default' | 'floor'
+  readOnlyMode?: boolean
 }
 
 type BomJoinedProduct = {
@@ -108,9 +116,9 @@ function displayQtyToOpenedStock(
   return bomDisplayQtyToStockQty(displayQty, material)
 }
 
-/** Default open qty in stock units, capped to what the released request line still allows. */
-function getDefaultOpenQty(material: RawMaterial, availableRequestQty: number) {
-  const perPackage = Math.max(1, Math.floor(Number(material.uom_stock_per_purchase) || 1))
+/** One open action = one purchase package in stock units, capped to what the release still allows. */
+function openPackageStockQty(material: RawMaterial, availableRequestQty: number) {
+  const perPackage = stockUnitsPerPurchase(material)
   const maxStock = factoryRequestQtyToStockUnits(
     Math.max(0, Number(availableRequestQty) || 0),
     material
@@ -119,13 +127,91 @@ function getDefaultOpenQty(material: RawMaterial, availableRequestQty: number) {
   return Math.min(perPackage, maxStock)
 }
 
+function formatOpenPackageSummary(material: RawMaterial, stockQty: number) {
+  const perPackage = stockUnitsPerPurchase(material)
+  const purchaseLabel = getPurchaseUnitLabel(material)
+  const stockLabel = getStockUnitLabel(material)
+  const isFullPackage = stockQty >= perPackage - 1e-6
+  if (isFullPackage) {
+    return `1 ${purchaseLabel} · ${formatQty(stockQty)} ${stockLabel}`
+  }
+  return `Remaining · ${formatQty(stockQty)} ${stockLabel}`
+}
+
+type OpenPackagePlan = {
+  packageCount: number
+  packages: number[]
+  totalStockQty: number
+}
+
+/** Split available release qty into one row per package to open (full sacks + optional remainder). */
+function planOpenPackages(material: RawMaterial, availableRequestQty: number): OpenPackagePlan {
+  const perPackage = stockUnitsPerPurchase(material)
+  const maxStock = factoryRequestQtyToStockUnits(
+    Math.max(0, Number(availableRequestQty) || 0),
+    material
+  )
+  if (maxStock <= 1e-6) {
+    return { packageCount: 0, packages: [], totalStockQty: 0 }
+  }
+
+  const packages: number[] = []
+  let remainingStock = maxStock
+  while (remainingStock >= perPackage - 1e-6) {
+    packages.push(perPackage)
+    remainingStock = Math.round((remainingStock - perPackage) * 1e6) / 1e6
+  }
+  if (remainingStock > 1e-6) {
+    packages.push(remainingStock)
+  }
+
+  return {
+    packageCount: packages.length,
+    packages,
+    totalStockQty: packages.reduce((sum, qty) => sum + qty, 0),
+  }
+}
+
+function formatOpenAllSummary(material: RawMaterial, packageCount: number, totalStockQty: number) {
+  const purchaseLabel = getPurchaseUnitLabel(material)
+  const stockLabel = getStockUnitLabel(material)
+  const unitLabel = packageCount === 1 ? purchaseLabel : `${purchaseLabel}s`
+  return `${packageCount} ${unitLabel} · ${formatQty(totalStockQty)} ${stockLabel}`
+}
+
+function historyEntryClass(kind: OpenedMaterialHistoryEntry['kind']) {
+  switch (kind) {
+    case 'opened':
+      return 'border-emerald-200 bg-emerald-50/60'
+    case 'production':
+      return 'border-gray-200 bg-gray-50/80'
+    case 'adjustment':
+      return 'border-amber-200 bg-amber-50/60'
+    case 'discarded':
+      return 'border-red-200 bg-red-50/60'
+    case 'depleted':
+      return 'border-slate-200 bg-slate-50/80'
+    default:
+      return 'border-gray-200 bg-gray-50/80'
+  }
+}
+
+function historyQtyPrefix(kind: OpenedMaterialHistoryEntry['kind']) {
+  if (kind === 'opened') return '+'
+  if (kind === 'production' || kind === 'adjustment' || kind === 'discarded') return '−'
+  return ''
+}
+
 export function FactoryMaterialInventory({
   selectedBrand = null,
   inventoryKind,
   theme = 'blue',
   currentUsername = '',
+  variant = 'default',
+  readOnlyMode = false,
 }: FactoryMaterialInventoryProps) {
-  const brandLabel = selectedBrand?.name ?? 'All brands'
+  const canEdit = !readOnlyMode
+  const isFloor = variant === 'floor'
   const meta = FACTORY_INVENTORY_META[inventoryKind]
   const openedBy = currentUsername.trim() || 'Factory'
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([])
@@ -136,17 +222,25 @@ export function FactoryMaterialInventory({
     Record<string, FactoryOpenedMaterialBomUsage[]>
   >({})
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState('')
-  const [savingRequestId, setSavingRequestId] = useState<string | null>(null)
-  const [openDrafts, setOpenDrafts] = useState<
-    Record<string, { qty: string; label: string; notes: string }>
-  >({})
-  const [adjustRow, setAdjustRow] = useState<FactoryOpenedMaterial | null>(null)
-  const [adjustQty, setAdjustQty] = useState('')
-  const [adjustSaving, setAdjustSaving] = useState(false)
+  const [openingRequest, setOpeningRequest] = useState<{
+    requestId: string
+    count: number
+  } | null>(null)
+  const [cycleCountOpen, setCycleCountOpen] = useState(false)
+  const [cycleCountDrafts, setCycleCountDrafts] = useState<Record<string, string>>({})
+  const [cycleCountSaving, setCycleCountSaving] = useState(false)
   const [historyRow, setHistoryRow] = useState<FactoryOpenedMaterial | null>(null)
   const [historyEntries, setHistoryEntries] = useState<OpenedMaterialHistoryEntry[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
+  const [releasePackages, setReleasePackages] = useState<
+    Array<Pick<FactoryOpenedMaterial, 'id' | 'factory_request_id' | 'status'>>
+  >([])
+  const [highlightPackageId, setHighlightPackageId] = useState<string | null>(null)
+  const [openSuccess, setOpenSuccess] = useState<{
+    text: string
+    packageCount: number
+  } | null>(null)
+  const packageRefs = useRef<Record<string, HTMLElement | null>>({})
 
   const themeBtn =
     theme === 'green'
@@ -193,9 +287,6 @@ export function FactoryMaterialInventory({
           .in('material_id', materialIds)
           .in('status', ['pending', 'released'])
           .order('created_at', { ascending: false })
-        if (selectedBrand?.id) {
-          reqQuery = reqQuery.eq('brand_id', selectedBrand.id)
-        }
         const { data: reqData, error: reqErr } = await reqQuery
         if (reqErr) {
           console.warn('factory_material_requests:', reqErr.message)
@@ -204,6 +295,22 @@ export function FactoryMaterialInventory({
         }
       }
       setMaterialRequests(requests)
+
+      if (materialIds.length > 0) {
+        const { data: trackingRows } = await supabase
+          .from('factory_opened_materials')
+          .select('id, factory_request_id, status')
+          .eq('inventory_kind', inventoryKind)
+          .in('material_id', materialIds)
+          .not('factory_request_id', 'is', null)
+        setReleasePackages(
+          (trackingRows || []) as Array<
+            Pick<FactoryOpenedMaterial, 'id' | 'factory_request_id' | 'status'>
+          >
+        )
+      } else {
+        setReleasePackages([])
+      }
 
       const allPackages = (openedRes.data || []) as FactoryOpenedMaterial[]
       const visiblePackages = allPackages.filter(
@@ -223,94 +330,98 @@ export function FactoryMaterialInventory({
       setOpened(visibleOpened)
       setEmptied(visibleEmptied)
 
-      const openedMaterialIds = Array.from(
-        new Set(visiblePackages.map((r) => r.material_id))
-      )
-      if (openedMaterialIds.length === 0) {
+      // BOM usage is for dashboard Factory module only — not /factory floor kiosk.
+      if (isFloor) {
         setBomByMaterialId({})
       } else {
-        const { data: bomRows } = await supabase
-          .from('product_bom_items')
-          .select(
-            'material_id, quantity, quantity_mode, yield_per_batch, product:products(id, name, sku, brand_id, bom_quantity_mode, bom_yield_per_batch)'
-          )
-          .in('material_id', openedMaterialIds)
-
-        const productIds = Array.from(
-          new Set(
-            (bomRows || [])
-              .map((row) => bomJoinedProduct(row)?.id)
-              .filter(Boolean) as string[]
-          )
+        const openedMaterialIds = Array.from(
+          new Set(visiblePackages.map((r) => r.material_id))
         )
-        const productBomSettings = await fetchProductBomSettingsByProductId(productIds)
+        if (openedMaterialIds.length === 0) {
+          setBomByMaterialId({})
+        } else {
+          const { data: bomRows } = await supabase
+            .from('product_bom_items')
+            .select(
+              'material_id, quantity, quantity_mode, yield_per_batch, product:products(id, name, sku, brand_id, bom_quantity_mode, bom_yield_per_batch)'
+            )
+            .in('material_id', openedMaterialIds)
 
-        const map: Record<string, FactoryOpenedMaterialBomUsage[]> = {}
-        for (const row of bomRows || []) {
-          const matId = row.material_id as string
-          const product = bomJoinedProduct(row)
-          if (!product) continue
-          if (selectedBrand && product.brand_id !== selectedBrand.id) continue
-          const bomSettings =
-            productBomSettings[product.id] ?? parseProductBomSettings(product)
-          if (!map[matId]) map[matId] = []
-          map[matId].push({
-            product_id: product.id,
-            product_name: product.name,
-            sku: product.sku,
-            bom_quantity: effectiveBomQtyPerBatch(
-              {
-                quantity: Number(row.quantity) || 0,
-                quantity_mode: (row as { quantity_mode?: string }).quantity_mode,
-                yield_per_batch: (row as { yield_per_batch?: number | null })
-                  .yield_per_batch,
-              },
-              bomSettings
-            ),
-          })
+          const productIds = Array.from(
+            new Set(
+              (bomRows || [])
+                .map((row) => bomJoinedProduct(row)?.id)
+                .filter(Boolean) as string[]
+            )
+          )
+          const productBomSettings = await fetchProductBomSettingsByProductId(productIds)
+
+          const map: Record<string, FactoryOpenedMaterialBomUsage[]> = {}
+          for (const row of bomRows || []) {
+            const matId = row.material_id as string
+            const product = bomJoinedProduct(row)
+            if (!product) continue
+            if (
+              selectedBrand &&
+              !isFactoryBrand(selectedBrand) &&
+              product.brand_id !== selectedBrand.id
+            ) {
+              continue
+            }
+            const bomSettings =
+              productBomSettings[product.id] ?? parseProductBomSettings(product)
+            if (!map[matId]) map[matId] = []
+            map[matId].push({
+              product_id: product.id,
+              product_name: product.name,
+              sku: product.sku,
+              bom_quantity: effectiveBomQtyPerBatch(
+                {
+                  quantity: Number(row.quantity) || 0,
+                  quantity_mode: (row as { quantity_mode?: string }).quantity_mode,
+                  yield_per_batch: (row as { yield_per_batch?: number | null })
+                    .yield_per_batch,
+                },
+                bomSettings
+              ),
+            })
+          }
+          setBomByMaterialId(map)
         }
-        setBomByMaterialId(map)
       }
     } finally {
       setLoading(false)
     }
-  }, [selectedBrand, inventoryKind])
+  }, [selectedBrand, inventoryKind, isFloor])
 
   useEffect(() => {
     loadData()
   }, [loadData])
 
-  const filterPackagesBySearch = useCallback(
-    (rows: FactoryOpenedMaterial[]) => {
-      const q = search.trim().toLowerCase()
-      if (!q) return rows
-      return rows.filter((row) => {
-        const m = row.material ?? rawMaterials.find((mat) => mat.id === row.material_id)
-        const haystack = [
-          row.label,
-          m?.material_name,
-          m?.sku,
-          row.opened_by,
-          row.notes,
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase()
-        return haystack.includes(q)
-      })
-    },
-    [search, rawMaterials]
+  useEffect(() => {
+    if (!highlightPackageId) return
+    const el = packageRefs.current[highlightPackageId]
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    const timer = window.setTimeout(() => setHighlightPackageId(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [highlightPackageId, opened])
+
+  useEffect(() => {
+    if (!openSuccess) return
+    const timer = window.setTimeout(() => setOpenSuccess(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [openSuccess])
+
+  const requestById = useMemo(
+    () => new Map(materialRequests.map((r) => [r.id, r])),
+    [materialRequests]
   )
 
-  const filteredOpened = useMemo(
-    () => filterPackagesBySearch(opened),
-    [opened, filterPackagesBySearch]
-  )
-
-  const filteredEmptied = useMemo(
-    () => filterPackagesBySearch(emptied),
-    [emptied, filterPackagesBySearch]
-  )
+  type ReadyToOpenRow = {
+    request: FactoryMaterialRequest
+    material: RawMaterial
+    availableRequestQty: number
+  }
 
   const stats = useMemo(() => {
     let low = 0
@@ -322,14 +433,7 @@ export function FactoryMaterialInventory({
     return { open: opened.length, low }
   }, [opened])
 
-  type ReadyToOpenRow = {
-    request: FactoryMaterialRequest
-    material: RawMaterial
-    availableRequestQty: number
-  }
-
   const readyToOpen = useMemo(() => {
-    const q = search.trim().toLowerCase()
     const rows: ReadyToOpenRow[] = []
     for (const request of materialRequests) {
       if (request.status !== 'released') continue
@@ -337,16 +441,6 @@ export function FactoryMaterialInventory({
       if (availableRequestQty <= 0) continue
       const material = rawMaterials.find((m) => m.id === request.material_id)
       if (!material) continue
-      const haystack = [
-        material.material_name,
-        material.sku,
-        request.requested_by,
-        request.released_by,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase()
-      if (q && !haystack.includes(q)) continue
       rows.push({ request, material, availableRequestQty })
     }
     return rows.sort((a, b) => {
@@ -354,47 +448,22 @@ export function FactoryMaterialInventory({
       const tb = new Date(b.request.released_at || b.request.created_at || 0).getTime()
       return ta - tb
     })
-  }, [materialRequests, rawMaterials, search])
+  }, [materialRequests, rawMaterials])
 
-  const getOpenDraft = (
-    requestId: string,
-    material: RawMaterial,
-    availableRequestQty: number
-  ) => {
-    const existing = openDrafts[requestId]
-    if (existing) return existing
-    return {
-      qty: String(getDefaultOpenQty(material, availableRequestQty)),
-      label: '',
-      notes: '',
-    }
-  }
-
-  const setOpenDraft = (
-    requestId: string,
-    patch: Partial<{ qty: string; label: string; notes: string }>
-  ) => {
-    setOpenDrafts((prev) => {
-      const request = materialRequests.find((r) => r.id === requestId)
-      const material = request
-        ? rawMaterials.find((m) => m.id === request.material_id)
-        : undefined
-      const available = request ? releasedRequestAvailable(request) : 0
-      const base = prev[requestId] ?? {
-        qty: material ? String(getDefaultOpenQty(material, available)) : '',
-        label: '',
-        notes: '',
-      }
-      return { ...prev, [requestId]: { ...base, ...patch } }
-    })
-  }
-
-  const handleOpenFromRequest = async (row: ReadyToOpenRow) => {
+  const handleOpenFromRequest = async (row: ReadyToOpenRow, mode: 'one' | 'all' = 'one') => {
     const { request, material, availableRequestQty } = row
-    const draft = getOpenDraft(request.id, material, availableRequestQty)
-    const qty = parseFloat(draft.qty)
+    const plan = planOpenPackages(material, availableRequestQty)
+    const packagesToOpen =
+      mode === 'all' ? plan.packages : [openPackageStockQty(material, availableRequestQty)]
+
+    if (packagesToOpen.length === 0) {
+      alert('Nothing left to open on this release line.')
+      return
+    }
+
+    const totalStockQty = packagesToOpen.reduce((sum, qty) => sum + qty, 0)
     const validation = validateOpenStockForReleasedRequest(
-      qty,
+      totalStockQty,
       availableRequestQty,
       material
     )
@@ -402,20 +471,25 @@ export function FactoryMaterialInventory({
       alert(validation.message)
       return
     }
-    setSavingRequestId(request.id)
+    setOpeningRequest({ requestId: request.id, count: packagesToOpen.length })
     try {
-      const { error } = await supabase.from('factory_opened_materials').insert({
-        material_id: material.id,
-        factory_request_id: request.id,
-        inventory_kind: inventoryKind,
-        label: draft.label.trim() || null,
-        quantity_opened: qty,
-        quantity_remaining: qty,
-        unit: material.unit,
-        status: 'open',
-        opened_by: openedBy,
-        notes: draft.notes.trim() || null,
-      })
+      const { data: inserted, error } = await supabase
+        .from('factory_opened_materials')
+        .insert(
+          packagesToOpen.map((stockQty) => ({
+            material_id: material.id,
+            factory_request_id: request.id,
+            inventory_kind: inventoryKind,
+            label: null,
+            quantity_opened: stockQty,
+            quantity_remaining: stockQty,
+            unit: material.unit,
+            status: 'open',
+            opened_by: openedBy,
+            notes: null,
+          }))
+        )
+        .select('id')
       if (error) {
         if (error.message.includes('factory_opened_materials')) {
           alert(
@@ -438,14 +512,23 @@ export function FactoryMaterialInventory({
       if (useErr) {
         console.warn('quantity_used update:', useErr.message)
       }
-      setOpenDrafts((prev) => {
-        const next = { ...prev }
-        delete next[request.id]
-        return next
-      })
+      const openedDisplay = openedStockToDisplay(totalStockQty, material)
+      if (packagesToOpen.length > 1) {
+        setOpenSuccess({
+          text: `Opened ${formatOpenAllSummary(material, packagesToOpen.length, totalStockQty)} (${formatQty(openedDisplay.qty)} ${openedDisplay.unit} on floor)`,
+          packageCount: packagesToOpen.length,
+        })
+      } else {
+        setOpenSuccess({
+          text: `Opened ${formatOpenPackageSummary(material, packagesToOpen[0])} (${formatQty(openedDisplay.qty)} ${openedDisplay.unit} on floor)`,
+          packageCount: 1,
+        })
+      }
+      const firstId = inserted?.[0]?.id
+      if (firstId) setHighlightPackageId(firstId)
       await loadData()
     } finally {
-      setSavingRequestId(null)
+      setOpeningRequest(null)
     }
   }
 
@@ -472,53 +555,40 @@ export function FactoryMaterialInventory({
     setHistoryLoading(false)
   }
 
-  const openAdjustModal = (row: FactoryOpenedMaterial) => {
-    const mat = resolveOpenedRowMaterial(row, rawMaterials)
-    const { qty } = openedStockToDisplay(row.quantity_remaining, mat)
-    setAdjustRow(row)
-    setAdjustQty(String(qty))
+  const openCycleCountModal = () => {
+    if (opened.length === 0) return
+    const drafts: Record<string, string> = {}
+    for (const row of opened) {
+      const mat = resolveOpenedRowMaterial(row, rawMaterials)
+      const { qty } = openedStockToDisplay(row.quantity_remaining, mat)
+      drafts[row.id] = String(qty)
+    }
+    setCycleCountDrafts(drafts)
+    setCycleCountOpen(true)
   }
 
-  const closeAdjustModal = () => {
-    setAdjustRow(null)
-    setAdjustQty('')
-  }
-
-  const submitAdjustRemaining = async () => {
-    if (!adjustRow) return
-    const mat = resolveOpenedRowMaterial(adjustRow, rawMaterials)
-    const displayRemaining = parseFloat(adjustQty)
-    if (!Number.isFinite(displayRemaining)) {
-      alert('Enter a valid quantity.')
-      return
-    }
-    const { qty: openedDisplay, unit } = openedStockToDisplay(
-      adjustRow.quantity_opened,
-      mat
-    )
-    if (displayRemaining < 0 || displayRemaining > openedDisplay) {
-      alert(`Remaining must be between 0 and ${formatQty(openedDisplay)} ${unit}.`)
-      return
-    }
-    const remainingStock = displayQtyToOpenedStock(displayRemaining, mat)
-    setAdjustSaving(true)
-    try {
-      const ok = await updateRemaining(adjustRow, remainingStock)
-      if (ok) closeAdjustModal()
-    } finally {
-      setAdjustSaving(false)
-    }
+  const closeCycleCountModal = () => {
+    setCycleCountOpen(false)
+    setCycleCountDrafts({})
   }
 
   const updateRemaining = async (
     row: FactoryOpenedMaterial,
-    remaining: number
+    remaining: number,
+    options?: {
+      status?: 'open' | 'depleted' | 'discarded'
+      memoDetail?: string
+      skipReload?: boolean
+    }
   ): Promise<boolean> => {
     if (remaining < 0 || remaining > row.quantity_opened) {
       alert(`Remaining must be between 0 and ${formatQty(row.quantity_opened)}.`)
       return false
     }
-    const status = remaining <= 0 ? 'depleted' : 'open'
+    const oldRemaining = Number(row.quantity_remaining) || 0
+    const writtenOffQty = oldRemaining - remaining
+    const status =
+      options?.status ?? (remaining <= 0 ? 'depleted' : 'open')
     const { error } = await supabase
       .from('factory_opened_materials')
       .update({
@@ -531,37 +601,84 @@ export function FactoryMaterialInventory({
       alert(error.message)
       return false
     }
-    await loadData()
+
+    if (writtenOffQty > 1e-9) {
+      const mat = resolveOpenedRowMaterial(row, rawMaterials)
+      const brandId = selectedBrand?.id || mat?.brand_id
+      if (brandId && mat) {
+        const {
+          resolveFactoryMaterialStockUnitCost,
+          postFactoryWipAdjustmentJournalWithNotice,
+        } = await import('../../lib/accounting-factory-wip-posting')
+        const unitCost = await resolveFactoryMaterialStockUnitCost(mat, row.factory_request_id)
+        if (unitCost > 0) {
+          await postFactoryWipAdjustmentJournalWithNotice(
+            row.id,
+            brandId,
+            writtenOffQty,
+            unitCost,
+            openedBy,
+            options?.memoDetail
+          )
+        }
+      }
+    }
+
+    if (!options?.skipReload) await loadData()
     return true
   }
 
-  const submitMarkEmpty = async () => {
-    if (!adjustRow) return
-    const mat = resolveOpenedRowMaterial(adjustRow, rawMaterials)
-    const name = mat?.material_name || adjustRow.material?.material_name || 'this material'
-    const label = adjustRow.label ? ` (${adjustRow.label})` : ''
-    if (
-      !confirm(
-        `Mark this opened package of ${name}${label} as empty?\nRemaining will be set to 0.`
-      )
-    ) {
+  const submitCycleCount = async () => {
+    if (opened.length === 0) return
+    const updates: Array<{ row: FactoryOpenedMaterial; remainingStock: number }> = []
+    for (const row of opened) {
+      const mat = resolveOpenedRowMaterial(row, rawMaterials)
+      const raw = cycleCountDrafts[row.id] ?? ''
+      const displayRemaining = parseFloat(raw)
+      if (!Number.isFinite(displayRemaining)) {
+        const name = mat?.material_name || 'material'
+        alert(`Enter a valid counted quantity for ${name}.`)
+        return
+      }
+      const { qty: openedDisplay, unit } = openedStockToDisplay(row.quantity_opened, mat)
+      if (displayRemaining < 0 || displayRemaining > openedDisplay) {
+        const name = mat?.material_name || 'material'
+        alert(
+          `${name}: counted remaining must be between 0 and ${formatQty(openedDisplay)} ${unit}.`
+        )
+        return
+      }
+      const remainingStock = displayQtyToOpenedStock(displayRemaining, mat)
+      const current = Number(row.quantity_remaining) || 0
+      if (Math.abs(remainingStock - current) > 1e-9) {
+        updates.push({ row, remainingStock })
+      }
+    }
+    if (updates.length === 0) {
+      closeCycleCountModal()
       return
     }
-    setAdjustSaving(true)
+    setCycleCountSaving(true)
     try {
-      const ok = await updateRemaining(adjustRow, 0)
-      if (ok) closeAdjustModal()
+      for (const { row, remainingStock } of updates) {
+        const mat = resolveOpenedRowMaterial(row, rawMaterials)
+        const name = mat?.material_name || row.material?.material_name || 'material'
+        const label = row.label ? ` (${row.label})` : ''
+        const ok = await updateRemaining(row, remainingStock, {
+          skipReload: true,
+          memoDetail:
+            remainingStock <= 0
+              ? `Factory cycle count — emptied ${name}${label}`
+              : `Factory cycle count — ${name}${label}`,
+        })
+        if (!ok) return
+      }
+      await loadData()
+      closeCycleCountModal()
     } finally {
-      setAdjustSaving(false)
+      setCycleCountSaving(false)
     }
   }
-
-  const adjustModalMat = adjustRow
-    ? resolveOpenedRowMaterial(adjustRow, rawMaterials)
-    : undefined
-  const adjustOpenedDisplay = adjustRow
-    ? openedStockToDisplay(adjustRow.quantity_opened, adjustModalMat)
-    : null
 
   const historyModalMat = historyRow
     ? resolveOpenedRowMaterial(historyRow, rawMaterials)
@@ -574,19 +691,28 @@ export function FactoryMaterialInventory({
     : null
   const historyProductionUsed = historyEntries
     .filter((e) => e.kind === 'production')
-    .reduce((sum, e) => sum + e.quantity, 0)
+    .reduce((sum, e) => sum + (e.quantity ?? 0), 0)
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-        <div className="px-4 py-4 sm:px-5 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">{meta.title}</h2>
-              <p className="text-sm text-gray-500 mt-0.5">
-                {meta.description} ({brandLabel})
-              </p>
-              <div className="flex flex-wrap gap-2 mt-3">
+    <div className={`${isFloor ? 'space-y-3 overflow-x-hidden' : 'space-y-4'}`}>
+      <div
+        className={`overflow-hidden ${
+          isFloor
+            ? 'bg-white'
+            : 'rounded-xl border border-gray-200 bg-white shadow-sm'
+        }`}
+      >
+        <div
+          className={`border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white ${
+            isFloor ? 'px-3 py-3' : 'px-4 py-4 sm:px-5'
+          }`}
+        >
+          <div className={`flex flex-col gap-3 ${isFloor ? '' : 'lg:flex-row lg:items-start lg:justify-between gap-4'}`}>
+            <div className="min-w-0">
+              {!isFloor ? (
+                <h2 className="text-lg font-semibold text-gray-900">{meta.title}</h2>
+              ) : null}
+              <div className={`flex flex-wrap gap-2 ${isFloor ? '' : 'mt-3'}`}>
                 {readyToOpen.length > 0 && (
                   <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-800">
                     {readyToOpen.length} ready to open
@@ -602,53 +728,51 @@ export function FactoryMaterialInventory({
                 )}
               </div>
             </div>
-            <div className="relative w-full lg:w-auto lg:min-w-[280px]">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search material, label…"
-                className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-              />
-            </div>
           </div>
         </div>
 
-        {!loading && (
-          <div className="border-b border-gray-100 bg-emerald-50/40 px-4 py-4 sm:px-5">
-            <h3 className="text-sm font-semibold text-emerald-950 flex items-center gap-2">
-              <PackageOpen className="h-4 w-4" />
-              Ready to open
-            </h3>
-            <p className="text-xs text-emerald-900/70 mt-0.5 mb-3">
-              Released from Procurement — record each package as you open it on the floor.
+        {!loading && openSuccess ? (
+          <div
+            className={`border-b border-emerald-100 bg-emerald-50 ${
+              isFloor ? 'px-3 py-2.5' : 'px-4 py-3 sm:px-5'
+            }`}
+          >
+            <p className="text-sm font-medium text-emerald-900">{openSuccess.text}</p>
+            <p className="text-xs text-emerald-700 mt-0.5">
+              {openSuccess.packageCount === 1
+                ? 'Package added to the floor below.'
+                : `${openSuccess.packageCount} packages added to the floor below.`}
             </p>
-            {readyToOpen.length === 0 ? (
-              <p className="text-sm text-gray-500">
-                {search.trim()
-                  ? 'No released items match your search.'
-                  : 'Nothing released yet. Request materials from the production schedule or factory dashboard, then release them in Procurement.'}
-              </p>
-            ) : (
-              <ul className="space-y-2">
-                {readyToOpen.map((row) => {
+          </div>
+        ) : null}
+
+        {!loading && readyToOpen.length > 0 && (
+          <div
+            className={`border-b border-gray-100 ${isFloor ? 'px-3 py-3' : 'px-4 py-4 sm:px-5'}`}
+          >
+            <ul className="space-y-2">
+              {readyToOpen.map((row) => {
                   const { request, material, availableRequestQty } = row
-                  const draft = getOpenDraft(request.id, material, availableRequestQty)
-                  const qtyNum = parseFloat(draft.qty)
-                  const validQty = Number.isFinite(qtyNum) && qtyNum > 0
-                  const maxOpenStock = releasedRequestMaxOpenStockUnits(
+                  const plan = planOpenPackages(material, availableRequestQty)
+                  const stockQty = plan.packages[0] ?? openPackageStockQty(material, availableRequestQty)
+                  const packageSummary = formatOpenPackageSummary(material, stockQty)
+                  const openValidation = validateOpenStockForReleasedRequest(
+                    stockQty,
                     availableRequestQty,
                     material
                   )
-                  const openValidation = validQty
-                    ? validateOpenStockForReleasedRequest(
-                        qtyNum,
-                        availableRequestQty,
-                        material
-                      )
-                    : null
-                  const qtyTooHigh = openValidation?.ok === false
+                  const canOpen = openValidation.ok === true
+                  const canOpenAll =
+                    plan.packageCount > 1 &&
+                    validateOpenStockForReleasedRequest(
+                      plan.totalStockQty,
+                      availableRequestQty,
+                      material
+                    ).ok === true
+                  const isOpening = openingRequest?.requestId === request.id
+                  const progress = requestOpenProgress(request, releasePackages)
+                  const totalDisplay = formatFactoryRequestQtyDisplay(progress.total, material)
+                  const consumedDisplay = formatFactoryRequestQtyDisplay(progress.consumed, material)
                   const availDisplay = formatFactoryRequestQtyDisplay(
                     availableRequestQty,
                     material
@@ -660,80 +784,117 @@ export function FactoryMaterialInventory({
                   return (
                     <li
                       key={request.id}
-                      className="rounded-lg border border-emerald-200/80 bg-white p-3 shadow-sm"
+                      className={`rounded-lg border border-emerald-200/80 bg-white shadow-sm ${
+                        isFloor ? 'p-3.5' : 'p-3'
+                      }`}
                     >
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className={`flex flex-col gap-3 ${isFloor ? '' : 'sm:flex-row sm:items-start sm:justify-between'}`}>
                         <div className="min-w-0">
-                          <div className="font-medium text-gray-900">
+                          <div className="font-medium text-gray-900 leading-snug">
                             {material.material_name}
                           </div>
                           {material.sku ? (
-                            <div className="text-xs text-gray-400 font-mono">{material.sku}</div>
+                            <div className="text-xs text-gray-400 font-mono mt-0.5">{material.sku}</div>
                           ) : null}
-                          <div className="text-xs text-emerald-800 mt-1">
+                          <div className="text-xs text-emerald-800 mt-1.5">
                             Available: {availDisplay.primary}
                             {availDisplay.stockNote ? (
                               <span className="text-gray-500"> · {availDisplay.stockNote}</span>
                             ) : null}
                           </div>
-                          <div className="text-xs text-gray-500 mt-0.5">
+                          <div className="mt-2 max-w-md">
+                            <div className="flex justify-between text-[10px] text-gray-500 mb-1">
+                              <span>
+                                Release progress · {consumedDisplay.primary} of {totalDisplay.primary}{' '}
+                                opened
+                              </span>
+                              <span className="tabular-nums">{Math.round(progress.pct)}%</span>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-emerald-500"
+                                style={{ width: `${Math.min(100, Math.max(0, progress.pct))}%` }}
+                              />
+                            </div>
+                            {progress.packageCount > 0 ? (
+                              <p className="text-[10px] text-gray-500 mt-1">
+                                {progress.packageCount} package{progress.packageCount === 1 ? '' : 's'}{' '}
+                                from this release
+                                {progress.openPackageCount > 0
+                                  ? ` · ${progress.openPackageCount} still on floor`
+                                  : ''}
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">
                             Released {releasedLabel}
                             {request.requested_by ? ` · Requested by ${request.requested_by}` : ''}
                             {request.released_by ? ` · Released by ${request.released_by}` : ''}
                           </div>
-                        </div>
-                        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:shrink-0">
-                          <div>
-                            <label className="block text-[10px] font-medium text-gray-500 uppercase mb-0.5">
-                              Qty open ({material.unit})
-                            </label>
-                            <input
-                              type="number"
-                              min={0}
-                              step="any"
-                              value={draft.qty}
-                              onChange={(e) =>
-                                setOpenDraft(request.id, { qty: e.target.value })
-                              }
-                              className="w-full sm:w-24 px-2 py-1.5 border border-gray-300 rounded-md text-sm"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] font-medium text-gray-500 uppercase mb-0.5">
-                              Label
-                            </label>
-                            <input
-                              type="text"
-                              value={draft.label}
-                              onChange={(e) =>
-                                setOpenDraft(request.id, { label: e.target.value })
-                              }
-                              placeholder="Optional"
-                              className="w-full sm:w-28 px-2 py-1.5 border border-gray-300 rounded-md text-sm"
-                            />
-                          </div>
-                          <div className="flex flex-col items-stretch sm:items-end gap-1 relative z-10">
-                            <button
-                              type="button"
-                              disabled={savingRequestId === request.id}
-                              onClick={() => handleOpenFromRequest(row)}
-                              className={`px-3 py-1.5 text-sm font-medium text-white rounded-md disabled:opacity-50 touch-manipulation ${themeBtn}`}
-                            >
-                              {savingRequestId === request.id ? 'Opening…' : 'Record opened'}
-                            </button>
-                            {qtyTooHigh ? (
-                              <p className="text-[10px] text-amber-800 max-w-[200px] sm:text-right">
-                                Max {formatQty(maxOpenStock)} {material.unit} for this release
-                              </p>
+                          <p className="text-xs font-medium text-gray-700 mt-2 tabular-nums">
+                            Opens as {packageSummary}
+                            {plan.packageCount > 1 ? (
+                              <span className="text-gray-500 font-normal">
+                                {' '}
+                                · {plan.packageCount} packages available
+                              </span>
                             ) : null}
-                          </div>
+                          </p>
+                        </div>
+                        <div
+                          className={`flex flex-col gap-2 ${
+                            isFloor ? 'w-full' : 'sm:shrink-0 sm:items-end'
+                          }`}
+                        >
+                          {canEdit ? (
+                            <div
+                              className={`flex gap-2 ${
+                                isFloor ? 'flex-col w-full' : 'flex-row items-center'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                disabled={isOpening || !canOpen}
+                                onClick={() => handleOpenFromRequest(row, 'one')}
+                                className={`font-medium text-white rounded-lg disabled:opacity-50 touch-manipulation ${themeBtn} ${
+                                  isFloor
+                                    ? 'w-full min-h-[48px] text-base px-4'
+                                    : 'px-4 py-2 text-sm rounded-md whitespace-nowrap'
+                                }`}
+                              >
+                                {isOpening && openingRequest.count === 1
+                                  ? 'Opening…'
+                                  : 'Open package'}
+                              </button>
+                              {canOpenAll ? (
+                                <button
+                                  type="button"
+                                  disabled={isOpening}
+                                  onClick={() => handleOpenFromRequest(row, 'all')}
+                                  className={`font-medium rounded-lg border disabled:opacity-50 touch-manipulation border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 ${
+                                    isFloor
+                                      ? 'w-full min-h-[48px] text-base px-4'
+                                      : 'px-4 py-2 text-sm rounded-md whitespace-nowrap'
+                                  }`}
+                                >
+                                  {isOpening && openingRequest.count > 1
+                                    ? `Opening ${openingRequest.count}…`
+                                    : `Open all (${plan.packageCount})`}
+                                </button>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          {!canOpen && openValidation.ok === false ? (
+                            <p className="text-[10px] text-amber-800 max-w-xs sm:text-right">
+                              {openValidation.message}
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     </li>
                   )
                 })}
-              </ul>
-            )}
+            </ul>
           </div>
         )}
 
@@ -745,19 +906,175 @@ export function FactoryMaterialInventory({
           </div>
         ) : (
           <>
-            <div className="px-4 pt-4 sm:px-5">
-              <h3 className="text-sm font-semibold text-gray-900">On the floor</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Opened packages currently in use</p>
+            <div className={isFloor ? 'px-3 pt-3' : 'px-4 pt-4 sm:px-5'}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-gray-900">On the floor</h3>
+                  {!isFloor ? (
+                    <p className="text-xs text-gray-500 mt-0.5">Opened packages currently in use</p>
+                  ) : null}
+                </div>
+                {canEdit && opened.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={openCycleCountModal}
+                    className={`inline-flex items-center justify-center gap-1.5 shrink-0 rounded-lg border border-slate-300 bg-white text-slate-800 font-medium touch-manipulation hover:bg-slate-50 ${
+                      isFloor ? 'min-h-[40px] px-3 text-sm' : 'px-3 py-1.5 text-xs'
+                    }`}
+                  >
+                    <ClipboardCheck className="h-4 w-4 shrink-0" />
+                    Cycle count
+                  </button>
+                ) : null}
+              </div>
             </div>
-        {filteredOpened.length === 0 ? (
-          <div className="text-center py-10 px-4">
-            <p className="text-gray-600 font-medium">
-              {search.trim() ? 'No opened packages match your search' : 'No opened packages on the floor'}
-            </p>
-            <p className="text-sm text-gray-400 mt-1">{meta.emptyHint}</p>
+        {opened.length === 0 ? (
+          <div className={`text-center ${isFloor ? 'py-6 px-3' : 'py-8 px-4'}`}>
+            <p className="text-sm text-gray-500">Nothing on the floor yet</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+            <div className={`space-y-2.5 ${isFloor ? 'px-3 py-2 space-y-1.5' : 'px-4 py-3 md:hidden'}`}>
+              {opened.map((row) => {
+                const m = resolveOpenedRowMaterial(row, rawMaterials)
+                const remainingDisplay = openedStockToDisplay(row.quantity_remaining, m)
+                const openedDisplay = openedStockToDisplay(row.quantity_opened, m)
+                const pct =
+                  row.quantity_opened > 0
+                    ? (row.quantity_remaining / row.quantity_opened) * 100
+                    : 0
+                const isLow = pct > 0 && pct <= 20
+                const bomUses = !isFloor ? bomByMaterialId[row.material_id] || [] : []
+                const linkedRequest = row.factory_request_id
+                  ? requestById.get(row.factory_request_id)
+                  : undefined
+                const releaseProgress = linkedRequest
+                  ? requestOpenProgress(linkedRequest, releasePackages)
+                  : null
+                const isHighlighted = highlightPackageId === row.id
+
+                return (
+                  <article
+                    key={row.id}
+                    ref={(el) => {
+                      packageRefs.current[row.id] = el
+                    }}
+                    className={`rounded-xl border bg-white shadow-sm transition-colors ${
+                      isFloor ? 'rounded-lg p-2.5' : 'p-3.5'
+                    } ${
+                      isHighlighted
+                        ? 'border-emerald-400 ring-2 ring-emerald-200'
+                        : 'border-gray-200'
+                    }`}
+                  >
+                    <div className={`flex items-start justify-between ${isFloor ? 'gap-2' : 'gap-3'}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-2">
+                          <p
+                            className={`font-semibold text-gray-900 leading-snug min-w-0 ${
+                              isFloor ? 'text-sm' : 'text-sm'
+                            }`}
+                          >
+                            {m?.material_name || '—'}
+                          </p>
+                          {isFloor ? (
+                            <button
+                              type="button"
+                              onClick={() => void openHistoryModal(row)}
+                              className="shrink-0 inline-flex items-center justify-center gap-1 min-h-[28px] px-2 rounded-md border border-slate-300 bg-white text-slate-700 text-[11px] font-medium touch-manipulation hover:bg-slate-50"
+                            >
+                              <History className="h-3 w-3 shrink-0" />
+                              History
+                            </button>
+                          ) : null}
+                        </div>
+                        {row.label ? (
+                          <p className={`text-amber-800 ${isFloor ? 'text-[11px] mt-0.5' : 'text-xs mt-0.5'}`}>
+                            {row.label}
+                          </p>
+                        ) : null}
+                        {!isFloor && m?.sku ? (
+                          <p className="text-xs text-gray-400 font-mono mt-0.5">{m.sku}</p>
+                        ) : null}
+                      </div>
+                      <p
+                        className={`font-bold tabular-nums shrink-0 ${
+                          isFloor ? 'text-sm' : 'text-sm'
+                        } ${isLow ? 'text-amber-700' : 'text-gray-900'}`}
+                      >
+                        {formatQty(remainingDisplay.qty)} {remainingDisplay.unit}
+                      </p>
+                    </div>
+                    <div className={isFloor ? 'mt-1.5' : 'mt-2.5'}>
+                      <div
+                        className={`flex justify-between text-gray-500 mb-1 ${
+                          isFloor ? 'text-[10px]' : 'text-[10px]'
+                        }`}
+                      >
+                        <span>Remaining</span>
+                        <span className="tabular-nums">
+                          {formatQty(remainingDisplay.qty)} / {formatQty(openedDisplay.qty)}{' '}
+                          {remainingDisplay.unit}
+                        </span>
+                      </div>
+                      <div
+                        className={`rounded-full bg-gray-100 overflow-hidden ${
+                          isFloor ? 'h-1.5' : 'h-2'
+                        }`}
+                      >
+                        <div
+                          className={`h-full rounded-full ${isLow ? 'bg-amber-500' : 'bg-green-500'}`}
+                          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                        />
+                      </div>
+                    </div>
+                    {!isFloor && bomUses.length > 0 ? (
+                      <p className="text-xs text-gray-600 mt-2 leading-snug">
+                        <span className="text-gray-500">BOM: </span>
+                        {bomUses
+                          .slice(0, 2)
+                          .map((b) => b.product_name)
+                          .join(', ')}
+                        {bomUses.length > 2 ? ` +${bomUses.length - 2}` : ''}
+                      </p>
+                    ) : null}
+                    {linkedRequest && releaseProgress && m ? (
+                      <p
+                        className={`text-gray-500 leading-snug ${
+                          isFloor ? 'text-[10px] mt-1' : 'text-[11px] mt-1.5'
+                        }`}
+                      >
+                        From release{' '}
+                        {linkedRequest.released_at
+                          ? new Date(linkedRequest.released_at).toLocaleDateString()
+                          : linkedRequest.request_date}
+                        {' · '}
+                        {formatFactoryRequestQtyDisplay(releaseProgress.consumed, m).primary} of{' '}
+                        {formatFactoryRequestQtyDisplay(releaseProgress.total, m).primary} opened
+                      </p>
+                    ) : null}
+                    {!isFloor ? (
+                      <p className="text-[11px] text-gray-500 mt-2">
+                        Opened {new Date(row.opened_at).toLocaleDateString()}
+                        {row.opened_by ? ` · ${row.opened_by}` : ''}
+                      </p>
+                    ) : null}
+                    {!isFloor ? (
+                      <button
+                        type="button"
+                        onClick={() => void openHistoryModal(row)}
+                        className="mt-3 w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-purple-200 bg-purple-50 text-purple-800 font-medium touch-manipulation py-2 text-xs"
+                      >
+                        <History className="h-4 w-4 shrink-0" />
+                        History
+                      </button>
+                    ) : null}
+                  </article>
+                )
+              })}
+            </div>
+            {!isFloor ? (
+          <div className="hidden md:block overflow-x-auto">
             <table className="min-w-full">
               <thead className="bg-gray-50/80">
                 <tr className="border-b border-gray-200">
@@ -779,7 +1096,7 @@ export function FactoryMaterialInventory({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filteredOpened.map((row) => {
+                {opened.map((row) => {
                   const m = resolveOpenedRowMaterial(row, rawMaterials)
                   const remainingDisplay = openedStockToDisplay(row.quantity_remaining, m)
                   const openedDisplay = openedStockToDisplay(row.quantity_opened, m)
@@ -789,9 +1106,21 @@ export function FactoryMaterialInventory({
                       : 0
                   const isLow = pct > 0 && pct <= 20
                   const bomUses = bomByMaterialId[row.material_id] || []
+                  const linkedRequest = row.factory_request_id
+                    ? requestById.get(row.factory_request_id)
+                    : undefined
+                  const isHighlighted = highlightPackageId === row.id
 
                   return (
-                    <tr key={row.id} className="bg-white hover:bg-slate-50/80">
+                    <tr
+                      key={row.id}
+                      ref={(el) => {
+                        packageRefs.current[row.id] = el
+                      }}
+                      className={`hover:bg-slate-50/80 ${
+                        isHighlighted ? 'bg-emerald-50/80' : 'bg-white'
+                      }`}
+                    >
                       <td className="px-5 py-3">
                         <div className="text-sm font-medium text-gray-900">
                           {m?.material_name || '—'}
@@ -804,6 +1133,14 @@ export function FactoryMaterialInventory({
                         {row.label && (
                           <div className="text-xs text-amber-800 mt-0.5">{row.label}</div>
                         )}
+                        {linkedRequest ? (
+                          <div className="text-[11px] text-gray-500 mt-0.5">
+                            Release{' '}
+                            {linkedRequest.released_at
+                              ? new Date(linkedRequest.released_at).toLocaleDateString()
+                              : linkedRequest.request_date}
+                          </div>
+                        ) : null}
                         {m?.sku && <div className="text-xs text-gray-400">{m.sku}</div>}
                       </td>
                       <td className="px-4 py-3">
@@ -874,15 +1211,6 @@ export function FactoryMaterialInventory({
                           >
                             <History size={16} />
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => openAdjustModal(row)}
-                            className="p-1.5 text-gray-600 hover:text-gray-800 rounded-md hover:bg-gray-100 transition-colors"
-                            title="Adjust remaining"
-                            aria-label="Adjust remaining"
-                          >
-                            <SlidersHorizontal size={16} />
-                          </button>
                         </div>
                       </td>
                     </tr>
@@ -891,25 +1219,90 @@ export function FactoryMaterialInventory({
               </tbody>
             </table>
           </div>
+            ) : null}
+          </>
         )}
 
-            <div className="px-4 pt-6 sm:px-5 border-t border-gray-200 mt-2">
+            <div
+              className={`border-t border-gray-200 mt-2 ${
+                isFloor ? 'px-3 pt-3' : 'px-4 pt-6 sm:px-5'
+              }`}
+            >
               <h3 className="text-sm font-semibold text-gray-900">Previous empties</h3>
-              <p className="text-xs text-gray-500 mt-0.5">
-                Packages marked empty (last {emptied.length}
-                {emptied.length >= 100 ? '+' : ''})
-              </p>
-            </div>
-            {filteredEmptied.length === 0 ? (
-              <div className="text-center py-8 px-4">
-                <p className="text-sm text-gray-500">
-                  {search.trim()
-                    ? 'No emptied packages match your search'
-                    : 'No emptied packages yet'}
+              {!isFloor ? (
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Packages marked empty (last {emptied.length}
+                  {emptied.length >= 100 ? '+' : ''})
                 </p>
+              ) : null}
+            </div>
+            {emptied.length === 0 ? (
+              <div className={`text-center ${isFloor ? 'py-4 px-3' : 'py-8 px-4'}`}>
+                <p className="text-sm text-gray-500">Nothing emptied yet</p>
               </div>
             ) : (
-              <div className="overflow-x-auto pb-4">
+              <>
+                <div className={`space-y-2 ${isFloor ? 'px-3 pb-4 space-y-1.5' : 'px-4 pb-4 md:hidden'}`}>
+                  {emptied.map((row) => {
+                    const m = resolveOpenedRowMaterial(row, rawMaterials)
+                    const openedDisplay = openedStockToDisplay(row.quantity_opened, m)
+                    const emptiedAt = row.updated_at || row.opened_at
+
+                    return (
+                      <article
+                        key={row.id}
+                        className={`border border-gray-200 bg-gray-50/80 ${
+                          isFloor ? 'rounded-lg p-2.5' : 'rounded-xl p-3.5'
+                        }`}
+                      >
+                        <div className={`flex items-start justify-between ${isFloor ? 'gap-2' : 'gap-3'}`}>
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-gray-900 leading-snug">
+                              {m?.material_name || '—'}
+                            </p>
+                            {row.label ? (
+                              <p className={`text-amber-800 ${isFloor ? 'text-[11px] mt-0.5' : 'text-xs mt-0.5'}`}>
+                                {row.label}
+                              </p>
+                            ) : null}
+                            <p
+                              className={`text-gray-500 tabular-nums ${
+                                isFloor ? 'text-[11px] mt-0.5' : 'text-xs mt-1'
+                              }`}
+                            >
+                              Opened {formatQty(openedDisplay.qty)} {openedDisplay.unit}
+                              {isFloor ? (
+                                <span className="text-gray-400">
+                                  {' · '}
+                                  {new Date(emptiedAt).toLocaleDateString()}
+                                </span>
+                              ) : null}
+                            </p>
+                            {!isFloor ? (
+                              <p className="text-[11px] text-gray-400 mt-0.5">
+                                Emptied {new Date(emptiedAt).toLocaleString()}
+                              </p>
+                            ) : null}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void openHistoryModal(row)}
+                            className={`shrink-0 inline-flex items-center justify-center touch-manipulation ${
+                              isFloor
+                                ? 'min-h-[28px] min-w-[28px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                                : 'p-2 rounded-lg border border-purple-200 bg-white text-purple-700'
+                            }`}
+                            aria-label="Usage history"
+                          >
+                            <History className={isFloor ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
+                          </button>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+                {!isFloor ? (
+              <div className="hidden md:block overflow-x-auto pb-4">
                 <table className="min-w-full">
                   <thead className="bg-gray-50/80">
                     <tr className="border-b border-gray-200">
@@ -928,7 +1321,7 @@ export function FactoryMaterialInventory({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {filteredEmptied.map((row) => {
+                    {emptied.map((row) => {
                       const m = resolveOpenedRowMaterial(row, rawMaterials)
                       const openedDisplay = openedStockToDisplay(row.quantity_opened, m)
                       const emptiedAt = row.updated_at || row.opened_at
@@ -983,26 +1376,29 @@ export function FactoryMaterialInventory({
                   </tbody>
                 </table>
               </div>
+                ) : null}
+              </>
             )}
           </>
         )}
       </div>
 
-      <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50/80 px-4 py-3 text-xs text-gray-600">
-        <p>{meta.footer}</p>
-      </div>
-
       {historyRow && historyOpenedDisplay && historyRemainingDisplay ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="opened-material-history-title"
-          onClick={closeHistoryModal}
+        <Modal
+          onClose={closeHistoryModal}
+          align="center"
+          positionClassName={isFloor ? 'items-end sm:items-center' : undefined}
+          contentClassName={isFloor ? 'p-0 sm:p-4' : undefined}
         >
           <div
-            className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[min(85vh,640px)] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
+            className={`bg-white shadow-xl w-full flex flex-col overflow-hidden ${
+              isFloor
+                ? 'rounded-t-2xl sm:rounded-lg max-h-[min(90dvh,640px)] sm:max-w-lg'
+                : 'rounded-lg max-h-[min(85vh,640px)] max-w-lg'
+            }`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="opened-material-history-title"
           >
             <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-gray-200 shrink-0">
               <div className="min-w-0">
@@ -1059,11 +1455,7 @@ export function FactoryMaterialInventory({
                   {historyEntries.map((entry) => (
                     <li
                       key={entry.id}
-                      className={`rounded-lg border px-3 py-2.5 ${
-                        entry.kind === 'opened'
-                          ? 'border-emerald-200 bg-emerald-50/60'
-                          : 'border-gray-200 bg-gray-50/80'
-                      }`}
+                      className={`rounded-lg border px-3 py-2.5 ${historyEntryClass(entry.kind)}`}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
@@ -1077,14 +1469,24 @@ export function FactoryMaterialInventory({
                             {new Date(entry.at).toLocaleString()}
                           </p>
                         </div>
-                        <p
-                          className={`text-sm font-semibold tabular-nums shrink-0 whitespace-nowrap ${
-                            entry.kind === 'opened' ? 'text-emerald-800' : 'text-gray-900'
-                          }`}
-                        >
-                          {entry.kind === 'opened' ? '+' : '−'}
-                          {formatQty(entry.quantity)} {entry.unit}
-                        </p>
+                        {entry.quantity != null ? (
+                          <p
+                            className={`text-sm font-semibold tabular-nums shrink-0 whitespace-nowrap ${
+                              entry.kind === 'opened'
+                                ? 'text-emerald-800'
+                                : entry.kind === 'discarded'
+                                  ? 'text-red-800'
+                                  : entry.kind === 'adjustment'
+                                    ? 'text-amber-800'
+                                    : 'text-gray-900'
+                            }`}
+                          >
+                            {historyQtyPrefix(entry.kind)}
+                            {formatQty(entry.quantity)} {entry.unit}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-gray-500 shrink-0">—</p>
+                        )}
                       </div>
                     </li>
                   ))}
@@ -1097,113 +1499,151 @@ export function FactoryMaterialInventory({
                 </p>
               ) : null}
             </div>
-            <div className="flex justify-end px-5 py-4 border-t border-gray-200 bg-gray-50 rounded-b-lg shrink-0">
+            <div
+              className={`flex justify-end px-5 py-4 border-t border-gray-200 bg-gray-50 shrink-0 ${
+                isFloor
+                  ? 'pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-4'
+                  : 'rounded-b-lg'
+              }`}
+            >
               <button
                 type="button"
                 onClick={closeHistoryModal}
-                className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-white"
+                className={`text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-white touch-manipulation ${
+                  isFloor ? 'min-h-[44px] px-5 w-full sm:w-auto' : 'px-4 py-2'
+                }`}
               >
                 Close
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       ) : null}
 
-      {adjustRow && adjustOpenedDisplay ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="adjust-remaining-title"
-          onClick={() => {
-            if (!adjustSaving) closeAdjustModal()
-          }}
+      {cycleCountOpen ? (
+        <Modal
+          onClose={cycleCountSaving ? undefined : closeCycleCountModal}
+          align="center"
+          positionClassName={isFloor ? 'items-end sm:items-center' : undefined}
+          contentClassName={isFloor ? 'p-0 sm:p-4' : undefined}
         >
           <div
-            className="bg-white rounded-lg shadow-xl w-full max-w-md"
-            onClick={(e) => e.stopPropagation()}
+            className={`bg-white shadow-xl w-full ${
+              isFloor
+                ? 'rounded-t-2xl sm:rounded-lg max-w-lg max-h-[min(90dvh,40rem)] flex flex-col'
+                : 'rounded-lg max-w-lg max-h-[90vh] flex flex-col'
+            }`}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cycle-count-title"
           >
-            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-gray-200">
+            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-gray-200 shrink-0">
               <div className="min-w-0">
-                <h3 id="adjust-remaining-title" className="text-lg font-semibold text-gray-900">
-                  Adjust remaining
+                <h3 id="cycle-count-title" className="text-lg font-semibold text-gray-900">
+                  Cycle count
                 </h3>
-                <p className="text-sm text-gray-600 mt-0.5 truncate">
-                  {adjustModalMat?.material_name || adjustRow.material?.material_name || 'Material'}
-                  {adjustRow.label ? (
-                    <span className="text-amber-800"> · {adjustRow.label}</span>
-                  ) : null}
+                <p className="text-sm text-gray-600 mt-0.5">
+                  {meta.title} · {opened.length} package{opened.length === 1 ? '' : 's'} on the
+                  floor
                 </p>
               </div>
               <button
                 type="button"
-                onClick={closeAdjustModal}
-                disabled={adjustSaving}
+                onClick={closeCycleCountModal}
+                disabled={cycleCountSaving}
                 className="shrink-0 p-1 text-gray-400 hover:text-gray-600 rounded"
                 aria-label="Close"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="px-5 py-4 space-y-4">
-              <p className="text-sm text-gray-600">
-                Opened:{' '}
-                <span className="font-medium tabular-nums text-gray-900">
-                  {formatQty(adjustOpenedDisplay.qty)} {adjustOpenedDisplay.unit}
-                </span>
+            <div className="px-5 py-4 space-y-3 overflow-y-auto flex-1 min-h-0">
+              <p className="text-xs text-gray-500">
+                Enter counted remaining for each opened package. Set to 0 to empty.
               </p>
-              <div>
-                <label
-                  htmlFor="adjust-remaining-qty"
-                  className="block text-sm font-medium text-gray-700 mb-1.5"
-                >
-                  Remaining ({adjustOpenedDisplay.unit})
-                </label>
-                <input
-                  id="adjust-remaining-qty"
-                  type="number"
-                  min={0}
-                  max={adjustOpenedDisplay.qty}
-                  step="any"
-                  value={adjustQty}
-                  onChange={(e) => setAdjustQty(e.target.value)}
-                  disabled={adjustSaving}
-                  autoFocus
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                />
-              </div>
+              {opened.map((row) => {
+                const mat = resolveOpenedRowMaterial(row, rawMaterials)
+                const openedDisplay = openedStockToDisplay(row.quantity_opened, mat)
+                const name = mat?.material_name || row.material?.material_name || 'Material'
+                return (
+                  <div
+                    key={row.id}
+                    className="rounded-lg border border-gray-200 bg-gray-50/80 p-3 space-y-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900 leading-snug">{name}</p>
+                      {row.label ? (
+                        <p className="text-xs text-amber-800 mt-0.5">{row.label}</p>
+                      ) : null}
+                      <p className="text-[11px] text-gray-500 mt-0.5 tabular-nums">
+                        Opened {formatQty(openedDisplay.qty)} {openedDisplay.unit}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label
+                        htmlFor={`cycle-count-${row.id}`}
+                        className="text-xs font-medium text-gray-600 shrink-0"
+                      >
+                        Remaining
+                      </label>
+                      <input
+                        id={`cycle-count-${row.id}`}
+                        type="number"
+                        min={0}
+                        max={openedDisplay.qty}
+                        step={1}
+                        value={cycleCountDrafts[row.id] ?? ''}
+                        onChange={(e) =>
+                          setCycleCountDrafts((prev) => ({
+                            ...prev,
+                            [row.id]: e.target.value,
+                          }))
+                        }
+                        disabled={cycleCountSaving}
+                        className="w-24 px-2 py-1.5 border border-gray-300 rounded-lg text-sm tabular-nums text-center bg-white"
+                      />
+                      <span className="text-xs text-gray-500">{openedDisplay.unit}</span>
+                      <button
+                        type="button"
+                        disabled={cycleCountSaving}
+                        onClick={() =>
+                          setCycleCountDrafts((prev) => ({ ...prev, [row.id]: '0' }))
+                        }
+                        className="ml-auto text-xs font-medium text-amber-800 hover:text-amber-950 disabled:opacity-50"
+                      >
+                        Empty
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
-            <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 border-t border-gray-200 bg-gray-50 rounded-b-lg">
+            <div
+              className={`flex flex-wrap items-center justify-end gap-2 px-5 py-4 border-t border-gray-200 bg-gray-50 shrink-0 ${
+                isFloor
+                  ? 'pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-4 rounded-b-none sm:rounded-b-lg'
+                  : 'rounded-b-lg'
+              }`}
+            >
               <button
                 type="button"
-                onClick={() => void submitMarkEmpty()}
-                disabled={adjustSaving}
-                className="px-4 py-2 text-sm font-medium text-amber-900 border border-amber-300 rounded-lg hover:bg-amber-50 disabled:opacity-50"
+                onClick={closeCycleCountModal}
+                disabled={cycleCountSaving}
+                className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50"
               >
-                Mark empty
+                Cancel
               </button>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={closeAdjustModal}
-                  disabled={adjustSaving}
-                  className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-white disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void submitAdjustRemaining()}
-                  disabled={adjustSaving}
-                  className={`px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 ${themeBtn}`}
-                >
-                  {adjustSaving ? 'Saving…' : 'Save'}
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => void submitCycleCount()}
+                disabled={cycleCountSaving || opened.length === 0}
+                className={`px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 ${themeBtn}`}
+              >
+                {cycleCountSaving ? 'Saving…' : 'Save count'}
+              </button>
             </div>
           </div>
-        </div>
+        </Modal>
       ) : null}
     </div>
   )

@@ -2,8 +2,11 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
-import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X, Plus, ChevronLeft, ChevronRight, Columns } from 'lucide-react'
+import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw, RotateCcw, X, Plus, ChevronLeft, ChevronRight, Columns, Package } from 'lucide-react'
 import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
+import { Modal } from './Modal'
+import { DSIRStoreInventoryPanel } from './DSIRStoreInventoryPanel'
+import { sumOnHandForLocation } from '../../lib/dsir-store-inventory'
 
 interface Brand {
   id: string
@@ -68,6 +71,11 @@ export function DSIRReportsViewer({
   dsirViewerReadOnly = false,
 }: DSIRReportsViewerProps) {
   const { requestAdminPassword, AdminPasswordModal } = useAdminPasswordConfirm()
+  const [mainTab, setMainTab] = useState<'reports' | 'inventory'>('reports')
+  const [inventoryLocationId, setInventoryLocationId] = useState('')
+  const [inventoryLocations, setInventoryLocations] = useState<Location[]>([])
+  const [lastReportLocationId, setLastReportLocationId] = useState('')
+  const [showReportInventoryModal, setShowReportInventoryModal] = useState(false)
   const [reports, setReports] = useState<DSIRReport[]>([])
   const [selectedReport, setSelectedReport] = useState<DSIRReport | null>(null)
   const [loading, setLoading] = useState(true)
@@ -398,15 +406,20 @@ export function DSIRReportsViewer({
         summaryByLocation[locationId].reportCount += 1
       }
       
-      // Fetch current stock pans from the latest report for each location
+      // Fetch current stock pans from store inventory ledger (fallback: latest DSIR ending)
       for (const [locationId, summary] of Object.entries(summaryByLocation)) {
-        // Get the latest report for this location
+        try {
+          summaryByLocation[locationId].currentStockPans = await sumOnHandForLocation(locationId)
+          continue
+        } catch {
+          // Table may not exist yet — fall back
+        }
+
         const latestReport = filteredReports
           .filter(r => r.location_id === locationId)
           .sort((a, b) => new Date(b.report_date).getTime() - new Date(a.report_date).getTime())[0]
         
         if (latestReport) {
-          // Fetch ice cream inventory ending values from the latest report
           const { data: latestInventory } = await supabase
             .from('dsir_ice_cream_inventory')
             .select('ending')
@@ -432,6 +445,41 @@ export function DSIRReportsViewer({
     }
     calculateLast7DaysSummary()
   }, [showLast7DaysSummary, calculateLast7DaysSummary])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const { data } = await supabase
+        .from('locations')
+        .select('id, name, brand_id, company_owned')
+        .eq('brand_id', selectedBrand.id)
+        .order('name')
+      if (cancelled) return
+      const locs = (data || []) as Location[]
+      setInventoryLocations(locs)
+      const preferred =
+        selectedLocation?.id ||
+        lastReportLocationId ||
+        locs[0]?.id ||
+        ''
+      setInventoryLocationId((prev) => {
+        if (prev && locs.some((l) => l.id === prev)) return prev
+        if (preferred && locs.some((l) => l.id === preferred)) return preferred
+        return locs[0]?.id || ''
+      })
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedBrand.id, selectedLocation?.id, lastReportLocationId])
+
+  // Keep inventory tab on the same store as the report being viewed
+  useEffect(() => {
+    if (selectedReport?.location_id) {
+      setInventoryLocationId(selectedReport.location_id)
+      setLastReportLocationId(selectedReport.location_id)
+    }
+  }, [selectedReport?.location_id])
 
   const loadReports = async (page = 1, append = false) => {
     if (page === 1) {
@@ -1100,6 +1148,7 @@ export function DSIRReportsViewer({
               setSelectedReport(null)
               setSecondReport(null)
               setSplitViewEnabled(false)
+              setShowReportInventoryModal(false)
               loadReports()
             }}
             className="flex items-center justify-center sm:justify-start space-x-2 px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50 w-full sm:w-auto"
@@ -1132,6 +1181,17 @@ export function DSIRReportsViewer({
               )}
             </p>
           </div>
+
+          {/* Store inventory for this DSIR date */}
+          <button
+            type="button"
+            onClick={() => setShowReportInventoryModal(true)}
+            className="flex items-center space-x-2 px-3 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50 flex-shrink-0"
+            title="Store inventory for this date"
+          >
+            <Package className="h-4 w-4" />
+            <span className="hidden sm:inline text-sm">Inventory</span>
+          </button>
 
           {/* Split View Toggle */}
           <button
@@ -1264,6 +1324,43 @@ export function DSIRReportsViewer({
             showMaterialsDiscrepancyColumns={false}
           />
         )}
+
+        {showReportInventoryModal && (
+          <Modal onClose={() => setShowReportInventoryModal(false)} align="center">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
+              <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between gap-3 shrink-0">
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    <Package className="h-5 w-5 text-gray-600" />
+                    Store inventory
+                  </h3>
+                  <p className="text-sm text-gray-600 mt-0.5">
+                    {selectedReport.location?.name || 'Store'} · {formatDate(selectedReport.report_date)}
+                    {selectedReport.staff_name ? ` · ${selectedReport.staff_name}` : ''}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowReportInventoryModal(false)}
+                  className="p-1 rounded-md text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+                  aria-label="Close"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="p-4 sm:p-5 overflow-y-auto min-h-0 flex-1">
+                <DSIRStoreInventoryPanel
+                  mode="admin"
+                  embedded
+                  locationId={selectedReport.location_id}
+                  reportDate={selectedReport.report_date}
+                  dsirReportId={selectedReport.id}
+                  reportStatus={selectedReport.status}
+                />
+              </div>
+            </div>
+          </Modal>
+        )}
       </div>
     )
   }
@@ -1386,14 +1483,15 @@ export function DSIRReportsViewer({
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
-          <h1 className="text-xl font-semibold text-gray-900">DSIR Reports</h1>
+          <h1 className="text-xl font-semibold text-gray-900">DSIR</h1>
           <p className="text-sm text-gray-600">
             {selectedLocation 
-              ? `View and manage DSIR reports for ${selectedBrand.name} at ${selectedLocation.name}`
-              : `View and manage DSIR reports for ${selectedBrand.name} across all locations`
+              ? `${selectedBrand.name} at ${selectedLocation.name}`
+              : `${selectedBrand.name} — all locations`
             }
           </p>
         </div>
+        {mainTab === 'reports' ? (
         <div className="flex space-x-3">
           <button
             onClick={() => {
@@ -1422,8 +1520,53 @@ export function DSIRReportsViewer({
             <span>Refresh</span>
           </button>
         </div>
+        ) : null}
       </div>
 
+      <div className="flex gap-1 border-b border-gray-200">
+        <button
+          type="button"
+          onClick={() => setMainTab('reports')}
+          className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
+            mainTab === 'reports'
+              ? 'border-blue-600 text-blue-700'
+              : 'border-transparent text-gray-600 hover:text-gray-800'
+          }`}
+        >
+          Reports
+        </button>
+        <button
+          type="button"
+          onClick={() => setMainTab('inventory')}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
+            mainTab === 'inventory'
+              ? 'border-blue-600 text-blue-700'
+              : 'border-transparent text-gray-600 hover:text-gray-800'
+          }`}
+        >
+          <Package className="h-4 w-4" />
+          Inventory
+        </button>
+      </div>
+
+      {mainTab === 'inventory' ? (
+        <div className="bg-white rounded-lg shadow-sm border p-4 sm:p-5">
+          {inventoryLocationId ? (
+            <DSIRStoreInventoryPanel
+              key={`inv-${inventoryLocationId}-${mainTab}`}
+              mode="admin"
+              locationId={inventoryLocationId}
+              locations={inventoryLocations.map((l) => ({ id: l.id, name: l.name }))}
+              onLocationChange={setInventoryLocationId}
+              allowCycleCount={!dsirViewerReadOnly}
+              adjustedByName="Dashboard admin"
+            />
+          ) : (
+            <p className="text-sm text-gray-500">No locations found for this brand.</p>
+          )}
+        </div>
+      ) : (
+      <>
       {/* Last 7 Days Summary */}
       {showLast7DaysSummary && (
       <div className="bg-white rounded-lg shadow-sm border p-4">
@@ -1471,7 +1614,7 @@ export function DSIRReportsViewer({
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-xs text-gray-600">Current Stock Pans:</span>
+                  <span className="text-xs text-gray-600">Store stock pans:</span>
                   <span className="text-sm font-semibold text-gray-700">{summary.currentStockPans.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between items-center border-t border-gray-300 pt-1">
@@ -1853,10 +1996,19 @@ export function DSIRReportsViewer({
           </div>
         </div>
       )}
+      </>
+      )}
 
       {/* Edit Items Modal */}
       {isEditItemsModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <Modal
+          onClose={() => {
+            setIsEditItemsModalOpen(false)
+            setNewItem({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
+            setEditingItemId(null)
+          }}
+          align="center"
+        >
           <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between p-6 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Edit Predefined Items</h3>
@@ -2006,13 +2158,13 @@ export function DSIRReportsViewer({
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Create DSIR Report Modal */}
       {isCreateReportModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-1/2 lg:w-1/3 max-w-md shadow-lg rounded-md bg-white">
+        <Modal backdropClassName="bg-black/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-1/2 lg:w-1/3 max-w-md shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Create DSIR</h3>
               <button
@@ -2136,7 +2288,7 @@ export function DSIRReportsViewer({
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {AdminPasswordModal}

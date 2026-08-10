@@ -104,7 +104,7 @@ export async function transferMaterialToProductInventory(params: {
   uom: ProductMaterialInventoryUom
   createdBy: string
   notes?: string
-}): Promise<{ stockUnitsTransferred: number; productFinalStock: number }> {
+}): Promise<{ stockUnitsTransferred: number; productFinalStock: number; movementId: string }> {
   const requestQty = Math.max(0, Number(params.requestQty) || 0)
   if (requestQty <= 0) throw new Error('Enter a quantity greater than 0.')
 
@@ -147,26 +147,30 @@ export async function transferMaterialToProductInventory(params: {
   const productInitial = Number(productRow.initial_stock) || 0
   const productFinal = productInitial + stockOut
 
-  const { error: movErr } = await supabase.from('material_stock_movements').insert({
-    material_id: params.material.id,
-    movement_type: 'out',
-    quantity: stockOut,
-    reference_type: 'transfer_to_product_inventory',
-    reference_id: params.productId,
-    reference_number: productRow.name || params.productName,
-    notes: [
-      params.notes?.trim(),
-      `Transferred to product inventory: ${productRow.name || params.productName}`,
-      `${formatQty(requestQty)} ${unitLabel} → ${formatQty(stockOut)} ${getStockUnitLabel(params.material)}`,
-      `Product stock: ${formatQty(productInitial)} → ${formatQty(productFinal)}`,
-    ]
-      .filter(Boolean)
-      .join(' | '),
-    movement_date: new Date().toISOString().split('T')[0],
-    created_by: params.createdBy,
-  })
+  const { data: movementRow, error: movErr } = await supabase
+    .from('material_stock_movements')
+    .insert({
+      material_id: params.material.id,
+      movement_type: 'out',
+      quantity: stockOut,
+      reference_type: 'transfer_to_product_inventory',
+      reference_id: params.productId,
+      reference_number: productRow.name || params.productName,
+      notes: [
+        params.notes?.trim(),
+        `Transferred to product inventory: ${productRow.name || params.productName}`,
+        `${formatQty(requestQty)} ${unitLabel} → ${formatQty(stockOut)} ${getStockUnitLabel(params.material)}`,
+        `Product stock: ${formatQty(productInitial)} → ${formatQty(productFinal)}`,
+      ]
+        .filter(Boolean)
+        .join(' | '),
+      movement_date: new Date().toISOString().split('T')[0],
+      created_by: params.createdBy,
+    })
+    .select('id')
+    .single()
 
-  if (movErr) throw movErr
+  if (movErr || !movementRow?.id) throw movErr || new Error('Failed to record material movement.')
 
   const { error: updErr } = await supabase
     .from('products')
@@ -175,7 +179,11 @@ export async function transferMaterialToProductInventory(params: {
 
   if (updErr) throw updErr
 
-  return { stockUnitsTransferred: stockOut, productFinalStock: productFinal }
+  return {
+    stockUnitsTransferred: stockOut,
+    productFinalStock: productFinal,
+    movementId: movementRow.id,
+  }
 }
 
 function formatQty(qty: number): string {

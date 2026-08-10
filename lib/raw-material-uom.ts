@@ -325,11 +325,27 @@ export function stockUnitsToBomBaseQty(
   return qty * baseUnitsPerStockUnit(material)
 }
 
-export function baseUnitCost(material: RawMaterialUomFields): number {
+export function stockUnitCost(material: RawMaterialUomFields): number {
   const purchaseCost = Number(material.unit_cost) || 0
-  const perPurchase = Math.max(1, Math.floor(Number(material.uom_stock_per_purchase) || 1))
-  const stockUnitCost = purchaseCost / perPurchase
-  return stockUnitCost / baseUnitsPerStockUnit(material)
+  return purchaseCost / stockUnitsPerPurchase(material)
+}
+
+export function baseUnitCost(material: RawMaterialUomFields): number {
+  return stockUnitCost(material) / baseUnitsPerStockUnit(material)
+}
+
+/** Display cost in unit hierarchy panels (purchase / stock / base). */
+export function formatUnitHierarchyCost(amount: number): string {
+  if (!Number.isFinite(amount) || amount === 0) return '0.00'
+  const abs = Math.abs(amount)
+  // Keep enough precision so small per-base costs don't look like zero.
+  const digits = abs >= 0.01 ? 2 : abs >= 0.0001 ? 4 : 6
+  const factor = 10 ** digits
+  const rounded = Math.round(amount * factor) / factor
+  return rounded.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: digits,
+  })
 }
 
 /** Factory BOM display qty → product BOM base qty (for costing). */

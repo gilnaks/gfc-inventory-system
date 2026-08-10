@@ -5,9 +5,11 @@ import Link from 'next/link'
 import { supabase } from '../../lib/supabase'
 import {
   groupScheduleByBrand,
+  isScheduleItemScanComplete,
   loadTodayFactorySchedule,
   type FactoryScheduleItem,
 } from '../../lib/factory-schedule'
+import { Modal } from '../components/Modal'
 import { ProgressFractionCircle } from '../components/ProgressFractionCircle'
 import { ScheduleNotesBlock } from './ScheduleNotesBlock'
 import { getBrandTagClasses } from '../../lib/brand-colors'
@@ -20,23 +22,20 @@ import {
 import { getPhilippinesDate } from '../../lib/timezone'
 import { stockQtyToFactoryRequestQty } from '../../lib/raw-material-uom'
 import {
-  Factory,
   ClipboardList,
-  FlaskConical,
+  Boxes,
   Send,
   Users,
   UserPlus,
   X,
-  Trash2,
-  Barcode,
   Plus,
-  Package,
-  Box,
-  Wrench,
+  ArrowLeft,
+  Layers,
+  Barcode,
+  ClipboardCheck,
 } from 'lucide-react'
-import { FactoryMaterialInventory } from '../components/FactoryMaterialInventory'
 import { FactoryScheduleBatchActions } from './FactoryScheduleBatchActions'
-import type { FactoryInventoryKind } from '../../lib/factory-inventory'
+import { FactoryNav } from './FactoryNav'
 import {
   fetchActiveBatchesForDate,
   fetchCompletedBatchesForDate,
@@ -60,6 +59,16 @@ type FloorStaffRow = {
   id: string
   staff_registration_id: string
   full_name: string
+}
+
+const EMPTY_COMPLETED_BATCHES: FactoryBatchListItem[] = []
+
+function ScheduleInProgressBadge() {
+  return (
+    <span className="inline-flex items-center shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-indigo-100 text-indigo-800 border border-indigo-200">
+      In progress
+    </span>
+  )
 }
 
 function getFactoryRequestedBy(): string {
@@ -88,7 +97,8 @@ export default function FactoryPage() {
       material?: RawMat
     }[]
   >([])
-  const [loadingMain, setLoadingMain] = useState(true)
+  const [loadingSchedule, setLoadingSchedule] = useState(true)
+  const [loadingMaterials, setLoadingMaterials] = useState(true)
 
   const [reqMaterialId, setReqMaterialId] = useState('')
   const [reqQty, setReqQty] = useState('')
@@ -102,63 +112,14 @@ export default function FactoryPage() {
   const [floorStaffToday, setFloorStaffToday] = useState<FloorStaffRow[]>([])
   const [staffToAdd, setStaffToAdd] = useState('')
   const [addingStaff, setAddingStaff] = useState(false)
-  const [cancellingReqId, setCancellingReqId] = useState<string | null>(null)
-  const [floorInventoryKind, setFloorInventoryKind] = useState<FactoryInventoryKind | null>(
-    null
-  )
-  const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0)
+  const [staffModalOpen, setStaffModalOpen] = useState(false)
+  const [materialsModalOpen, setMaterialsModalOpen] = useState(false)
   const [activeBatches, setActiveBatches] = useState<FactoryBatchListItem[]>([])
   const [completedBatches, setCompletedBatches] = useState<FactoryBatchListItem[]>([])
+  const [cycleCountNoticeDismissed, setCycleCountNoticeDismissed] = useState(false)
 
-  const bumpInventoryRefresh = () => setInventoryRefreshKey((k) => k + 1)
-
-  const loadDashboard = useCallback(async () => {
-    setLoadingMain(true)
+  const loadStaffData = useCallback(async () => {
     try {
-      const rows = await loadTodayFactorySchedule(today)
-      setSchedule(rows)
-      const needs = await fetchAggregatedBomRequirements(rows)
-      setBomNeeds(needs)
-
-      const { data: mats } = await supabase
-        .from('raw_materials')
-        .select(
-          'id, material_name, sku, unit, uom_purchase_unit, uom_stock_per_purchase, factory_request_uom, factory_inventory_kind, current_stock, is_active, brand_id'
-        )
-        .eq('is_active', true)
-        .order('material_name')
-
-      const { data: brandRows } = await supabase.from('brands').select('id, name')
-      const brandMap = new Map((brandRows || []).map((b: any) => [b.id, b.name]))
-      const withBrands: RawMat[] = (mats || []).map((m: any) => ({
-        ...m,
-        brands: { name: brandMap.get(m.brand_id) || '—' },
-      }))
-      setMaterials(withBrands)
-
-      const { data: reqs } = await supabase
-        .from('factory_material_requests')
-        .select(
-          'id, material_id, quantity, status, request_date, requested_by, released_by, material:raw_materials(id, material_name, sku, unit)'
-        )
-        .in('status', ['pending', 'released'])
-        .order('created_at', { ascending: false })
-        .limit(50)
-
-      setRequests((reqs || []) as any[])
-
-      try {
-        const [inProgress, completed] = await Promise.all([
-          fetchActiveBatchesForDate(today),
-          fetchCompletedBatchesForDate(today),
-        ])
-        setActiveBatches(inProgress)
-        setCompletedBatches(completed)
-      } catch {
-        setActiveBatches([])
-        setCompletedBatches([])
-      }
-
       const { data: factoryLocs } = await supabase
         .from('locations')
         .select('id, name')
@@ -213,10 +174,82 @@ export default function FactoryPage() {
       }
     } catch (e) {
       console.error(e)
-    } finally {
-      setLoadingMain(false)
     }
   }, [today])
+
+  const loadMaterialsData = useCallback(async (rows: FactoryScheduleItem[]) => {
+    try {
+      const [needs, matsRes, brandRows, reqs] = await Promise.all([
+        fetchAggregatedBomRequirements(rows),
+        supabase
+          .from('raw_materials')
+          .select(
+            'id, material_name, sku, unit, uom_purchase_unit, uom_stock_per_purchase, factory_request_uom, factory_inventory_kind, current_stock, is_active, brand_id'
+          )
+          .eq('is_active', true)
+          .order('material_name'),
+        supabase.from('brands').select('id, name'),
+        supabase
+          .from('factory_material_requests')
+          .select(
+            'id, material_id, quantity, status, request_date, requested_by, released_by, material:raw_materials(id, material_name, sku, unit)'
+          )
+          .in('status', ['pending', 'released'])
+          .order('created_at', { ascending: false })
+          .limit(50),
+      ])
+
+      setBomNeeds(needs)
+      const brandMap = new Map((brandRows.data || []).map((b: any) => [b.id, b.name]))
+      setMaterials(
+        ((matsRes.data || []) as any[]).map((m) => ({
+          ...m,
+          brands: { name: brandMap.get(m.brand_id) || '—' },
+        }))
+      )
+      setRequests((reqs.data || []) as any[])
+    } catch (e) {
+      console.error(e)
+    }
+  }, [])
+
+  const refreshScheduleAndBatches = useCallback(async () => {
+    setLoadingSchedule(true)
+    let loadedRows: FactoryScheduleItem[] = []
+    try {
+      const [rows, inProgress, completed] = await Promise.all([
+        loadTodayFactorySchedule(today),
+        fetchActiveBatchesForDate(today).catch(() => [] as FactoryBatchListItem[]),
+        fetchCompletedBatchesForDate(today).catch(() => [] as FactoryBatchListItem[]),
+      ])
+      loadedRows = rows
+      setSchedule(rows)
+      setActiveBatches(inProgress)
+      setCompletedBatches(completed)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoadingSchedule(false)
+    }
+    return loadedRows
+  }, [today])
+
+  const loadDashboard = useCallback(async () => {
+    setLoadingMaterials(true)
+    const loadedRows = await refreshScheduleAndBatches()
+    try {
+      await Promise.all([loadMaterialsData(loadedRows), loadStaffData()])
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoadingMaterials(false)
+    }
+  }, [refreshScheduleAndBatches, loadMaterialsData, loadStaffData])
+
+  const refreshAfterBatchChange = useCallback(async () => {
+    const loadedRows = await refreshScheduleAndBatches()
+    void loadMaterialsData(loadedRows)
+  }, [refreshScheduleAndBatches, loadMaterialsData])
 
   useEffect(() => {
     if (urlId) {
@@ -225,6 +258,15 @@ export default function FactoryPage() {
     }
     loadDashboard()
   }, [urlId, loadDashboard, router])
+
+  useEffect(() => {
+    try {
+      const key = `factory-cycle-count-notice-dismissed:${today}`
+      setCycleCountNoticeDismissed(localStorage.getItem(key) === '1')
+    } catch {
+      setCycleCountNoticeDismissed(false)
+    }
+  }, [today])
 
   const todayRequestsByMaterial = useMemo(() => {
     const map = new Map<string, { status: 'pending' | 'released'; quantity: number }>()
@@ -250,13 +292,47 @@ export default function FactoryPage() {
     [bomNeeds, alreadyRequestedMaterialIdsToday]
   )
 
-  const requestsToday = useMemo(
-    () =>
-      requests.filter((r) => String(r.request_date ?? '').slice(0, 10) === today),
-    [requests, today]
-  )
-
   const scheduleByBrand = useMemo(() => groupScheduleByBrand(schedule), [schedule])
+
+  const inProgressByScheduleId = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const b of activeBatches) {
+      map.set(b.schedule_id, b.id)
+    }
+    return map
+  }, [activeBatches])
+
+  const completedByScheduleId = useMemo(() => {
+    const map = new Map<string, FactoryBatchListItem[]>()
+    for (const b of completedBatches) {
+      const list = map.get(b.schedule_id) ?? []
+      list.push(b)
+      map.set(b.schedule_id, list)
+    }
+    return map
+  }, [completedBatches])
+
+  /** All scheduled production for today is done — prompt floor cycle count. */
+  const shouldPromptRawMaterialCycleCount = useMemo(() => {
+    if (loadingSchedule) return false
+    if (schedule.length === 0) return false
+    if (activeBatches.length > 0) return false
+    if (!schedule.every(isScheduleItemScanComplete)) return false
+    // At least one completed batch today so we don't prompt on a fully scanned empty day.
+    return completedBatches.length > 0
+  }, [loadingSchedule, schedule, activeBatches, completedBatches])
+
+  const showCycleCountNotice =
+    shouldPromptRawMaterialCycleCount && !cycleCountNoticeDismissed
+
+  const dismissCycleCountNotice = () => {
+    try {
+      localStorage.setItem(`factory-cycle-count-notice-dismissed:${today}`, '1')
+    } catch {
+      /* ignore */
+    }
+    setCycleCountNoticeDismissed(true)
+  }
 
   const bomLinesToSend = useMemo(() => {
     return actionableBomNeeds
@@ -371,28 +447,6 @@ export default function FactoryPage() {
     }
   }
 
-  const cancelMaterialRequest = async (id: string) => {
-    if (!confirm('Cancel this material request? It will be removed from the pending queue.')) return
-    setCancellingReqId(id)
-    try {
-      const { data, error } = await supabase
-        .from('factory_material_requests')
-        .update({ status: 'cancelled' })
-        .eq('id', id)
-        .eq('status', 'pending')
-        .select('id')
-      if (error) throw error
-      if (!data?.length) {
-        alert('This request is no longer pending (it may have been released or cancelled already).')
-      }
-      await loadDashboard()
-    } catch (e: any) {
-      alert(e?.message || 'Could not cancel request')
-    } finally {
-      setCancellingReqId(null)
-    }
-  }
-
   const addStaffToFloor = async () => {
     if (!staffToAdd) return
     setAddingStaff(true)
@@ -429,168 +483,431 @@ export default function FactoryPage() {
   }
 
   if (urlId) {
-    return (
-      <div className="min-h-[100dvh] min-h-screen bg-slate-100 flex items-center justify-center p-4">
-        <p className="text-gray-500 text-sm">Opening scanner…</p>
-      </div>
-    )
+    return null
   }
 
   return (
     <div className="min-h-[100dvh] min-h-screen bg-slate-100 pb-[max(1rem,env(safe-area-inset-bottom))]">
       <header className="bg-slate-800 text-white">
-        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-3 sm:py-4 pt-[max(0.75rem,env(safe-area-inset-top))]">
-          <div className="flex items-start sm:items-center gap-3">
-            <Factory className="h-7 w-7 sm:h-8 sm:w-8 shrink-0 mt-0.5 sm:mt-0" />
+        <div className="max-w-4xl mx-auto px-3 sm:px-4 py-3 sm:py-4 pt-[max(0.75rem,env(safe-area-inset-top))] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            <Link
+              href="/dsir"
+              className="flex items-center justify-center min-h-[44px] min-w-[44px] shrink-0 rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/60 touch-manipulation"
+              aria-label="Staff schedules"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </Link>
             <div className="min-w-0">
               <h1 className="text-lg sm:text-xl font-bold leading-tight">Factory</h1>
               <p className="text-slate-300 text-xs sm:text-sm mt-0.5 tabular-nums">{today}</p>
             </div>
           </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => setMaterialsModalOpen(true)}
+              className="relative flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/60 touch-manipulation"
+              aria-label={`Request raw materials${totalToSend > 0 ? ` — ${totalToSend} to send` : ''}`}
+            >
+              <Boxes className="h-5 w-5" />
+              {totalToSend > 0 ? (
+                <span className="absolute top-1.5 right-1.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white tabular-nums">
+                  {totalToSend}
+                </span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              onClick={() => setStaffModalOpen(true)}
+              className="relative flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/60 touch-manipulation"
+              aria-label={`Staff on floor today${floorStaffToday.length ? ` — ${floorStaffToday.length} listed` : ''}`}
+            >
+              <Users className="h-5 w-5" />
+              {floorStaffToday.length > 0 ? (
+                <span className="absolute top-1.5 right-1.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-indigo-500 px-1 text-[10px] font-bold text-white tabular-nums">
+                  {floorStaffToday.length}
+                </span>
+              ) : null}
+            </button>
+            <Link
+              href="/factory/inventory"
+              className="flex items-center justify-center min-h-[44px] min-w-[44px] sm:min-w-0 sm:gap-1.5 sm:px-2.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/60 touch-manipulation"
+              aria-label="Floor inventory"
+            >
+              <Layers className="h-5 w-5 shrink-0" />
+              <span className="hidden sm:inline text-xs sm:text-sm font-medium">Floor inventory</span>
+            </Link>
+          </div>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-6">
-        <Link
-          href="/factory/scan"
-          className="block bg-slate-800 hover:bg-slate-900 active:bg-slate-950 text-white rounded-xl shadow-sm p-5 sm:p-6 touch-manipulation transition-colors"
-        >
-          <div className="flex items-center gap-4">
-            <div className="shrink-0 rounded-lg bg-slate-700 p-3">
-              <Barcode className="h-7 w-7" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-lg font-semibold">Record production</h2>
-              <p className="text-slate-300 text-sm mt-0.5">
-                Pick today&apos;s item, then scan — stays ready for your barcode gun
+      <FactoryNav />
+
+      {showCycleCountNotice ? (
+        <div className="shrink-0 border-b border-amber-200 bg-amber-50">
+          <div className="max-w-4xl mx-auto px-3 sm:px-4 py-3 flex items-start gap-3">
+            <ClipboardCheck className="h-5 w-5 text-amber-700 shrink-0 mt-0.5" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-amber-950">
+                Production complete — start raw material cycle count
               </p>
-            </div>
-          </div>
-        </Link>
-
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-5">
-          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-4">
-            <Users className="h-5 w-5 text-slate-600" />
-            Staff on floor today
-          </h2>
-
-          {factoryLocationNames.length === 0 ? (
-            <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3">
-              No matching location yet. Create or rename a location (for example &quot;Factory&quot;) under brands/locations, then assign staff to it in Staff Manager.
-            </div>
-          ) : (
-            <>
-              <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3 items-stretch sm:items-end mb-4">
-                <div className="flex-1 min-w-0 w-full">
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Add staff</label>
-                  <select
-                    value={staffToAdd}
-                    onChange={(e) => setStaffToAdd(e.target.value)}
-                    className="w-full min-h-[44px] px-3 py-2 border rounded-lg text-base text-gray-900 bg-white"
-                  >
-                    <option value="">Choose name…</option>
-                    {eligibleFactoryStaff
-                      .filter((s) => !floorStaffToday.some((f) => f.staff_registration_id === s.id))
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.full_name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
+              <p className="text-xs text-amber-900/80 mt-0.5 leading-relaxed">
+                Today&apos;s schedule is finished and the last bill of materials has been used.
+                Count remaining opened packages on the floor before the next run.
+              </p>
+              <div className="mt-2.5 flex flex-wrap gap-2">
+                <Link
+                  href="/factory/inventory"
+                  className="inline-flex items-center justify-center gap-1.5 min-h-[40px] px-3 rounded-lg bg-amber-700 text-white text-sm font-medium hover:bg-amber-800 touch-manipulation"
+                >
+                  <Layers className="h-4 w-4" />
+                  Open floor inventory
+                </Link>
                 <button
                   type="button"
-                  onClick={addStaffToFloor}
-                  disabled={!staffToAdd || addingStaff}
-                  className="flex items-center justify-center gap-2 min-h-[44px] w-full sm:w-auto px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 text-sm font-medium disabled:opacity-50 active:bg-slate-900 touch-manipulation"
+                  onClick={dismissCycleCountNotice}
+                  className="inline-flex items-center justify-center min-h-[40px] px-3 rounded-lg border border-amber-300 bg-white text-amber-900 text-sm font-medium hover:bg-amber-100/60 touch-manipulation"
                 >
-                  <UserPlus className="h-4 w-4" />
-                  {addingStaff ? 'Adding…' : 'Add to list'}
+                  Dismiss
                 </button>
               </div>
+            </div>
+            <button
+              type="button"
+              onClick={dismissCycleCountNotice}
+              className="shrink-0 p-1.5 rounded-lg text-amber-700/70 hover:bg-amber-100 touch-manipulation"
+              aria-label="Dismiss cycle count notice"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      ) : null}
 
-              {eligibleFactoryStaff.length === 0 ? (
-                <p className="text-sm text-gray-500 mb-3">
-                  No active staff assigned to these factory locations. Assign them in Dashboard → Staff → location assignments.
+      {staffModalOpen ? (
+        <Modal onClose={() => setStaffModalOpen(false)} positionClassName="items-end sm:items-center">
+          <div
+            className="w-full max-w-md rounded-xl bg-white shadow-xl border border-slate-200 overflow-hidden max-h-[min(85dvh,32rem)] flex flex-col"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="factory-staff-modal-title"
+          >
+            <div className="flex items-start justify-between gap-3 px-4 py-4 border-b border-slate-100 shrink-0">
+              <div className="min-w-0">
+                <h2 id="factory-staff-modal-title" className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <Users className="h-5 w-5 text-slate-600 shrink-0" />
+                  Staff on floor today
+                </h2>
+                <p className="text-xs text-gray-500 mt-1 tabular-nums">{today}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStaffModalOpen(false)}
+                className="shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-gray-500 hover:bg-slate-100 active:bg-slate-200 touch-manipulation"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-4 py-4 overflow-y-auto flex-1">
+              {factoryLocationNames.length === 0 ? (
+                <div className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  No matching location yet. Create or rename a location (for example &quot;Factory&quot;) under brands/locations, then assign staff to it in Staff Manager.
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-col gap-3 mb-4">
+                    <div className="min-w-0 w-full">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Add staff</label>
+                      <select
+                        value={staffToAdd}
+                        onChange={(e) => setStaffToAdd(e.target.value)}
+                        className="w-full min-h-[44px] px-3 py-2 border rounded-lg text-base text-gray-900 bg-white"
+                      >
+                        <option value="">Choose name…</option>
+                        {eligibleFactoryStaff
+                          .filter((s) => !floorStaffToday.some((f) => f.staff_registration_id === s.id))
+                          .map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.full_name}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={addStaffToFloor}
+                      disabled={!staffToAdd || addingStaff}
+                      className="flex items-center justify-center gap-2 min-h-[44px] w-full px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 text-sm font-medium disabled:opacity-50 active:bg-slate-900 touch-manipulation"
+                    >
+                      <UserPlus className="h-4 w-4" />
+                      {addingStaff ? 'Adding…' : 'Add to list'}
+                    </button>
+                  </div>
+
+                  {eligibleFactoryStaff.length === 0 ? (
+                    <p className="text-sm text-gray-500 mb-3">
+                      No active staff assigned to these factory locations. Assign them in Dashboard → Staff → location assignments.
+                    </p>
+                  ) : null}
+
+                  {floorStaffToday.length === 0 ? (
+                    <p className="text-sm text-gray-400">Nobody has been added for today yet.</p>
+                  ) : (
+                    <ul className="flex flex-wrap gap-2">
+                      {floorStaffToday.map((row) => (
+                        <li
+                          key={row.id}
+                          className="inline-flex items-center gap-0.5 pl-3 pr-1 py-1.5 bg-slate-100 rounded-full text-sm text-gray-900"
+                        >
+                          <span>{row.full_name}</span>
+                          <button
+                            type="button"
+                            title={`Remove ${row.full_name}`}
+                            onClick={() => removeStaffFromFloor(row.id)}
+                            className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full text-gray-500 hover:bg-slate-200 hover:text-gray-900 active:bg-slate-300 touch-manipulation"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
+      {materialsModalOpen ? (
+        <Modal onClose={() => setMaterialsModalOpen(false)} positionClassName="items-end sm:items-center">
+          <div
+            className="w-full max-w-lg rounded-xl bg-white shadow-xl border border-slate-200 overflow-hidden max-h-[min(90dvh,36rem)] flex flex-col"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="factory-materials-modal-title"
+          >
+            <div className="flex items-start justify-between gap-3 px-4 py-4 border-b border-slate-100 shrink-0">
+              <div className="min-w-0">
+                <h2
+                  id="factory-materials-modal-title"
+                  className="text-base font-semibold text-gray-900 flex items-center gap-2"
+                >
+                  <Boxes className="h-5 w-5 text-slate-600 shrink-0" />
+                  Raw materials
+                </h2>
+                <p className="text-xs text-gray-500 mt-1 tabular-nums">{today}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMaterialsModalOpen(false)}
+                className="shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-gray-500 hover:bg-slate-100 active:bg-slate-200 touch-manipulation"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-4 py-4 overflow-y-auto flex-1">
+              {loadingMaterials ? (
+                <p className="text-sm text-gray-400 py-4 text-center">Loading…</p>
+              ) : schedule.length === 0 && additionalLines.length === 0 ? (
+                <p className="text-sm text-gray-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-3 text-center">
+                  No schedule today
+                </p>
+              ) : (
+                <div className="rounded-lg border border-slate-200 overflow-hidden">
+                  {(bomNeeds.length > 0 || additionalLines.length > 0) && (
+                    <ul className="divide-y divide-slate-100">
+                      {bomNeeds.map((line) => {
+                        const todayReq = todayRequestsByMaterial.get(line.material_id)
+                        const outOfStock = line.current_stock <= 0
+                        const bomQty = parseWholeQuantity(formatBomQuantity(line.quantity)) ?? 0
+                        const exceedsStock =
+                          !todayReq && bomQty > 0 && line.current_stock > 0 && bomQty > line.current_stock
+                        return (
+                          <li
+                            key={`bom-${line.material_id}`}
+                            className={`flex items-center gap-3 px-3 py-2.5 ${
+                              todayReq?.status === 'released'
+                                ? 'bg-emerald-50/60'
+                                : todayReq
+                                  ? 'bg-amber-50/50'
+                                  : outOfStock
+                                    ? 'bg-red-50/50'
+                                    : 'bg-white'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium text-gray-900 truncate">{line.material_name}</p>
+                              <p
+                                className={`text-xs ${outOfStock || exceedsStock ? 'text-red-700 font-medium' : 'text-gray-500'}`}
+                              >
+                                {todayReq?.status === 'released'
+                                  ? `Released today · ${todayReq.quantity} ${line.unit}`
+                                  : todayReq?.status === 'pending'
+                                    ? `Awaiting release · ${todayReq.quantity} ${line.unit}`
+                                    : outOfStock
+                                      ? `Out of stock · BOM`
+                                      : exceedsStock
+                                        ? `Only ${line.current_stock} ${line.unit} in stock`
+                                        : `BOM · ${line.current_stock} ${line.unit} in stock`}
+                              </p>
+                            </div>
+                            {todayReq ? (
+                              <span
+                                className={`text-xs font-medium shrink-0 ${
+                                  todayReq.status === 'released' ? 'text-emerald-800' : 'text-amber-800'
+                                }`}
+                              >
+                                {todayReq.status === 'released' ? 'Released' : 'Pending'}
+                              </span>
+                            ) : (
+                              <p className="text-sm font-semibold text-gray-900 tabular-nums shrink-0">
+                                {bomQty}{' '}
+                                <span className="text-xs font-normal text-gray-500">{line.unit}</span>
+                              </p>
+                            )}
+                          </li>
+                        )
+                      })}
+                      {additionalLines.map((line) => {
+                        const stock = getMaterialStock(line.material_id)
+                        const outOfStock = stock <= 0
+                        const exceedsStock = stock > 0 && line.quantity > stock
+                        return (
+                          <li
+                            key={line.id}
+                            className={`flex items-center gap-3 px-3 py-2.5 ${outOfStock ? 'bg-red-50/50' : 'bg-blue-50/40'}`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium text-gray-900 truncate">{line.material_name}</p>
+                              <p
+                                className={`text-xs truncate ${outOfStock || exceedsStock ? 'text-red-700 font-medium' : 'text-gray-500'}`}
+                              >
+                                Additional · {line.quantity} {line.unit}
+                                {outOfStock
+                                  ? ' · out of stock'
+                                  : exceedsStock
+                                    ? ` · only ${stock} in stock`
+                                    : ` · ${stock} in stock`}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeAdditionalLine(line.id)}
+                              className="shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-md text-gray-500 hover:bg-white/80 touch-manipulation"
+                              aria-label="Remove additional material"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                  {schedule.length > 0 && bomNeeds.length === 0 && additionalLines.length === 0 ? (
+                    <p className="text-sm text-gray-500 px-3 py-3 bg-slate-50">
+                      No BOM on scheduled products — add a material below.
+                    </p>
+                  ) : null}
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center px-3 py-3 bg-slate-50 border-t border-slate-200">
+                    <select
+                      value={reqMaterialId}
+                      onChange={(e) => setReqMaterialId(e.target.value)}
+                      className="flex-1 min-h-[40px] px-2 py-2 border rounded-md text-sm bg-white"
+                    >
+                      <option value="">Add additional material…</option>
+                      {materials.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.material_name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      inputMode="numeric"
+                      value={reqQty}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        if (v === '' || /^\d+$/.test(v)) setReqQty(v)
+                      }}
+                      placeholder="Qty"
+                      className="w-full sm:w-20 min-h-[40px] px-2 py-2 border rounded-md text-sm bg-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={addAdditionalLine}
+                      disabled={submittingAll}
+                      className="min-h-[40px] px-3 py-2 rounded-md border border-slate-300 bg-white text-sm font-medium hover:bg-white touch-manipulation shrink-0 inline-flex items-center justify-center gap-1"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={submitAllMaterialRequests}
+                disabled={submittingAll || !canRequestMaterials}
+                className="w-full mt-4 flex items-center justify-center gap-2 min-h-[48px] px-5 py-3 bg-slate-800 text-white rounded-xl hover:bg-slate-900 text-base font-semibold disabled:opacity-40 touch-manipulation"
+              >
+                <Send className="h-5 w-5" />
+                {submittingAll ? 'Requesting…' : 'Request materials'}
+                {canRequestMaterials && !submittingAll ? (
+                  <span className="text-slate-300 font-normal">({totalToSend})</span>
+                ) : null}
+              </button>
+              {totalToSend > 0 && stockBlocksRequest ? (
+                <p className="text-xs text-red-700 text-center mt-2">
+                  Out of stock or quantity too high for one or more materials above.
                 </p>
               ) : null}
+            </div>
+          </div>
+        </Modal>
+      ) : null}
 
-              {floorStaffToday.length === 0 ? (
-                <p className="text-sm text-gray-400">Nobody has been added for today yet.</p>
-              ) : (
-                <ul className="flex flex-wrap gap-2">
-                  {floorStaffToday.map((row) => (
-                    <li
-                      key={row.id}
-                      className="inline-flex items-center gap-0.5 pl-3 pr-1 py-1.5 bg-slate-100 rounded-full text-sm text-gray-900"
-                    >
-                      <span>{row.full_name}</span>
-                      <button
-                        type="button"
-                        title={`Remove ${row.full_name}`}
-                        onClick={() => removeStaffFromFloor(row.id)}
-                        className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full text-gray-500 hover:bg-slate-200 hover:text-gray-900 active:bg-slate-300 touch-manipulation"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
-          )}
-        </div>
-
-        {activeBatches.length > 0 || completedBatches.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {activeBatches.length > 0 ? (
-              <div className="rounded-xl border border-indigo-200 bg-indigo-50/80 p-4">
-                <h2 className="text-sm font-semibold text-indigo-950 mb-2">Batches in progress</h2>
-                <ul className="space-y-1.5 text-sm text-indigo-900">
-                  {activeBatches.map((b) => (
-                    <li key={b.id}>
-                      <span className="font-medium">{b.product_name}</span>
-                      {b.brand_name ? (
-                        <span className="text-indigo-700"> · {b.brand_name}</span>
-                      ) : null}
-                      <span className="text-indigo-700">
-                        {' '}
-                        · {b.units} unit{b.units === 1 ? '' : 's'} · started{' '}
+      <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-6">
+        {activeBatches.length > 0 ? (
+          <div className="rounded-xl bg-slate-800 text-white shadow-sm p-4 sm:p-5">
+            <h2 className="text-sm font-semibold flex items-center gap-2 mb-3">
+              <Barcode className="h-4 w-4" />
+              Ready to scan
+            </h2>
+            <ul className="space-y-2">
+              {activeBatches.map((b) => (
+                <li key={b.id}>
+                  <Link
+                    href={`/factory/scan?schedule=${b.schedule_id}`}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-gray-900 hover:bg-slate-50 active:bg-slate-100 touch-manipulation transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-900 truncate">{b.product_name}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {b.brand_name ? `${b.brand_name} · ` : ''}
+                        {b.units} unit{b.units === 1 ? '' : 's'} · started{' '}
                         {new Date(b.started_at).toLocaleTimeString([], {
                           hour: 'numeric',
                           minute: '2-digit',
                         })}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {completedBatches.length > 0 ? (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4">
-                <h2 className="text-sm font-semibold text-emerald-950 mb-2">Completed batches</h2>
-                <ul className="space-y-1.5 text-sm text-emerald-900">
-                  {completedBatches.map((b) => (
-                    <li key={b.id}>
-                      <span className="font-medium">{b.product_name}</span>
-                      {b.brand_name ? (
-                        <span className="text-emerald-700"> · {b.brand_name}</span>
-                      ) : null}
-                      <span className="text-emerald-700">
-                        {' '}
-                        · {b.units} unit{b.units === 1 ? '' : 's'}
-                        {b.completed_at
-                          ? ` · completed ${new Date(b.completed_at).toLocaleTimeString([], {
-                              hour: 'numeric',
-                              minute: '2-digit',
-                            })}`
-                          : null}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
+                      </p>
+                    </div>
+                    <span className="shrink-0 inline-flex items-center gap-1 text-xs font-medium text-slate-800">
+                      Scan
+                      <Barcode className="h-4 w-4" />
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
           </div>
         ) : null}
 
@@ -599,15 +916,11 @@ export default function FactoryPage() {
             <ClipboardList className="h-5 w-5 text-slate-600 shrink-0" />
             Today&apos;s production schedule
           </h2>
-          <p className="text-xs text-gray-500 -mt-2 mb-4">
-            Start a batch to deduct factory-floor materials (opened packages) per BOM. Complete when
-            finished.
-          </p>
 
-          {loadingMain ? (
+          {loadingSchedule ? (
             <p className="text-gray-500 py-8 text-center">Loading…</p>
           ) : schedule.length === 0 ? (
-            <p className="text-gray-500 py-6 text-center text-sm">No schedule for today. Admin can set it in Dashboard → Inventory → Production Schedule.</p>
+            <p className="text-gray-500 py-6 text-center text-sm">No schedule today</p>
           ) : (
             <div className="mt-4 space-y-6">
               {scheduleByBrand.map(({ brandName, items: groupItems }) => (
@@ -634,7 +947,14 @@ export default function FactoryPage() {
                         {groupItems.map((r) => (
                           <Fragment key={r.schedule_id}>
                             <tr className="border-b border-slate-100">
-                              <td className="py-2.5 pr-3 font-medium text-gray-900">{r.product_name}</td>
+                              <td className="py-2.5 pr-3 font-medium text-gray-900">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span>{r.product_name}</span>
+                                  {inProgressByScheduleId.has(r.schedule_id) ? (
+                                    <ScheduleInProgressBadge />
+                                  ) : null}
+                                </div>
+                              </td>
                               <td className="py-2.5 pr-3 text-gray-600">{r.sku || '—'}</td>
                               <td className="py-2.5 pr-3 text-gray-600 font-mono text-xs max-w-[10rem] truncate" title={r.batch_number}>
                                 {r.batch_number}
@@ -654,11 +974,12 @@ export default function FactoryPage() {
                                 <FactoryScheduleBatchActions
                                   item={r}
                                   workDate={today}
-                                  onChanged={() => {
-                                    loadDashboard()
-                                    bumpInventoryRefresh()
-                                  }}
+                                  onChanged={refreshAfterBatchChange}
                                   compact
+                                  inProgressBatchId={inProgressByScheduleId.get(r.schedule_id) ?? null}
+                                  completedBatchesForSchedule={
+                                    completedByScheduleId.get(r.schedule_id) ?? EMPTY_COMPLETED_BATCHES
+                                  }
                                 />
                               </td>
                             </tr>
@@ -682,7 +1003,12 @@ export default function FactoryPage() {
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
-                            <p className="font-medium text-gray-900 leading-snug">{r.product_name}</p>
+                            <p className="font-medium text-gray-900 leading-snug flex items-center gap-2 flex-wrap">
+                              <span>{r.product_name}</span>
+                              {inProgressByScheduleId.has(r.schedule_id) ? (
+                                <ScheduleInProgressBadge />
+                              ) : null}
+                            </p>
                             <p className="text-xs text-gray-500 mt-1">
                               {r.sku ? <span className="font-mono">{r.sku}</span> : null}
                               {r.sku ? ' · ' : null}
@@ -714,10 +1040,11 @@ export default function FactoryPage() {
                           <FactoryScheduleBatchActions
                             item={r}
                             workDate={today}
-                            onChanged={() => {
-                              loadDashboard()
-                              bumpInventoryRefresh()
-                            }}
+                            onChanged={refreshAfterBatchChange}
+                            inProgressBatchId={inProgressByScheduleId.get(r.schedule_id) ?? null}
+                            completedBatchesForSchedule={
+                              completedByScheduleId.get(r.schedule_id) ?? EMPTY_COMPLETED_BATCHES
+                            }
                           />
                         </div>
                       </div>
@@ -728,280 +1055,6 @@ export default function FactoryPage() {
             </div>
           )}
         </div>
-
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-5">
-          <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-4">
-            <FlaskConical className="h-5 w-5 text-slate-600" />
-            Raw materials
-          </h2>
-
-          <p className="text-xs text-gray-500 mb-3">
-            BOM quantities are set from today&apos;s schedule. Add additional materials if needed, then request.
-          </p>
-
-          {loadingMain ? (
-            <p className="text-sm text-gray-400 py-4">Loading…</p>
-          ) : schedule.length === 0 && additionalLines.length === 0 ? (
-            <p className="text-sm text-gray-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-3">
-              No production scheduled for today.
-            </p>
-          ) : (
-            <div className="rounded-lg border border-slate-200 overflow-hidden">
-              {(bomNeeds.length > 0 || additionalLines.length > 0) && (
-                <ul className="divide-y divide-slate-100">
-                  {bomNeeds.map((line) => {
-                    const todayReq = todayRequestsByMaterial.get(line.material_id)
-                    const outOfStock = line.current_stock <= 0
-                    const bomQty = parseWholeQuantity(formatBomQuantity(line.quantity)) ?? 0
-                    const exceedsStock =
-                      !todayReq && bomQty > 0 && line.current_stock > 0 && bomQty > line.current_stock
-                    return (
-                      <li
-                        key={`bom-${line.material_id}`}
-                        className={`flex items-center gap-3 px-3 py-2.5 ${
-                          todayReq?.status === 'released'
-                            ? 'bg-emerald-50/60'
-                            : todayReq
-                              ? 'bg-amber-50/50'
-                              : outOfStock
-                                ? 'bg-red-50/50'
-                                : 'bg-white'
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-gray-900 truncate">{line.material_name}</p>
-                          <p
-                            className={`text-xs ${outOfStock || exceedsStock ? 'text-red-700 font-medium' : 'text-gray-500'}`}
-                          >
-                            {todayReq?.status === 'released'
-                              ? `Released today · ${todayReq.quantity} ${line.unit}`
-                              : todayReq?.status === 'pending'
-                                ? `Awaiting release · ${todayReq.quantity} ${line.unit}`
-                                : outOfStock
-                                  ? `Out of stock · BOM`
-                                  : exceedsStock
-                                    ? `Only ${line.current_stock} ${line.unit} in stock`
-                                    : `BOM · ${line.current_stock} ${line.unit} in stock`}
-                          </p>
-                        </div>
-                        {todayReq ? (
-                          <span
-                            className={`text-xs font-medium shrink-0 ${
-                              todayReq.status === 'released' ? 'text-emerald-800' : 'text-amber-800'
-                            }`}
-                          >
-                            {todayReq.status === 'released' ? 'Released' : 'Pending'}
-                          </span>
-                        ) : (
-                          <p className="text-sm font-semibold text-gray-900 tabular-nums shrink-0">
-                            {bomQty} <span className="text-xs font-normal text-gray-500">{line.unit}</span>
-                          </p>
-                        )}
-                      </li>
-                    )
-                  })}
-                  {additionalLines.map((line) => {
-                    const stock = getMaterialStock(line.material_id)
-                    const outOfStock = stock <= 0
-                    const exceedsStock = stock > 0 && line.quantity > stock
-                    return (
-                    <li
-                      key={line.id}
-                      className={`flex items-center gap-3 px-3 py-2.5 ${outOfStock ? 'bg-red-50/50' : 'bg-blue-50/40'}`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-gray-900 truncate">{line.material_name}</p>
-                        <p
-                          className={`text-xs truncate ${outOfStock || exceedsStock ? 'text-red-700 font-medium' : 'text-gray-500'}`}
-                        >
-                          Additional · {line.quantity} {line.unit}
-                          {outOfStock
-                            ? ' · out of stock'
-                            : exceedsStock
-                              ? ` · only ${stock} in stock`
-                              : ` · ${stock} in stock`}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => removeAdditionalLine(line.id)}
-                        className="shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-md text-gray-500 hover:bg-white/80 touch-manipulation"
-                        aria-label="Remove additional material"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </li>
-                    )
-                  })}
-                </ul>
-              )}
-              {schedule.length > 0 && bomNeeds.length === 0 && additionalLines.length === 0 ? (
-                <p className="text-sm text-gray-500 px-3 py-3 bg-slate-50">
-                  No BOM on scheduled products — add a material below.
-                </p>
-              ) : null}
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center px-3 py-3 bg-slate-50 border-t border-slate-200">
-                <select
-                  value={reqMaterialId}
-                  onChange={(e) => setReqMaterialId(e.target.value)}
-                  className="flex-1 min-h-[40px] px-2 py-2 border rounded-md text-sm bg-white"
-                >
-                  <option value="">Add additional material…</option>
-                  {materials.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.material_name}
-                      </option>
-                    ))}
-                </select>
-                <input
-                  type="number"
-                  step="1"
-                  min="1"
-                  inputMode="numeric"
-                  value={reqQty}
-                  onChange={(e) => {
-                    const v = e.target.value
-                    if (v === '' || /^\d+$/.test(v)) setReqQty(v)
-                  }}
-                  placeholder="Qty"
-                  className="w-full sm:w-20 min-h-[40px] px-2 py-2 border rounded-md text-sm bg-white"
-                />
-                <button
-                  type="button"
-                  onClick={addAdditionalLine}
-                  disabled={submittingAll}
-                  className="min-h-[40px] px-3 py-2 rounded-md border border-slate-300 bg-white text-sm font-medium hover:bg-white touch-manipulation shrink-0 inline-flex items-center justify-center gap-1"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add
-                </button>
-              </div>
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={submitAllMaterialRequests}
-            disabled={submittingAll || !canRequestMaterials}
-            className="w-full mt-4 flex items-center justify-center gap-2 min-h-[48px] px-5 py-3 bg-slate-800 text-white rounded-xl hover:bg-slate-900 text-base font-semibold disabled:opacity-40 touch-manipulation"
-          >
-            <Send className="h-5 w-5" />
-            {submittingAll ? 'Requesting…' : 'Request materials'}
-            {canRequestMaterials && !submittingAll ? (
-              <span className="text-slate-300 font-normal">({totalToSend})</span>
-            ) : null}
-          </button>
-          {totalToSend > 0 && stockBlocksRequest ? (
-            <p className="text-xs text-red-700 text-center mt-2">
-              Out of stock or quantity too high for one or more materials above.
-            </p>
-          ) : null}
-
-          {requestsToday.length > 0 ? (
-            <details className="mt-5 group">
-              <summary className="text-sm font-medium text-gray-600 cursor-pointer list-none flex items-center gap-2 touch-manipulation">
-                <span className="group-open:rotate-90 transition-transform inline-block">›</span>
-                Sent today ({requestsToday.length})
-              </summary>
-              <ul className="mt-2 divide-y text-sm border border-slate-100 rounded-lg overflow-hidden">
-                {requestsToday.map((r) => (
-                  <li
-                    key={r.id}
-                    className="flex items-center gap-2 px-3 py-2.5 bg-white"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="font-medium text-gray-900 truncate">
-                        {r.material?.material_name || 'Material'}
-                        <span className="font-normal text-gray-500">
-                          {' '}
-                          · {r.quantity} {r.material?.unit}
-                        </span>
-                      </p>
-                      {(r.requested_by || r.released_by) ? (
-                        <p className="text-xs text-gray-500 truncate">
-                          {r.requested_by ? `Requested by ${r.requested_by}` : ''}
-                          {r.requested_by && r.released_by ? ' · ' : ''}
-                          {r.released_by ? `Released by ${r.released_by}` : ''}
-                        </p>
-                      ) : null}
-                    </div>
-                    <span
-                      className={`text-[10px] font-medium px-2 py-0.5 rounded shrink-0 ${
-                        r.status === 'pending'
-                          ? 'bg-amber-100 text-amber-800'
-                          : 'bg-emerald-100 text-emerald-800'
-                      }`}
-                    >
-                      {r.status === 'pending' ? 'Pending' : 'Released'}
-                    </span>
-                    {r.status === 'pending' ? (
-                      <button
-                        type="button"
-                        title="Cancel"
-                        onClick={() => cancelMaterialRequest(r.id)}
-                        disabled={cancellingReqId === r.id}
-                        className="shrink-0 min-h-[36px] min-w-[36px] flex items-center justify-center rounded-md text-red-600 hover:bg-red-50 disabled:opacity-50 touch-manipulation"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ) : null}
-        </div>
-
-        <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-4 py-4 sm:px-5 border-b border-slate-100">
-            <h2 className="text-lg font-semibold text-gray-900">Floor inventory</h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              Opened packages on the factory floor — record opens after procurement releases materials.
-            </p>
-            <nav
-              className="mt-3 flex flex-wrap gap-2"
-              aria-label="Floor inventory type"
-            >
-              {(
-                [
-                  { id: 'ingredients' as const, label: 'Ingredients', icon: FlaskConical },
-                  { id: 'packaging' as const, label: 'Packaging', icon: Package },
-                  { id: 'supplies' as const, label: 'Supplies', icon: Wrench },
-                ] as const
-              ).map(({ id, label, icon: Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() =>
-                    setFloorInventoryKind((current) => (current === id ? null : id))
-                  }
-                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium touch-manipulation transition-colors ${
-                    floorInventoryKind === id
-                      ? 'bg-slate-800 text-white'
-                      : 'bg-slate-100 text-gray-700 hover:bg-slate-200'
-                  }`}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {label}
-                </button>
-              ))}
-            </nav>
-          </div>
-          {floorInventoryKind ? (
-            <div className="border-t border-slate-100">
-              <FactoryMaterialInventory
-                key={`${floorInventoryKind}-${inventoryRefreshKey}`}
-                inventoryKind={floorInventoryKind}
-                theme="blue"
-                currentUsername={getFactoryRequestedBy()}
-              />
-            </div>
-          ) : (
-            <p className="px-4 py-6 sm:px-5 text-sm text-gray-500 text-center">
-              Choose Ingredients, Packaging, or Supplies above.
-            </p>
-          )}
-        </section>
       </main>
     </div>
   )

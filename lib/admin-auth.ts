@@ -1,13 +1,17 @@
 import { supabase } from './supabase'
+import {
+  isDashboardRole,
+  type DashboardRole,
+} from './dashboard-roles'
 
-export type DashboardCredentialRole = 'admin' | 'guest'
+export type DashboardCredentialRole = DashboardRole
 export type DashboardAuthIdentity = {
   role: DashboardCredentialRole
   username: string
 }
 
 export function isDashboardCredentialRole(value: unknown): value is DashboardCredentialRole {
-  return value === 'admin' || value === 'guest'
+  return isDashboardRole(value)
 }
 
 function parseDashboardAuthIdentity(data: unknown): DashboardAuthIdentity | null {
@@ -58,7 +62,7 @@ export async function authenticateDashboardPasscode(
   return parseDashboardAuthIdentity(data)
 }
 
-/** Sensitive actions (edit/delete) — admin role passcodes only. */
+/** Sensitive actions (edit/delete) — any admin-level role passcode; guest returns false. */
 export async function validateAdminPassword(passcode: string): Promise<boolean> {
   const trimmed = passcode.trim()
   if (!trimmed) return false
@@ -73,4 +77,26 @@ export async function validateAdminPassword(passcode: string): Promise<boolean> 
   }
 
   return !!data
+}
+
+export type AdminCredentialSummary = {
+  username: string
+  role: string
+  is_active: boolean
+}
+
+/** Usernames and roles only — no passcodes. */
+export async function loadAdminCredentials(): Promise<AdminCredentialSummary[]> {
+  const { data, error } = await supabase.rpc('get_admin_credentials')
+
+  if (error) {
+    console.error('Error loading admin credentials:', error)
+    throw error
+  }
+
+  return (data || []).map((row: { username?: string; role?: string; is_active?: boolean }) => ({
+    username: (row.username || '').trim(),
+    role: (row.role || '').trim(),
+    is_active: row.is_active !== false,
+  }))
 }

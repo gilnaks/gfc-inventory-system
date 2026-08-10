@@ -160,7 +160,9 @@ export function StockLevelProductPicker({
                   if (!p.id) return null
                   const isProductDisabled = disabledProductIds?.has(p.id) ?? false
                   const disabledReason =
-                    (p.id && disabledProductReasonById?.[p.id]) || disabledProductTitle
+                    (p.id && disabledProductReasonById?.[p.id]) ||
+                    (disabledProductTitle || undefined)
+                  const disabledHint = disabledReason?.trim() || undefined
                   const available = computeProductAvailableStock(p)
                   const min = p.minimum_stock ?? 0
                   const level = getProductStockLevel(available, min)
@@ -170,7 +172,7 @@ export function StockLevelProductPicker({
                       <button
                         type="button"
                         disabled={isProductDisabled}
-                        title={isProductDisabled ? disabledProductTitle : undefined}
+                        title={isProductDisabled ? disabledHint : undefined}
                         onClick={() => {
                           if (isProductDisabled) return
                           onChange(p.id!)
@@ -188,8 +190,8 @@ export function StockLevelProductPicker({
                           }`}
                         >
                           {p.sku || '-'} - {p.name}
-                          {isProductDisabled ? (
-                            <span className="font-normal"> · {disabledReason}</span>
+                          {isProductDisabled && disabledHint ? (
+                            <span className="font-normal"> · {disabledHint}</span>
                           ) : null}
                         </span>
                         <span

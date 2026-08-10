@@ -15,14 +15,21 @@ import {
   formatFactoryRequestQtyDisplay,
   getFactoryRequestUnitLabel,
 } from '../../lib/raw-material-uom'
+import {
+  DestinationBrandSelect,
+  type DestinationBrandOption,
+} from './DestinationBrandSelect'
 
 interface FactoryMaterialRequestsPanelProps {
   brandId: string
   brandName?: string
+  destinationBrands?: DestinationBrandOption[]
+  onForBrandChange?: (brandId: string) => void
   scheduleDate: string
   onScheduleDateChange?: (date: string) => void
   theme?: string
   currentUsername?: string
+  readOnlyMode?: boolean
 }
 
 function formatQty(qty: number) {
@@ -45,11 +52,15 @@ function statusBadge(status: FactoryMaterialRequest['status']) {
 export function FactoryMaterialRequestsPanel({
   brandId,
   brandName,
+  destinationBrands,
+  onForBrandChange,
   scheduleDate,
   onScheduleDateChange,
   theme = 'blue',
   currentUsername = '',
+  readOnlyMode = false,
 }: FactoryMaterialRequestsPanelProps) {
+  const canEdit = !readOnlyMode
   const [requests, setRequests] = useState<FactoryMaterialRequest[]>([])
   const [factoryMaterials, setFactoryMaterials] = useState<RawMaterial[]>([])
   const [loading, setLoading] = useState(true)
@@ -368,11 +379,17 @@ export function FactoryMaterialRequestsPanel({
             Material requests
           </h2>
           <p className="text-sm text-gray-600 mt-0.5">
-            {brandName ? `${brandName} · ` : ''}
             Schedule shortages and manual requests for this date
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          {destinationBrands && destinationBrands.length > 0 && onForBrandChange ? (
+            <DestinationBrandSelect
+              brands={destinationBrands}
+              value={brandId}
+              onChange={onForBrandChange}
+            />
+          ) : null}
           <label className="flex items-center gap-2 text-sm text-gray-700">
             <input
               type="checkbox"
@@ -422,6 +439,7 @@ export function FactoryMaterialRequestsPanel({
         </div>
       </div>
 
+      {canEdit ? (
       <section className="rounded-lg border border-slate-200 bg-slate-50/80 p-4">
         <h3 className="text-sm font-semibold text-gray-800 mb-1">Request material manually</h3>
         <p className="text-xs text-gray-500 mb-3">
@@ -499,6 +517,7 @@ export function FactoryMaterialRequestsPanel({
           </div>
         )}
       </section>
+      ) : null}
 
       {loading ? (
         <>
@@ -534,7 +553,7 @@ export function FactoryMaterialRequestsPanel({
                 </button>
               ) : null}
             </div>
-            {renderTable(pending, true)}
+            {renderTable(pending, canEdit)}
           </section>
           <section>
             <h3 className="text-sm font-semibold text-gray-800 mb-2">

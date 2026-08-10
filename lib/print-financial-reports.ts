@@ -1,0 +1,451 @@
+import { escapeVoucherHtml, formatVoucherMoney, VOUCHER_PRINT_CLOSE_SCRIPT } from './voucherPrintStyles'
+import { formatReportVsBalanceMessage } from './accounting-reports'
+
+export type FinancialReportPrintKind = 'trial_balance' | 'income' | 'balance_sheet'
+
+type MoneyRow = { code: string; name: string; amount: number }
+
+export type TrialBalancePrintData = {
+  rows: Array<{ code: string; name: string; debit: number; credit: number }>
+  totalDebit: number
+  totalCredit: number
+  balanced: boolean
+}
+
+export type IncomeStatementPrintData = {
+  revenue: MoneyRow[]
+  expenses: MoneyRow[]
+  netIncome: number
+}
+
+export type BalanceSheetPrintData = {
+  assets: MoneyRow[]
+  liabilities: MoneyRow[]
+  equity: MoneyRow[]
+  retainedEarnings3100: MoneyRow | null
+  currentYearNetIncome: number
+  totalAssets: number
+  totalLiabilities: number
+  totalEquity: number
+}
+
+const PRINT_STYLES = `
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 11pt;
+    color: #111;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .sheet {
+    width: 100%;
+    max-width: 210mm;
+    margin: 0 auto;
+    padding: 14mm 16mm 16mm;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    border-bottom: 2px solid #111;
+    padding-bottom: 10px;
+    margin-bottom: 14px;
+  }
+  .brand {
+    font-size: 14pt;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .meta {
+    text-align: right;
+    font-size: 9pt;
+    color: #444;
+    line-height: 1.45;
+  }
+  .doc-title {
+    margin: 0 0 4px;
+    font-size: 16pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .status {
+    display: inline-block;
+    margin: 0 0 12px;
+    padding: 4px 8px;
+    border: 1px solid #bbb;
+    border-radius: 3px;
+    font-size: 9pt;
+  }
+  .status.ok { border-color: #166534; color: #166534; }
+  .status.warn { border-color: #92400e; color: #92400e; }
+  table.report {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+  }
+  table.report th,
+  table.report td {
+    padding: 5px 6px;
+    vertical-align: top;
+    border-bottom: 1px solid #ddd;
+  }
+  table.report th {
+    text-align: left;
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #555;
+    border-bottom: 1.5px solid #111;
+  }
+  table.report .num,
+  table.report th.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  table.report .code {
+    width: 58px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 9.5pt;
+    color: #444;
+  }
+  table.report .section-head td {
+    border-bottom: none;
+    padding-top: 12px;
+    padding-bottom: 4px;
+    font-weight: 700;
+    font-size: 10.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  table.report .total-row td {
+    border-top: 1.5px solid #111;
+    border-bottom: 2.5px double #111;
+    font-weight: 700;
+    padding-top: 7px;
+    padding-bottom: 7px;
+  }
+  table.report .subtotal td {
+    border-top: 1px solid #999;
+    font-weight: 600;
+  }
+  table.report .indent { padding-left: 18px; }
+  table.report .muted { color: #555; }
+  .footer {
+    margin-top: 18px;
+    padding-top: 8px;
+    border-top: 1px solid #ccc;
+    font-size: 8pt;
+    color: #666;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+  }
+  .footer-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    align-items: start;
+  }
+  .two-col table.report { margin-bottom: 0; }
+  @media print {
+    body { margin: 0; }
+    .sheet { max-width: none; padding: 10mm 12mm; }
+    .no-print { display: none !important; }
+  }
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+`
+
+function money(n: number) {
+  return formatVoucherMoney(n)
+}
+
+function escape(s: string) {
+  return escapeVoucherHtml(s)
+}
+
+function printedAtLabel() {
+  return new Date().toLocaleString('en-PH', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
+}
+
+function sheetShell(opts: {
+  title: string
+  brandName: string
+  periodLabel: string
+  generatedBy: string
+  bodyHtml: string
+}) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>${escape(opts.title)}</title>
+  <style>${PRINT_STYLES}</style>
+</head>
+<body>
+  <div class="sheet">
+    <header class="header">
+      <div>
+        <div class="brand">${escape(opts.brandName)}</div>
+      </div>
+      <div class="meta">
+        <div class="doc-title">${escape(opts.title)}</div>
+        <div>Period: ${escape(opts.periodLabel)}</div>
+      </div>
+    </header>
+    ${opts.bodyHtml}
+    <div class="footer">
+      <div class="footer-left">
+        <span>Generated by ${escape(opts.generatedBy)}</span>
+      </div>
+      <span>Printed ${escape(printedAtLabel())}</span>
+    </div>
+  </div>
+  <script>${VOUCHER_PRINT_CLOSE_SCRIPT}</script>
+</body>
+</html>`
+}
+
+function buildTrialBalanceHtml(data: TrialBalancePrintData) {
+  const rows =
+    data.rows.length === 0
+      ? `<tr><td colspan="4" class="muted">No GL activity in this period.</td></tr>`
+      : data.rows
+          .map(
+            (r) => `<tr>
+            <td class="code">${escape(r.code)}</td>
+            <td>${escape(r.name)}</td>
+            <td class="num">${r.debit > 0 ? money(r.debit) : '—'}</td>
+            <td class="num">${r.credit > 0 ? money(r.credit) : '—'}</td>
+          </tr>`
+          )
+          .join('')
+
+  const statusClass = data.balanced ? 'ok' : 'warn'
+  const statusText = formatReportVsBalanceMessage(
+    'Debits',
+    data.totalDebit,
+    'credits',
+    data.totalCredit,
+    money
+  ).message
+
+  return `
+    <div class="status ${statusClass}">${escape(statusText)}</div>
+    <table class="report">
+      <thead>
+        <tr>
+          <th class="code">Code</th>
+          <th>Account</th>
+          <th class="num">Debit</th>
+          <th class="num">Credit</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+        <tr class="total-row">
+          <td colspan="2">Totals</td>
+          <td class="num">${money(data.totalDebit)}</td>
+          <td class="num">${money(data.totalCredit)}</td>
+        </tr>
+      </tbody>
+    </table>`
+}
+
+function statementRowsHtml(rows: MoneyRow[], emptyLabel: string) {
+  if (!rows.length) {
+    return `<tr><td colspan="3" class="muted">${escape(emptyLabel)}</td></tr>`
+  }
+  return rows
+    .map(
+      (r) => `<tr>
+        <td class="code">${escape(r.code)}</td>
+        <td>${escape(r.name)}</td>
+        <td class="num">${money(r.amount)}</td>
+      </tr>`
+    )
+    .join('')
+}
+
+function buildIncomeStatementHtml(data: IncomeStatementPrintData) {
+  const totalRevenue = data.revenue.reduce((s, r) => s + r.amount, 0)
+  const totalExpenses = data.expenses.reduce((s, r) => s + r.amount, 0)
+
+  return `
+    <table class="report">
+      <thead>
+        <tr>
+          <th class="code">Code</th>
+          <th>Account</th>
+          <th class="num">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="section-head"><td colspan="3">Revenue</td></tr>
+        ${statementRowsHtml(data.revenue, 'No revenue posted in this period.')}
+        <tr class="subtotal">
+          <td colspan="2">Total revenue</td>
+          <td class="num">${money(totalRevenue)}</td>
+        </tr>
+        <tr class="section-head"><td colspan="3">Expenses</td></tr>
+        ${statementRowsHtml(data.expenses, 'No expenses posted in this period.')}
+        <tr class="subtotal">
+          <td colspan="2">Total expenses</td>
+          <td class="num">${money(totalExpenses)}</td>
+        </tr>
+        <tr class="total-row">
+          <td colspan="2">Net income</td>
+          <td class="num">${money(data.netIncome)}</td>
+        </tr>
+      </tbody>
+    </table>`
+}
+
+function buildBalanceSheetHtml(data: BalanceSheetPrintData) {
+  const { balanced, message: statusText } = formatReportVsBalanceMessage(
+    'Assets',
+    data.totalAssets,
+    'liabilities + equity',
+    data.totalLiabilities + data.totalEquity,
+    money
+  )
+  const statusClass = balanced ? 'ok' : 'warn'
+
+  const equityRows = [
+    ...data.equity.map(
+      (r) => `<tr>
+        <td class="code">${escape(r.code)}</td>
+        <td>${escape(r.name)}</td>
+        <td class="num">${money(r.amount)}</td>
+      </tr>`
+    ),
+    data.retainedEarnings3100
+      ? `<tr>
+        <td class="code">${escape(data.retainedEarnings3100.code)}</td>
+        <td>${escape(data.retainedEarnings3100.name)}</td>
+        <td class="num">${money(data.retainedEarnings3100.amount)}</td>
+      </tr>`
+      : '',
+    `<tr>
+      <td class="code muted">—</td>
+      <td class="muted">Net income — open periods</td>
+      <td class="num">${money(data.currentYearNetIncome)}</td>
+    </tr>`,
+  ].join('')
+
+  return `
+    <div class="status ${statusClass}">${escape(statusText)}</div>
+    <div class="two-col">
+      <table class="report">
+        <thead>
+          <tr>
+            <th class="code">Code</th>
+            <th>Account</th>
+            <th class="num">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="section-head"><td colspan="3">Assets</td></tr>
+          ${statementRowsHtml(data.assets, 'No asset balances.')}
+          <tr class="total-row">
+            <td colspan="2">Total assets</td>
+            <td class="num">${money(data.totalAssets)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div>
+        <table class="report">
+          <thead>
+            <tr>
+              <th class="code">Code</th>
+              <th>Account</th>
+              <th class="num">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="section-head"><td colspan="3">Liabilities</td></tr>
+            ${statementRowsHtml(data.liabilities, 'No liability balances.')}
+            <tr class="subtotal">
+              <td colspan="2">Total liabilities</td>
+              <td class="num">${money(data.totalLiabilities)}</td>
+            </tr>
+            <tr class="section-head"><td colspan="3">Equity</td></tr>
+            ${equityRows || `<tr><td colspan="3" class="muted">No equity balances.</td></tr>`}
+            <tr class="subtotal">
+              <td colspan="2">Total equity</td>
+              <td class="num">${money(data.totalEquity)}</td>
+            </tr>
+            <tr class="total-row">
+              <td colspan="2">Liabilities + equity</td>
+              <td class="num">${money(data.totalLiabilities + data.totalEquity)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`
+}
+
+export function openFinancialReportPrintWindow(params: {
+  kind: FinancialReportPrintKind
+  brandName: string
+  periodLabel: string
+  generatedByUsername?: string
+  generatedByRole?: string
+  trialBalance?: TrialBalancePrintData | null
+  incomeStatement?: IncomeStatementPrintData | null
+  balanceSheet?: BalanceSheetPrintData | null
+}): boolean {
+  const titles: Record<FinancialReportPrintKind, string> = {
+    trial_balance: 'Trial Balance',
+    income: 'Income Statement',
+    balance_sheet: 'Balance Sheet',
+  }
+
+  let bodyHtml = ''
+  if (params.kind === 'trial_balance' && params.trialBalance) {
+    bodyHtml = buildTrialBalanceHtml(params.trialBalance)
+  } else if (params.kind === 'income' && params.incomeStatement) {
+    bodyHtml = buildIncomeStatementHtml(params.incomeStatement)
+  } else if (params.kind === 'balance_sheet' && params.balanceSheet) {
+    bodyHtml = buildBalanceSheetHtml(params.balanceSheet)
+  } else {
+    return false
+  }
+
+  const user = (params.generatedByUsername || '').trim() || 'Unknown user'
+  const role = (params.generatedByRole || '').trim()
+  const generatedBy = role ? `${user} (${role})` : user
+
+  const html = sheetShell({
+    title: titles[params.kind],
+    brandName: params.brandName || 'Company',
+    periodLabel: params.periodLabel,
+    generatedBy,
+    bodyHtml,
+  })
+
+  const w = window.open('', '_blank')
+  if (!w) return false
+  w.document.write(html)
+  w.document.close()
+  w.focus()
+  return true
+}

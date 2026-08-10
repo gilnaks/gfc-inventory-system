@@ -1,9 +1,21 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useLayoutEffect } from 'react'
+import { flushSync } from 'react-dom'
+import { usePathname, useRouter } from 'next/navigation'
 import { supabase, Brand } from '../../lib/supabase'
 import { DSIRForm } from '../components/DSIRForm'
 import { DSIRViewer } from '../components/DSIRViewer'
-import { FileText, Lock, User, Phone, Building2, AlertCircle, UserPlus, LogIn, ShoppingCart, Bell, X } from 'lucide-react'
+import { DSIRStoreInventoryPanel } from '../components/DSIRStoreInventoryPanel'
+import { FileText, Lock, User, Phone, Building2, AlertCircle, UserPlus, LogIn, LogOut, ShoppingCart, Bell, X, DollarSign, CalendarDays, Eye, Plus, Factory, Package } from 'lucide-react'
+import { Modal } from '../components/Modal'
+import { StaffPayrollModal } from '../components/StaffPayrollModal'
+import {
+  getRetailAssignedLocations,
+  isGfcMainLocation,
+  locationHasFactoryAccessToday,
+  staffHasGfcMainAssignments,
+  staffMemberIsGfcMain,
+} from '../../lib/gfc-main-branches'
 
 interface Location {
   id: string
@@ -82,9 +94,30 @@ interface LeaveRequest {
   locations: Location
 }
 
-type ViewMode = 'register' | 'login' | 'form' | 'view' | 'viewer' | 'dsir_choice' | 'schedule_view' | 'leave_request' | 'leave_requests_view'
+type ViewMode = 'register' | 'login' | 'form' | 'view' | 'viewer' | 'dsir_choice' | 'schedule_view' | 'leave_request' | 'leave_requests_view' | 'store_inventory'
+
+const ANNOUNCEMENTS_MODAL_SHOWN_KEY = 'gfc_staff_announcements_shown'
+const OPENING_DSIR_KEY = 'gfc_opening_dsir'
+
+function hasStoredStaffSession(): boolean {
+  if (typeof window === 'undefined') return false
+  return (
+    localStorage.getItem('dsir_authenticated') === 'true' &&
+    Boolean(localStorage.getItem('dsir_staff_info'))
+  )
+}
+
+function isOpeningDsirFlow(): boolean {
+  if (typeof window === 'undefined') return false
+  if (sessionStorage.getItem(OPENING_DSIR_KEY) === '1') return true
+  return hasStoredStaffSession() && Boolean(localStorage.getItem('dsir_selected_location'))
+}
 
 export default function DSIRPage() {
+  const pathname = usePathname()
+  const router = useRouter()
+  const isStaffRoute = pathname === '/staff'
+
   const [viewMode, setViewMode] = useState<ViewMode>('login')
   const [staffInfo, setStaffInfo] = useState<StaffRegistration | null>(null)
   const [assignedLocations, setAssignedLocations] = useState<Location[]>([])
@@ -106,6 +139,7 @@ export default function DSIRPage() {
   // Announcements
   const [announcements, setAnnouncements] = useState<any[]>([])
   const [showAnnouncementModal, setShowAnnouncementModal] = useState(false)
+  const [showPayrollModal, setShowPayrollModal] = useState(false)
 
   // Registration form
   const [registrationForm, setRegistrationForm] = useState({
@@ -132,6 +166,61 @@ export default function DSIRPage() {
     checkExistingSession()
   }, [])
 
+  useEffect(() => {
+    if (!sessionChecked || initialLoading || isStaffRoute || !staffInfo) return
+    if (viewMode === 'login') {
+      router.replace('/staff')
+    }
+  }, [sessionChecked, initialLoading, isStaffRoute, staffInfo, viewMode, router])
+
+  useEffect(() => {
+    if (!sessionChecked || initialLoading || staffInfo || isStaffRoute) return
+    router.replace('/staff')
+  }, [sessionChecked, initialLoading, staffInfo, isStaffRoute, router])
+
+  useEffect(() => {
+    if (!staffInfo || initialLoading) return
+    if (isStaffRoute && viewMode === 'login') {
+      setViewMode('schedule_view')
+    }
+  }, [isStaffRoute, staffInfo, viewMode, initialLoading])
+
+  useLayoutEffect(() => {
+    if (!isStaffRoute) {
+      setShowAnnouncementModal(false)
+    }
+    if (!staffInfo || isStaffRoute) return
+    if (viewMode === 'schedule_view' && selectedLocation) {
+      setViewMode('dsir_choice')
+    }
+  }, [isStaffRoute, staffInfo, viewMode, selectedLocation])
+
+  useEffect(() => {
+    if (!isStaffRoute || !staffInfo || initialLoading || loadingAssignments) return
+    if (viewMode !== 'schedule_view') return
+    if (announcements.length === 0) return
+    if (typeof window !== 'undefined' && sessionStorage.getItem(ANNOUNCEMENTS_MODAL_SHOWN_KEY)) {
+      return
+    }
+    setShowAnnouncementModal(true)
+    sessionStorage.setItem(ANNOUNCEMENTS_MODAL_SHOWN_KEY, '1')
+  }, [
+    isStaffRoute,
+    staffInfo,
+    viewMode,
+    initialLoading,
+    loadingAssignments,
+    announcements.length,
+  ])
+
+  const goToStaffHome = () => {
+    setShowLeaveNotification(false)
+    setViewMode('schedule_view')
+    if (!isStaffRoute) {
+      router.push('/staff')
+    }
+  }
+
   // Save current report to localStorage whenever it changes
   useEffect(() => {
     saveCurrentReport(currentReport)
@@ -139,7 +228,7 @@ export default function DSIRPage() {
 
   // Refresh staff info when navigating to leave request form to get latest balance
   useEffect(() => {
-    if (viewMode === 'leave_request' && staffInfo) {
+    if (isStaffRoute && viewMode === 'leave_request' && staffInfo) {
       refreshStaffInfo(staffInfo.id)
     }
   }, [viewMode])
@@ -163,7 +252,7 @@ export default function DSIRPage() {
           // Check if this affects today's DSIR for the current location
           if (payload.new && typeof payload.new === 'object' && 'location_id' in payload.new && 'report_date' in payload.new) {
             if (payload.new.location_id === selectedLocation?.id) {
-              const today = new Date().toISOString().split('T')[0]
+              const today = formatDateLocal(new Date())
               const reportDate = payload.new.report_date
               
               if (reportDate === today) {
@@ -228,18 +317,34 @@ export default function DSIRPage() {
           const locationData = JSON.parse(savedLocation)
           setSelectedLocation(locationData)
         }
-        
-        // Always go to schedule view after session restoration
-        setViewMode('schedule_view')
+
+        if (savedReport) {
+          try {
+            setCurrentReport(JSON.parse(savedReport))
+          } catch {
+            localStorage.removeItem('dsir_current_report')
+          }
+        }
+
+        if (isStaffRoute) {
+          setViewMode('schedule_view')
+        } else if (savedReport && savedLocation) {
+          setViewMode('viewer')
+        } else if (savedLocation) {
+          setViewMode('dsir_choice')
+        } else {
+          router.replace('/staff')
+        }
+
+        sessionStorage.removeItem(OPENING_DSIR_KEY)
       } catch (error) {
         console.error('Error parsing saved session:', error)
         clearSession()
+        sessionStorage.removeItem(OPENING_DSIR_KEY)
       }
     }
-    
-    setTimeout(() => {
-      setInitialLoading(false)
-    }, 800)
+
+    setInitialLoading(false)
   }
 
   const loadStaffAssignments = async (staffRegistrationId: string) => {
@@ -339,11 +444,6 @@ export default function DSIRPage() {
 
       if (error) throw error
       setAnnouncements(data || [])
-      
-      // Show modal if there are new announcements
-      if (data && data.length > 0) {
-        setShowAnnouncementModal(true)
-      }
     } catch (error) {
       console.error('Error loading announcements:', error)
     }
@@ -492,12 +592,9 @@ export default function DSIRPage() {
         ])
         
         setLoadingAssignments(false)
-        
-        // Always show schedule view first after login
         setViewMode('schedule_view')
-        
-        // Mark session as checked to prevent interference from checkExistingSession
         setSessionChecked(true)
+        router.push('/staff')
         
         setSuccess('Login successful!')
         setTimeout(() => setSuccess(''), 3000)
@@ -518,14 +615,19 @@ export default function DSIRPage() {
     
     // Check if there's already a DSIR for today
     await checkTodayDSIR(location)
-    
-    setViewMode('dsir_choice')
+
+    flushSync(() => {
+      setShowAnnouncementModal(false)
+      setViewMode('dsir_choice')
+    })
+    sessionStorage.setItem(OPENING_DSIR_KEY, '1')
+    router.push('/dsir')
   }
 
   const checkTodayDSIR = async (location: Location) => {
     if (!staffInfo) return
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
     
     try {
       // Check for today's DSIR (shared by all staff at this location)
@@ -655,7 +757,7 @@ export default function DSIRPage() {
   }
 
   const isStaffAbsentToday = () => {
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
     return leaveRequests.some(request => 
       request.request_type === 'absence_admin' &&
       request.status === 'approved' &&
@@ -739,7 +841,7 @@ export default function DSIRPage() {
   const checkExistingReport = async () => {
     if (!selectedLocation || !staffInfo) return
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
     
     try {
       const { data, error } = await supabase
@@ -784,7 +886,7 @@ export default function DSIRPage() {
   const createNewReport = async () => {
     if (!selectedLocation || !staffInfo) return
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
     
     try {
       const { data, error } = await supabase
@@ -826,7 +928,7 @@ export default function DSIRPage() {
     // Load the most recent submitted DSIR by this staff member for this location (excluding today's DSIR)
     if (!selectedLocation || !staffInfo) return
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
 
     try {
       const { data, error } = await supabase
@@ -894,12 +996,17 @@ export default function DSIRPage() {
     setViewMode('login')
     setSessionChecked(false) // Reset session check flag
     setLoadingAssignments(false) // Reset loading assignments flag
+    setShowAnnouncementModal(false)
+    setAnnouncements([])
     
     // Clear localStorage
     localStorage.removeItem('dsir_authenticated')
     localStorage.removeItem('dsir_staff_info')
     localStorage.removeItem('dsir_selected_location')
     localStorage.removeItem('dsir_current_report')
+    sessionStorage.removeItem(ANNOUNCEMENTS_MODAL_SHOWN_KEY)
+
+    router.push('/staff')
   }
 
   const saveCurrentReport = (report: DSIRReport | null) => {
@@ -1021,7 +1128,7 @@ export default function DSIRPage() {
       
       setTimeout(() => {
         setSuccess('')
-        setViewMode('schedule_view')
+        goToStaffHome()
       }, 2000)
     } catch (error) {
       console.error('Error submitting leave request:', error)
@@ -1059,14 +1166,21 @@ export default function DSIRPage() {
     }
   }
 
-  // Loading screen
+  const isDsirAppView =
+    viewMode === 'dsir_choice' ||
+    viewMode === 'store_inventory' ||
+    viewMode === 'viewer' ||
+    viewMode === 'form' ||
+    viewMode === 'view'
+
+  // Loading screen — keep copy identical on server and first client paint (no localStorage reads here).
   if (initialLoading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading DSIR System</h2>
-          <p className="text-gray-600">Please wait while we check your session...</p>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading</h2>
+          <p className="text-gray-600">Please wait...</p>
         </div>
       </div>
     )
@@ -1085,9 +1199,21 @@ export default function DSIRPage() {
     )
   }
 
+  if (staffInfo && !isStaffRoute && !isDsirAppView) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading DSIR</h2>
+          <p className="text-gray-600">Please wait...</p>
+        </div>
+      </div>
+    )
+  }
+
 
   // Show leave requests view
-  if (viewMode === 'leave_requests_view' && staffInfo) {
+  if (isStaffRoute && viewMode === 'leave_requests_view' && staffInfo) {
     return (
       <>
       <div className="min-h-screen bg-gray-50">
@@ -1112,10 +1238,7 @@ export default function DSIRPage() {
                   + New Request
                 </button>
                 <button
-                  onClick={() => {
-                    setShowLeaveNotification(false)
-                    setViewMode('schedule_view')
-                  }}
+                  onClick={goToStaffHome}
                   className="px-3 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 flex-shrink-0 self-start sm:self-auto"
                 >
                   Back to Schedule
@@ -1249,8 +1372,8 @@ export default function DSIRPage() {
       </div>
 
       {/* Announcements Modal */}
-      {showAnnouncementModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      {isStaffRoute && showAnnouncementModal && (
+        <Modal onClose={() => setShowAnnouncementModal(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
               <h3 className="text-lg font-semibold text-gray-900">📢 Announcements & Messages</h3>
@@ -1434,14 +1557,14 @@ export default function DSIRPage() {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
       </>
     )
   }
 
   // Show leave request form
-  if (viewMode === 'leave_request' && staffInfo) {
+  if (isStaffRoute && viewMode === 'leave_request' && staffInfo) {
     return (
       <div className="min-h-screen bg-gray-50">
         {/* Header */}
@@ -1459,7 +1582,7 @@ export default function DSIRPage() {
               </div>
               <div className="flex space-x-2">
                 <button
-                  onClick={() => setViewMode('schedule_view')}
+                  onClick={goToStaffHome}
                   className="px-3 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 flex-shrink-0 self-start sm:self-auto"
                 >
                   Back to Schedule
@@ -1656,7 +1779,7 @@ export default function DSIRPage() {
               <div className="flex space-x-3">
                 <button
                   type="button"
-                  onClick={() => setViewMode('schedule_view')}
+                  onClick={goToStaffHome}
                   className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                 >
                   Cancel
@@ -1681,61 +1804,83 @@ export default function DSIRPage() {
     )
   }
 
-  // Show schedule view if logged in
-  if (viewMode === 'schedule_view' && staffInfo) {
+  // Show schedule view on /staff
+  if (isStaffRoute && viewMode === 'schedule_view' && staffInfo) {
     const weekDates = getWeekDates()
-    const today = new Date().toISOString().split('T')[0]
+    const today = formatDateLocal(new Date())
+    const retailAssignedLocations = getRetailAssignedLocations(assignedLocations)
+    const hasGfcMainAssignments = staffHasGfcMainAssignments(assignedLocations)
+    const hasFactoryPortalAccess = assignedLocations.some((location) =>
+      locationHasFactoryAccessToday(location)
+    )
+    const gfcBrandColors = getBrandButtonColors('GFC Main')
     
     return (
       <>
-      <div className="min-h-screen bg-gray-50">
+      <div className="min-h-screen bg-gray-50 pb-[max(1rem,env(safe-area-inset-bottom))]">
         {/* Header */}
-        <div className="bg-white shadow-sm border-b">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center py-4 space-y-3 sm:space-y-0">
-              <div className="flex items-center space-x-3 sm:space-x-4">
-                <FileText className="h-6 w-6 sm:h-8 sm:w-8 text-blue-600 flex-shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <h1 className="text-lg sm:text-xl lg:text-2xl font-bold text-gray-900 leading-tight">Your Weekly Schedule</h1>
-                  <p className="text-xs sm:text-sm text-gray-600">
-                    Welcome, {staffInfo.full_name} • {formatDate(new Date())}
+        <div className="bg-white shadow-sm border-b sticky top-0 z-20">
+          <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+            <div className="flex flex-col gap-3 py-3 sm:py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3 min-w-0 flex-1">
+                  <FileText className="h-7 w-7 sm:h-8 sm:w-8 text-blue-600 flex-shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1">
+                    <h1 className="text-base sm:text-xl lg:text-2xl font-bold text-gray-900 leading-tight">
+                      Your Weekly Schedule
+                    </h1>
+                    <p className="text-xs sm:text-sm text-gray-600 mt-0.5 truncate">
+                      {staffInfo.full_name}
+                    </p>
                     {isStaffAbsentToday() && (
-                      <span className="ml-2 px-2 py-0.5 text-xs font-bold bg-orange-100 text-orange-800 border border-orange-300 rounded">
+                      <span className="inline-block mt-1.5 px-2 py-0.5 text-[10px] sm:text-xs font-bold bg-orange-100 text-orange-800 border border-orange-300 rounded">
                         ABSENT TODAY
                       </span>
                     )}
-                  </p>
+                  </div>
                 </div>
+                <button
+                  onClick={logout}
+                  className="px-2.5 py-2.5 sm:px-3 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 active:bg-gray-100 shrink-0"
+                >
+                  <LogOut className="h-4 w-4 inline-block mr-1 -mt-0.5" />
+                  Logout
+                </button>
               </div>
-              <div className="flex space-x-2">
+              <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap sm:justify-end sm:gap-2">
+                <button
+                  onClick={() => setShowPayrollModal(true)}
+                  className="px-2.5 py-2.5 sm:px-3 sm:py-2 text-xs sm:text-sm font-medium rounded-md text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 active:bg-gray-100"
+                >
+                  <DollarSign className="h-4 w-4 inline-block mr-1 -mt-0.5" />
+                  <span className="sm:hidden">Payroll</span>
+                  <span className="hidden sm:inline">My Payroll</span>
+                </button>
                 <button
                   onClick={() => setShowAnnouncementModal(true)}
-                  className="px-3 py-2 text-xs sm:text-sm font-medium rounded-md flex-shrink-0 self-start sm:self-auto relative text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
+                  className="px-2.5 py-2.5 sm:px-3 sm:py-2 text-xs sm:text-sm font-medium rounded-md relative text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 active:bg-gray-100"
                 >
-                  <Bell className="h-4 w-4 inline-block mr-1" />
-                  Announcements
+                  <Bell className="h-4 w-4 inline-block mr-1 -mt-0.5" />
+                  <span className="sm:hidden">News</span>
+                  <span className="hidden sm:inline">Announcements</span>
                   {announcements.length > 0 && (
-                    <span className="absolute -top-1 -right-1 h-3 w-3 bg-purple-500 rounded-full border-2 border-white"></span>
+                    <span className="absolute top-1 right-1 h-2.5 w-2.5 bg-purple-500 rounded-full border-2 border-white"></span>
                   )}
                 </button>
                 <button
                   onClick={() => setViewMode('leave_requests_view')}
-                  className={`px-3 py-2 text-xs sm:text-sm font-medium rounded-md flex-shrink-0 self-start sm:self-auto relative ${
+                  className={`px-2.5 py-2.5 sm:px-3 sm:py-2 text-xs sm:text-sm font-medium rounded-md relative active:opacity-90 ${
                     showLeaveNotification 
                       ? 'text-white bg-green-600 hover:bg-green-700 border border-green-700' 
                       : 'text-gray-700 bg-white border border-gray-300 hover:bg-gray-50'
                   }`}
                 >
-                  My Leave Requests
+                  <CalendarDays className="h-4 w-4 inline-block mr-1 -mt-0.5" />
+                  <span className="sm:hidden">Leave</span>
+                  <span className="hidden sm:inline">My Leave Requests</span>
                   {showLeaveNotification && (
-                    <span className="absolute -top-1 -right-1 h-3 w-3 bg-red-500 rounded-full border-2 border-white"></span>
+                    <span className="absolute top-1 right-1 h-2.5 w-2.5 bg-red-500 rounded-full border-2 border-white"></span>
                   )}
-                </button>
-                <button
-                  onClick={logout}
-                  className="px-3 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 flex-shrink-0 self-start sm:self-auto"
-                >
-                  Logout
                 </button>
               </div>
             </div>
@@ -1743,17 +1888,106 @@ export default function DSIRPage() {
         </div>
 
         {/* Schedule Content */}
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          {/* Weekly Schedule Table */}
-          <div className="bg-white rounded-lg shadow overflow-hidden mb-8">
-            <div className="bg-yellow-100 border-b border-yellow-200 p-4">
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8">
+          {/* Weekly Schedule */}
+          <div className="bg-white rounded-lg shadow overflow-hidden mb-4 sm:mb-8">
+            <div className="bg-yellow-100 border-b border-yellow-200 px-3 py-3 sm:p-4">
               <div className="text-center">
-                <h4 className="text-lg font-bold text-yellow-800">YOUR WEEKLY SCHEDULE</h4>
-                <p className="text-sm text-yellow-700">{formatDate(new Date()).toUpperCase()}</p>
+                <h4 className="text-sm sm:text-lg font-bold text-yellow-800">YOUR WEEKLY SCHEDULE</h4>
+                <p className="text-[11px] sm:text-sm text-yellow-700 mt-0.5">
+                  {weekDates[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  {' – '}
+                  {weekDates[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                </p>
               </div>
             </div>
+
+            {/* Mobile: 2-column day rows */}
+            <div className="md:hidden divide-y divide-gray-100">
+              {weekDates.map((date) => {
+                const dateStr = formatDateLocal(date)
+                const daySchedules = getScheduleForDate(date)
+                const isToday = dateStr === today
+                const isAbsent = isStaffAbsentOnDate(date)
+                const isPast = dateStr < today
+                const pastDayMuted = isPast && !isToday
+
+                return (
+                  <div
+                    key={dateStr}
+                    className={`grid grid-cols-[4.5rem_1fr] gap-x-3 px-3 py-3 items-center ${
+                      isToday ? 'bg-blue-50' : pastDayMuted ? 'bg-gray-50/90' : ''
+                    }`}
+                  >
+                    <div className="shrink-0 text-center">
+                      <p className={`text-sm font-bold leading-tight ${
+                        isToday ? 'text-blue-700' : pastDayMuted ? 'text-gray-400' : 'text-gray-900'
+                      }`}>
+                        {formatDayName(date)}
+                      </p>
+                      <p className={`text-xs mt-0.5 ${
+                        isToday ? 'text-blue-600' : pastDayMuted ? 'text-gray-400' : 'text-gray-500'
+                      }`}>
+                        {date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      </p>
+                    </div>
+
+                    <div className="min-w-0">
+                      {isAbsent ? (
+                        <div className={`relative text-xs px-2.5 py-2 rounded-md font-bold border ${
+                          pastDayMuted
+                            ? 'bg-orange-50 text-orange-500 border-orange-200'
+                            : 'bg-orange-100 text-orange-800 border-orange-300'
+                        }`}>
+                          {isToday && (
+                            <span className="absolute top-1.5 right-1.5 text-[9px] font-semibold uppercase tracking-wide text-white bg-blue-600 px-1.5 py-0.5 rounded">
+                              Today
+                            </span>
+                          )}
+                          ABSENT
+                        </div>
+                      ) : daySchedules.length > 0 ? (
+                        <div className="space-y-1.5">
+                          {daySchedules.map((schedule) => {
+                            const brandColors = getBrandButtonColors(schedule.location?.brand?.name)
+                            return (
+                              <div
+                                key={schedule.id}
+                                className={`relative text-sm px-2.5 py-1.5 rounded-md border ${brandColors.bg} ${brandColors.title} ${brandColors.border} ${
+                                  pastDayMuted ? 'saturate-[0.55] opacity-90' : ''
+                                }`}
+                              >
+                                {isToday && (
+                                  <span className="absolute top-1.5 right-1.5 text-[9px] font-semibold uppercase tracking-wide text-white bg-blue-600 px-1.5 py-0.5 rounded">
+                                    Today
+                                  </span>
+                                )}
+                                <div className="font-medium leading-snug pr-12">{schedule.location?.name}</div>
+                                <div className={`text-xs mt-0.5 ${brandColors.subtitle}`}>
+                                  {schedule.location?.brand?.name}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="relative">
+                          {isToday && (
+                            <span className="absolute top-0 right-0 text-[9px] font-semibold uppercase tracking-wide text-white bg-blue-600 px-1.5 py-0.5 rounded">
+                              Today
+                            </span>
+                          )}
+                          <p className={`text-xs py-1 ${pastDayMuted ? 'text-gray-300' : 'text-gray-400'}`}>No schedule</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
             
-            <div className="overflow-x-auto">
+            {/* Desktop: weekly table */}
+            <div className="hidden md:block overflow-x-auto">
               <table className="w-full border border-gray-300">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-300">
@@ -1761,15 +1995,23 @@ export default function DSIRPage() {
                       DAY
                     </th>
                     {weekDates.map((date) => {
-                      const dateStr = date.toISOString().split('T')[0]
+                      const dateStr = formatDateLocal(date)
                       const isToday = dateStr === today
+                      const isPast = dateStr < today
+                      const pastDayMuted = isPast && !isToday
                       
                       return (
-                        <th key={date.toISOString()} className="px-3 py-3 text-center border-r border-gray-300 last:border-r-0">
-                          <div className={`text-lg font-semibold ${isToday ? 'text-blue-600' : 'text-gray-900'}`}>
+                        <th key={date.toISOString()} className={`px-3 py-3 text-center border-r border-gray-300 last:border-r-0 ${
+                          isToday ? 'bg-blue-50' : pastDayMuted ? 'bg-gray-50' : ''
+                        }`}>
+                          <div className={`text-lg font-semibold ${
+                            isToday ? 'text-blue-600' : pastDayMuted ? 'text-gray-400' : 'text-gray-900'
+                          }`}>
                             {formatDay(date)}
                           </div>
-                          <div className="text-xs text-red-600 font-medium">
+                          <div className={`text-xs font-medium ${
+                            pastDayMuted ? 'text-gray-400' : 'text-red-600'
+                          }`}>
                             {formatDayName(date)}
                           </div>
                         </th>
@@ -1783,15 +2025,23 @@ export default function DSIRPage() {
                       SCHEDULED BRANCHES
                     </td>
                     {weekDates.map((date) => {
-                      const dateStr = date.toISOString().split('T')[0]
+                      const dateStr = formatDateLocal(date)
                       const daySchedules = getScheduleForDate(date)
                       const isToday = dateStr === today
+                      const isPast = dateStr < today
+                      const pastDayMuted = isPast && !isToday
                       const isAbsent = isStaffAbsentOnDate(date)
                       
                       return (
-                        <td key={dateStr} className={`px-3 py-3 text-center border-r border-gray-300 last:border-r-0 ${isToday ? 'bg-blue-50' : ''}`}>
+                        <td key={dateStr} className={`px-3 py-3 text-center border-r border-gray-300 last:border-r-0 ${
+                          isToday ? 'bg-blue-50' : pastDayMuted ? 'bg-gray-50/90' : ''
+                        }`}>
                           {isAbsent ? (
-                            <div className="text-xs px-2 py-1 rounded bg-orange-100 text-orange-800 border border-orange-300 font-bold">
+                            <div className={`text-xs px-2 py-1 rounded font-bold text-center border ${
+                              pastDayMuted
+                                ? 'bg-orange-50 text-orange-500 border-orange-200'
+                                : 'bg-orange-100 text-orange-800 border-orange-300'
+                            }`}>
                               ABSENT
                             </div>
                           ) : daySchedules.length > 0 ? (
@@ -1799,7 +2049,9 @@ export default function DSIRPage() {
                               {daySchedules.map((schedule) => {
                                 const brandColors = getBrandButtonColors(schedule.location?.brand?.name)
                                 return (
-                                  <div key={schedule.id} className={`text-xs px-2 py-1 rounded ${brandColors.bg} ${brandColors.title} border ${brandColors.border}`}>
+                                  <div key={schedule.id} className={`text-xs px-2 py-1 rounded text-center border ${brandColors.bg} ${brandColors.title} ${brandColors.border} ${
+                                    pastDayMuted ? 'saturate-[0.55] opacity-90' : ''
+                                  }`}>
                                     <div className="font-medium">{schedule.location?.name}</div>
                                     <div className={`text-xs ${brandColors.subtitle}`}>
                                       {schedule.location?.brand?.name}
@@ -1809,7 +2061,7 @@ export default function DSIRPage() {
                               })}
                             </div>
                           ) : (
-                            <div className="text-xs text-gray-500">No schedule</div>
+                            <div className={`text-xs ${pastDayMuted ? 'text-gray-300' : 'text-gray-500'}`}>No schedule</div>
                           )}
                         </td>
                       )
@@ -1820,24 +2072,72 @@ export default function DSIRPage() {
             </div>
           </div>
 
-          {/* Branch Selection */}
-          <div className="bg-white rounded-lg shadow p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Select Branch for DSIR</h3>
-            <p className="text-sm text-gray-600 mb-6">
+          {/* GFC Main: Factory portal (factory & office only) */}
+          {hasGfcMainAssignments && (
+            <div className="bg-white rounded-lg shadow p-4 sm:p-6 mb-4 sm:mb-6">
+              <h3 className="text-base sm:text-lg font-semibold text-gray-900 mb-1 sm:mb-2">Factory Portal</h3>
+              <p className="text-xs sm:text-sm text-gray-600 mb-4 sm:mb-6">
+                Open the GFC production and materials portal (Factory and Office staff).
+              </p>
+
+              {isStaffAbsentToday() ? (
+                <div className="bg-orange-50 border-2 border-orange-300 rounded-lg p-5 sm:p-8 text-center">
+                  <div className="text-orange-800 font-bold text-base sm:text-lg mb-2">⚠️ MARKED ABSENT</div>
+                  <div className="text-orange-700 text-xs sm:text-sm">
+                    You are marked as absent today. Factory portal access is unavailable.
+                  </div>
+                </div>
+              ) : hasFactoryPortalAccess ? (
+                <button
+                  type="button"
+                  onClick={() => router.push('/factory')}
+                  className={`w-full p-4 border rounded-lg text-left transition-colors min-h-[4.5rem] active:scale-[0.99] ${gfcBrandColors.border} ${gfcBrandColors.bg} ${gfcBrandColors.hover} cursor-pointer`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Factory className={`h-5 w-5 shrink-0 ${gfcBrandColors.icon}`} />
+                    <div className="flex-1 min-w-0">
+                      <div className={`font-medium text-sm sm:text-base leading-snug ${gfcBrandColors.title}`}>
+                        Open Factory Portal
+                      </div>
+                      <div className={`text-xs sm:text-sm ${gfcBrandColors.subtitle}`}>
+                        Production schedule, materials, and floor tools
+                      </div>
+                      <div className={`text-[11px] sm:text-xs mt-1 ${gfcBrandColors.status}`}>
+                        Tap to open /factory
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              ) : (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-5 text-center">
+                  <div className="text-sm font-medium text-gray-800 mb-1">Technical branch</div>
+                  <div className="text-xs text-gray-500">
+                    Factory portal is for Factory and Office assignments. Contact your supervisor if you need access.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Retail: DSIR branch selection */}
+          {retailAssignedLocations.length > 0 && (
+          <div className="bg-white rounded-lg shadow p-4 sm:p-6">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900 mb-1 sm:mb-4">Select Branch for DSIR</h3>
+            <p className="text-xs sm:text-sm text-gray-600 mb-4 sm:mb-6">
               Choose a branch where you are scheduled to work today to submit your DSIR report.
             </p>
             
             {isStaffAbsentToday() ? (
-              <div className="bg-orange-50 border-2 border-orange-300 rounded-lg p-8 text-center">
-                <div className="text-orange-800 font-bold text-lg mb-2">⚠️ MARKED ABSENT</div>
-                <div className="text-orange-700 text-sm">
+              <div className="bg-orange-50 border-2 border-orange-300 rounded-lg p-5 sm:p-8 text-center">
+                <div className="text-orange-800 font-bold text-base sm:text-lg mb-2">⚠️ MARKED ABSENT</div>
+                <div className="text-orange-700 text-xs sm:text-sm">
                   You are marked as absent today. You cannot access branches or submit DSIR reports.
                 </div>
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {assignedLocations.map((location) => {
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
+                  {retailAssignedLocations.map((location) => {
                     const isScheduledToday = isLocationScheduledToday(location)
                     const isClickable = isScheduledToday
                     const brandColors = getBrandButtonColors(location.brand?.name)
@@ -1847,23 +2147,23 @@ export default function DSIRPage() {
                         key={location.id}
                         onClick={() => isClickable ? selectLocation(location) : undefined}
                         disabled={!isClickable}
-                        className={`p-4 border rounded-lg text-left transition-colors ${
+                        className={`w-full p-4 sm:p-4 border rounded-lg text-left transition-colors min-h-[4.5rem] active:scale-[0.99] ${
                           isClickable
                             ? `${brandColors.border} ${brandColors.bg} ${brandColors.hover} cursor-pointer`
                             : 'border-gray-200 bg-gray-50 cursor-not-allowed opacity-60'
                         }`}
                       >
-                        <div className="flex items-center space-x-3">
-                          <Building2 className={`h-5 w-5 ${isClickable ? brandColors.icon : 'text-gray-400'}`} />
+                        <div className="flex items-center gap-3">
+                          <Building2 className={`h-5 w-5 shrink-0 ${isClickable ? brandColors.icon : 'text-gray-400'}`} />
                           <div className="flex-1 min-w-0">
-                            <div className={`font-medium ${isClickable ? brandColors.title : 'text-gray-500'}`}>
+                            <div className={`font-medium text-sm sm:text-base leading-snug ${isClickable ? brandColors.title : 'text-gray-500'}`}>
                               {location.name}
                             </div>
-                            <div className={`text-sm ${isClickable ? brandColors.subtitle : 'text-gray-400'}`}>
+                            <div className={`text-xs sm:text-sm ${isClickable ? brandColors.subtitle : 'text-gray-400'}`}>
                               {location.brand?.name}
                             </div>
-                            <div className={`text-xs mt-1 ${isClickable ? brandColors.status : 'text-gray-400'}`}>
-                              {isClickable ? '✓ Scheduled today' : 'Not scheduled today'}
+                            <div className={`text-[11px] sm:text-xs mt-1 ${isClickable ? brandColors.status : 'text-gray-400'}`}>
+                              {isClickable ? '✓ Scheduled today — tap to open DSIR' : 'Not scheduled today'}
                             </div>
                           </div>
                         </div>
@@ -1872,23 +2172,31 @@ export default function DSIRPage() {
                   })}
                 </div>
                 
-                {scheduledLocations.length === 0 && (
-                  <div className="text-center py-8">
-                    <div className="text-gray-500 mb-2">No branches scheduled for today</div>
-                    <div className="text-sm text-gray-400">
-                      You don't have any scheduled shifts today. Contact your supervisor if this is incorrect.
+                {scheduledLocations.filter((location) => !isGfcMainLocation(location)).length === 0 && (
+                  <div className="text-center py-6 sm:py-8">
+                    <div className="text-gray-500 text-sm mb-2">No retail branches scheduled for today</div>
+                    <div className="text-xs sm:text-sm text-gray-400 px-4">
+                      You don't have any scheduled retail shifts today. Contact your supervisor if this is incorrect.
                     </div>
                   </div>
                 )}
               </>
             )}
           </div>
+          )}
         </div>
       </div>
 
+      <StaffPayrollModal
+        open={showPayrollModal}
+        onClose={() => setShowPayrollModal(false)}
+        staffId={staffInfo.id}
+        staffName={staffInfo.full_name}
+      />
+
       {/* Announcements Modal */}
-      {showAnnouncementModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      {isStaffRoute && showAnnouncementModal && (
+        <Modal onClose={() => setShowAnnouncementModal(false)} align="center">
           <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
               <h3 className="text-lg font-semibold text-gray-900">📢 Announcements & Messages</h3>
@@ -2072,20 +2380,52 @@ export default function DSIRPage() {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
       </>
     )
   }
 
   // Show DSIR choice screen after branch selection
-  if (viewMode === 'dsir_choice' && staffInfo && selectedLocation) {
+  if (viewMode === 'store_inventory' && staffInfo && selectedLocation) {
+    const brandColors = getBrandButtonColors(selectedLocation.brand?.name)
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="max-w-md w-full space-y-8">
+      <div className="min-h-screen bg-gray-50 px-4 sm:px-6 py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+        <div className="max-w-lg mx-auto space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => setViewMode('dsir_choice')}
+              className="text-sm text-gray-600 hover:text-gray-800"
+            >
+              ← Back
+            </button>
+            <span className={`px-3 py-1 rounded-full text-sm font-medium border ${getBrandHeaderColors(selectedLocation.brand?.name)}`}>
+              {selectedLocation.brand?.name}
+            </span>
+          </div>
+          <div className={`rounded-xl border bg-white p-4 sm:p-5 shadow-sm ${brandColors.border}`}>
+            <DSIRStoreInventoryPanel
+              mode="staff"
+              locationId={selectedLocation.id}
+              locationName={selectedLocation.name}
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Show DSIR choice screen after branch selection
+  if (viewMode === 'dsir_choice' && staffInfo && selectedLocation) {
+    const brandColors = getBrandButtonColors(selectedLocation.brand?.name)
+
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 sm:px-6 py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+        <div className="max-w-md w-full space-y-6 sm:space-y-8">
           <div className="text-center">
-            <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-purple-100 mb-6">
-              <FileText className="h-8 w-8 text-purple-600" />
+            <div className={`mx-auto flex items-center justify-center h-16 w-16 rounded-full mb-6 ${brandColors.bg}`}>
+              <FileText className={`h-8 w-8 ${brandColors.icon}`} />
             </div>
             <h2 className="text-3xl font-bold text-gray-900">DSIR Options</h2>
             <div className="mt-2 flex items-center justify-center space-x-2">
@@ -2105,7 +2445,7 @@ export default function DSIRPage() {
                   setCurrentReport(todayDSIR)
                   setViewMode('viewer')
                 }}
-                className="w-full flex items-center justify-between p-6 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:border-blue-500 transition-colors"
+                className={`w-full flex items-center justify-between p-6 bg-white border rounded-lg transition-colors ${brandColors.border} ${brandColors.hover}`}
               >
                 <div className="text-left">
                   <div className="font-medium text-gray-900">Today's DSIR</div>
@@ -2116,61 +2456,59 @@ export default function DSIRPage() {
                     Status: {todayDSIR.status.toUpperCase()}
                   </div>
                 </div>
-                <div className="text-blue-600">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                  </svg>
-                </div>
+                <Eye className={`w-5 h-5 shrink-0 ${brandColors.icon}`} />
               </button>
             ) : (
               // Show create new DSIR button
               <button
                 onClick={handleCreateNewDSIR}
-                className="w-full flex items-center justify-between p-6 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:border-green-500 transition-colors"
+                className={`w-full flex items-center justify-between p-6 bg-white border rounded-lg transition-colors ${brandColors.border} ${brandColors.hover}`}
               >
                 <div className="text-left">
                   <div className="font-medium text-gray-900">Create New DSIR</div>
                   <div className="text-sm text-gray-500">Start a new daily sales & inventory report</div>
-          </div>
-                <div className="text-green-600">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
                 </div>
+                <Plus className={`w-5 h-5 shrink-0 ${brandColors.icon}`} />
               </button>
             )}
 
 
             <button
+              onClick={() => setViewMode('store_inventory')}
+              className={`w-full flex items-center justify-between p-6 bg-white border rounded-lg transition-colors ${brandColors.border} ${brandColors.hover}`}
+            >
+              <div className="text-left">
+                <div className="font-medium text-gray-900">Store inventory</div>
+                <div className="text-sm text-gray-500">Counter-check on-hand pans (read only)</div>
+              </div>
+              <Package className={`w-5 h-5 shrink-0 ${brandColors.icon}`} />
+            </button>
+
+            <button
               onClick={handleOrderRedirect}
-              className="w-full flex items-center justify-between p-6 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:border-orange-500 transition-colors"
+              className={`w-full flex items-center justify-between p-6 bg-white border rounded-lg transition-colors ${brandColors.border} ${brandColors.hover}`}
             >
               <div className="text-left">
                 <div className="font-medium text-gray-900">Place Order</div>
                 <div className="text-sm text-gray-500">Access the order management system</div>
               </div>
-              <div className="text-orange-600">
-                <ShoppingCart className="w-5 h-5" />
-              </div>
+              <ShoppingCart className={`w-5 h-5 shrink-0 ${brandColors.icon}`} />
             </button>
           </div>
 
-          <div className="text-center space-y-2">
+          <div className="flex items-center justify-between gap-4">
             <button
-              onClick={() => setViewMode('schedule_view')}
+              onClick={goToStaffHome}
               className="text-sm text-gray-600 hover:text-gray-800"
             >
               ← Back to Schedule
             </button>
-            <div>
             <button
               onClick={logout}
               className="text-sm text-gray-600 hover:text-gray-800"
             >
               Logout
             </button>
-            </div>
           </div>
         </div>
       </div>
@@ -2210,7 +2548,7 @@ export default function DSIRPage() {
                 </span>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => setViewMode('schedule_view')}
+                    onClick={goToStaffHome}
                     className="px-3 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 flex-shrink-0"
                   >
                     Back to Schedule
@@ -2243,7 +2581,7 @@ export default function DSIRPage() {
 
 
   // Show unassigned message if logged in but no locations assigned
-  if (staffInfo && assignedLocations.length === 0) {
+  if (isStaffRoute && staffInfo && assignedLocations.length === 0) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="max-w-md w-full space-y-8">
@@ -2292,14 +2630,25 @@ export default function DSIRPage() {
     )
   }
 
+  if (!staffInfo && !isStaffRoute) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Redirecting to GFC Employee Login...</p>
+        </div>
+      </div>
+    )
+  }
+
   // Show registration form
-  if (viewMode === 'register') {
+  if (isStaffRoute && viewMode === 'register') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="max-w-md w-full space-y-8">
           <div className="text-center">
-            <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 mb-6">
-              <UserPlus className="h-8 w-8 text-green-600" />
+            <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-blue-100 mb-6">
+              <UserPlus className="h-8 w-8 text-blue-600" />
             </div>
             <h2 className="text-3xl font-bold text-gray-900">Staff Registration</h2>
             <p className="mt-2 text-sm text-gray-600">
@@ -2355,7 +2704,7 @@ export default function DSIRPage() {
                   <button
                     type="button"
                     onClick={generateStaffCode}
-                    className="px-3 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
+                    className="px-3 py-2 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 border border-blue-200"
                   >
                     Generate
                   </button>
@@ -2370,7 +2719,7 @@ export default function DSIRPage() {
               )}
 
               {success && (
-                <div className="flex items-center space-x-2 text-green-600 text-sm">
+                <div className="flex items-center space-x-2 text-blue-700 text-sm bg-blue-50 border border-blue-200 rounded-md px-3 py-2">
                   <AlertCircle className="h-4 w-4" />
                   <span>{success}</span>
                 </div>
@@ -2379,7 +2728,7 @@ export default function DSIRPage() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {loading ? 'Registering...' : 'Register'}
               </button>
@@ -2399,26 +2748,24 @@ export default function DSIRPage() {
     )
   }
 
-  // Show login form (default)
+  // Show login form (default on /staff)
+  if (!staffInfo && isStaffRoute) {
   return (
     <>
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 sm:px-6">
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
           <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-blue-100 mb-6">
             <LogIn className="h-8 w-8 text-blue-600" />
           </div>
-          <h2 className="text-3xl font-bold text-gray-900">DSIR Login</h2>
-          <p className="mt-2 text-sm text-gray-600">
-            Enter your 8-character staff code to access the Daily Sales & Inventory Report
-          </p>
+          <h2 className="text-3xl font-bold text-gray-900">GFC Employee Login</h2>
         </div>
 
-        <div className="bg-white py-8 px-6 shadow rounded-lg">
+        <div className="bg-white py-8 px-6 sm:px-8 shadow rounded-lg">
           <form className="space-y-6" onSubmit={(e) => { e.preventDefault(); loginStaff(); }}>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                8-Character Staff Code
+                Employee Access Code
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -2428,7 +2775,7 @@ export default function DSIRPage() {
                   type="text"
                   value={loginForm.staff_code}
                   onChange={(e) => setLoginForm({ ...loginForm, staff_code: e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) })}
-                  placeholder="Enter 8-character staff code"
+                  placeholder="Enter employee access code"
                   maxLength={8}
                   className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                   required
@@ -2462,7 +2809,7 @@ export default function DSIRPage() {
           <div className="mt-6 text-center">
             <button
               onClick={() => setViewMode('register')}
-              className="text-sm text-green-600 hover:text-green-800"
+              className="text-sm text-blue-600 hover:text-blue-800"
             >
               Don't have a code? Register here
             </button>
@@ -2478,8 +2825,8 @@ export default function DSIRPage() {
     </div>
 
     {/* Announcements Modal */}
-    {showAnnouncementModal && (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    {isStaffRoute && showAnnouncementModal && (
+      <Modal onClose={() => setShowAnnouncementModal(false)} align="center">
         <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
           <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
             <h3 className="text-lg font-semibold text-gray-900">📢 Announcements & Messages</h3>
@@ -2563,8 +2910,11 @@ export default function DSIRPage() {
             </button>
           </div>
         </div>
-      </div>
+      </Modal>
     )}
     </>
   )
+  }
+
+  return null
 }

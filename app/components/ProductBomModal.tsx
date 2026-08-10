@@ -1,11 +1,15 @@
 'use client'
 import { useState, useEffect, useMemo } from 'react'
 import { supabase, Product, Brand, ProductBomItem, RawMaterial, type BomQuantityMode } from '../../lib/supabase'
+import { getFactoryBrand } from '../../lib/brand-roles'
+import { useBrands } from '../contexts/BrandsContext'
 import { X, Plus, Trash2, Layers, ExternalLink, Lock } from 'lucide-react'
+import { Modal } from './Modal'
 import {
   bomQtyBasisLabel,
   effectiveBomQtyPerProductUnit,
   isBomQuantityMode,
+  inferBomSettingsFromItems,
   lineCostPerProductUnit,
   parseProductBomSettings,
   type ProductBomSettings,
@@ -14,30 +18,18 @@ import {
   bomBaseQtyToDisplayQty,
   bomDisplayQtyToBaseQty,
   getBomDisplayUnitLabel,
-  getStockUnitLabel,
+  getPurchaseUnitLabel,
 } from '../../lib/raw-material-uom'
 import { isProductBomComponent } from '../../lib/product-category-settings'
 import {
-  computeProductAvailableStock,
   ensureBomComponentMaterial,
+  isComponentMaterialCategory,
+  loadActiveComponentLinkedProductIds,
+  loadBomComponentProductsForBrand,
   syncBomComponentMaterialCatalogFields,
+  syncComponentCostFromBom,
+  type BomComponentProduct,
 } from '../../lib/product-bom-component'
-
-type BomComponentProduct = Pick<
-  Product,
-  | 'id'
-  | 'product_id'
-  | 'product_name'
-  | 'name'
-  | 'sku'
-  | 'category'
-  | 'unit'
-  | 'price'
-  | 'initial_stock'
-  | 'production'
-  | 'released'
-  | 'reserved'
->
 
 interface ProductBomModalProps {
   product: Product
@@ -71,7 +63,7 @@ function toComponentProduct(p: Product): BomComponentProduct | null {
 }
 
 function formatMoney(amount: number) {
-  return `₱${amount.toLocaleString(undefined, {
+  return `₱${amount.toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`
@@ -85,35 +77,24 @@ function formatQty(qty: number) {
 }
 
 const BOM_SELECT =
-  'id, product_id, material_id, quantity, quantity_mode, yield_per_batch, notes, material:raw_materials(id, material_name, sku, unit, uom_base_unit, uom_base_per_unit, current_stock, unit_cost, uom_stock_per_purchase, factory_bom_uom, factory_inventory_kind, brand_id, is_active, linked_product_id)'
+  'id, product_id, material_id, quantity, quantity_mode, yield_per_batch, notes, material:raw_materials(id, material_name, sku, unit, uom_base_unit, uom_base_per_unit, uom_purchase_unit, current_stock, unit_cost, uom_stock_per_purchase, factory_bom_uom, factory_inventory_kind, brand_id, is_active, linked_product_id)'
 
 const RAW_MATERIALS_SELECT =
-  'id, material_name, sku, unit, uom_base_unit, uom_base_per_unit, current_stock, unit_cost, uom_stock_per_purchase, factory_bom_uom, factory_inventory_kind, brand_id, is_active, linked_product_id'
+  'id, material_name, sku, unit, uom_base_unit, uom_base_per_unit, uom_purchase_unit, current_stock, unit_cost, uom_stock_per_purchase, factory_bom_uom, factory_inventory_kind, brand_id, is_active, linked_product_id'
 
-type BomLinePickerValue = `material:${string}` | `component:${string}`
+type BomLinePickerValue = `material:${string}` | `component:${string}` | `gfc-component:${string}`
 
 function parseBomLinePicker(
   value: string
-): { kind: 'material' | 'component'; id: string } | null {
+): { kind: 'material' | 'component' | 'gfc-component'; id: string } | null {
   const sep = value.indexOf(':')
   if (sep < 0) return null
-  const kind = value.slice(0, sep)
+  const prefix = value.slice(0, sep)
   const id = value.slice(sep + 1)
-  if ((kind === 'material' || kind === 'component') && id) {
-    return { kind, id }
-  }
+  if (prefix === 'material' && id) return { kind: 'material', id }
+  if (prefix === 'component' && id) return { kind: 'component', id }
+  if (prefix === 'gfc-component' && id) return { kind: 'gfc-component', id }
   return null
-}
-
-function inferSettingsFromItems(items: ProductBomItem[]): ProductBomSettings {
-  const first = items[0]
-  if (!first) return { quantity_mode: 'unit', yield_per_batch: null }
-  const quantity_mode = isBomQuantityMode(first.quantity_mode) ? first.quantity_mode : 'unit'
-  return {
-    quantity_mode,
-    yield_per_batch:
-      quantity_mode === 'batch' ? Number(first.yield_per_batch) || null : null,
-  }
 }
 
 export function ProductBomModal({
@@ -136,11 +117,24 @@ export function ProductBomModal({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [lineToAdd, setLineToAdd] = useState('')
-  const [addQty, setAddQty] = useState('1')
+  const [addQty, setAddQty] = useState('')
   const [addNotes, setAddNotes] = useState('')
   const [draftYieldPerBatch, setDraftYieldPerBatch] = useState('1')
+  const [gfcComponentProducts, setGfcComponentProducts] = useState<BomComponentProduct[]>([])
+  const [gfcCategorySortOrders, setGfcCategorySortOrders] = useState<
+    Record<string, number>
+  >({})
+  const [activeComponentProductIds, setActiveComponentProductIds] = useState<Set<string>>(
+    () => new Set()
+  )
 
   const bomLocked = bomItems.length > 0
+  const { brands } = useBrands()
+  const factoryBrand = useMemo(() => getFactoryBrand(brands), [brands])
+  const bomMaterialBrandId = factoryBrand?.id || selectedBrand.id
+  const showGfcComponentPicker = Boolean(
+    factoryBrand && selectedBrand.id !== factoryBrand.id
+  )
 
   const themeClasses = {
     green: 'bg-green-600 hover:bg-green-700',
@@ -153,14 +147,25 @@ export function ProductBomModal({
     if (!productId) return
     setLoading(true)
     try {
-      const [bomRes, matsRes, productRes] = await Promise.all([
+      const gfcLoadPromise =
+        showGfcComponentPicker && factoryBrand
+          ? loadBomComponentProductsForBrand(factoryBrand.id)
+          : Promise.resolve({ products: [] as BomComponentProduct[], categorySortOrders: {} })
+
+      const activeComponentIdsPromise = factoryBrand
+        ? loadActiveComponentLinkedProductIds(factoryBrand.id)
+        : selectedBrand.id
+          ? loadActiveComponentLinkedProductIds(selectedBrand.id)
+          : Promise.resolve(new Set<string>())
+
+      const [bomRes, matsRes, productRes, gfcLoad, activeComponentIds] = await Promise.all([
         supabase
           .from('product_bom_items')
           .select(BOM_SELECT)
           .eq('product_id', productId)
           .order('created_at', { ascending: true }),
         supabase.from('raw_materials').select(RAW_MATERIALS_SELECT)
-          .eq('brand_id', selectedBrand.id)
+          .eq('brand_id', bomMaterialBrandId)
           .eq('is_active', true)
           .order('material_name'),
         supabase
@@ -168,7 +173,13 @@ export function ProductBomModal({
           .select('bom_quantity_mode, bom_yield_per_batch')
           .eq('id', productId)
           .maybeSingle(),
+        gfcLoadPromise,
+        activeComponentIdsPromise,
       ])
+
+      setGfcComponentProducts(gfcLoad.products)
+      setGfcCategorySortOrders(gfcLoad.categorySortOrders)
+      setActiveComponentProductIds(activeComponentIds)
 
       const items = bomRes.error
         ? []
@@ -180,7 +191,7 @@ export function ProductBomModal({
       if (productRes.data && !productRes.error) {
         settings = parseProductBomSettings(productRes.data)
       } else if (items.length > 0) {
-        settings = inferSettingsFromItems(items)
+        settings = inferBomSettingsFromItems(items)
       }
       setBomSettings(settings)
       setDraftYieldPerBatch(String(settings.yield_per_batch ?? 1))
@@ -190,16 +201,24 @@ export function ProductBomModal({
 
       const brandName = selectedBrand.name.trim()
       if (brandName) {
+        const gfcComponentIds = new Set(gfcLoad.products.map((p) => p.id).filter(Boolean))
         for (const item of items) {
           const mat = item.material
           const linkedId = mat?.linked_product_id
           if (!mat?.id || !linkedId) continue
-          const linkedProduct = brandProducts.find(
-            (p) => (p.id || p.product_id) === linkedId
-          )
-          if (linkedProduct && isProductBomComponent(linkedProduct, categorySortOrders)) {
+          const linkedProduct =
+            brandProducts.find((p) => (p.id || p.product_id) === linkedId) ??
+            gfcLoad.products.find((p) => p.id === linkedId)
+          const sortOrders = gfcComponentIds.has(linkedId)
+            ? gfcLoad.categorySortOrders
+            : categorySortOrders
+          if (linkedProduct && isProductBomComponent(linkedProduct, sortOrders)) {
             try {
-              await syncBomComponentMaterialCatalogFields(mat.id, brandName)
+              const ownerNames =
+                gfcComponentIds.has(linkedId) && factoryBrand
+                  ? [factoryBrand.name, brandName]
+                  : [brandName]
+              await syncBomComponentMaterialCatalogFields(mat.id, ownerNames)
             } catch (syncErr) {
               console.warn('component material catalog sync:', syncErr)
             }
@@ -216,14 +235,39 @@ export function ProductBomModal({
 
   useEffect(() => {
     loadData()
-  }, [productId, selectedBrand.id])
+  }, [productId, selectedBrand.id, bomMaterialBrandId, showGfcComponentPicker])
 
-  const componentProducts = useMemo(() => {
+  const localComponentProducts = useMemo(() => {
+    const isFactoryBrandView = Boolean(factoryBrand && selectedBrand.id === factoryBrand.id)
     return brandProducts
       .filter((p) => isProductBomComponent(p, categorySortOrders))
+      .filter((p) => {
+        const id = p.id || p.product_id
+        if (!id) return false
+        // On GFC Main / factory, only list Components that are still in Factory → Components.
+        if (isFactoryBrandView) return activeComponentProductIds.has(id)
+        return true
+      })
       .map(toComponentProduct)
       .filter((p): p is BomComponentProduct => p != null)
-  }, [brandProducts, categorySortOrders])
+  }, [
+    brandProducts,
+    categorySortOrders,
+    activeComponentProductIds,
+    factoryBrand,
+    selectedBrand.id,
+  ])
+
+  const componentProducts = useMemo(() => {
+    const seen = new Set<string>()
+    const merged: BomComponentProduct[] = []
+    for (const p of [...localComponentProducts, ...gfcComponentProducts]) {
+      if (!p.id || seen.has(p.id)) continue
+      seen.add(p.id)
+      merged.push(p)
+    }
+    return merged
+  }, [localComponentProducts, gfcComponentProducts])
 
   const componentProductIds = useMemo(
     () => new Set(componentProducts.map((p) => p.id).filter(Boolean)),
@@ -254,22 +298,42 @@ export function ProductBomModal({
 
   const availableMaterials = useMemo(
     () =>
-      rawMaterials.filter(
-        (m) =>
-          !usedMaterialIds.has(m.id) &&
-          !(m.linked_product_id && componentProductIds.has(m.linked_product_id))
-      ),
-    [rawMaterials, usedMaterialIds, componentProductIds]
+      rawMaterials.filter((m) => {
+        if (usedMaterialIds.has(m.id)) return false
+        // Components belong in the Components optgroup when actively linked.
+        if (
+          isComponentMaterialCategory(m.category) &&
+          m.linked_product_id &&
+          activeComponentProductIds.has(m.linked_product_id)
+        ) {
+          return false
+        }
+        if (m.linked_product_id && componentProductIds.has(m.linked_product_id)) {
+          return false
+        }
+        return true
+      }),
+    [rawMaterials, usedMaterialIds, componentProductIds, activeComponentProductIds]
   )
 
-  const availableComponents = useMemo(
+  const availableLocalComponents = useMemo(
     () =>
-      componentProducts.filter((p) => {
+      localComponentProducts.filter((p) => {
         const id = p.id
         if (!id || id === productId) return false
         return !usedComponentProductIds.has(id)
       }),
-    [componentProducts, productId, usedComponentProductIds]
+    [localComponentProducts, productId, usedComponentProductIds]
+  )
+
+  const availableGfcComponents = useMemo(
+    () =>
+      gfcComponentProducts.filter((p) => {
+        const id = p.id
+        if (!id || id === productId) return false
+        return !usedComponentProductIds.has(id)
+      }),
+    [gfcComponentProducts, productId, usedComponentProductIds]
   )
 
   const totalCostPerUnit = useMemo(
@@ -304,6 +368,11 @@ export function ProductBomModal({
       return false
     }
     setBomSettings(next)
+    try {
+      await syncComponentCostFromBom(productId)
+    } catch (err) {
+      console.warn('syncComponentCostFromBom:', err)
+    }
     return true
   }
 
@@ -392,17 +461,29 @@ export function ProductBomModal({
     setSaving(true)
     try {
       let materialId = picked.id
-      if (picked.kind === 'component') {
+      if (picked.kind === 'component' || picked.kind === 'gfc-component') {
         const component = componentById.get(picked.id)
         if (!component) return
-        materialId = await ensureBomComponentMaterial(component, selectedBrand)
+        if (picked.kind === 'gfc-component' && factoryBrand) {
+          materialId = await ensureBomComponentMaterial(component, {
+            materialBrand: factoryBrand,
+            ownerBrandNames: [factoryBrand.name, selectedBrand.name],
+          })
+        } else {
+          materialId = await ensureBomComponentMaterial(component, selectedBrand)
+        }
       }
       const ok = await insertBomLine(materialId, displayQty, addNotes)
       if (!ok) return
       setLineToAdd('')
-      setAddQty('1')
+      setAddQty('')
       setAddNotes('')
       await loadData()
+      try {
+        await syncComponentCostFromBom(productId)
+      } catch (err) {
+        console.warn('syncComponentCostFromBom:', err)
+      }
     } catch (err) {
       console.error(err)
       alert('Could not add line. Run migrations/product-bom.sql if the table is missing.')
@@ -430,6 +511,11 @@ export function ProductBomModal({
       setBomItems((prev) =>
         prev.map((b) => (b.id === item.id ? { ...b, quantity } : b))
       )
+      try {
+        await syncComponentCostFromBom(productId)
+      } catch (err) {
+        console.warn('syncComponentCostFromBom:', err)
+      }
     } catch (err) {
       console.error(err)
       alert('Failed to update quantity.')
@@ -444,6 +530,11 @@ export function ProductBomModal({
       if (error) throw error
       const nextItems = bomItems.filter((b) => b.id !== itemId)
       setBomItems(nextItems)
+      try {
+        await syncComponentCostFromBom(productId)
+      } catch (err) {
+        console.warn('syncComponentCostFromBom:', err)
+      }
     } catch (err) {
       console.error(err)
       alert('Failed to remove line.')
@@ -458,17 +549,24 @@ export function ProductBomModal({
       ? rawMaterials.find((m) => m.id === pickedLine.id)
       : undefined
   const componentToAddRow =
-    pickedLine?.kind === 'component' ? componentById.get(pickedLine.id) : undefined
+    pickedLine?.kind === 'component' || pickedLine?.kind === 'gfc-component'
+      ? componentById.get(pickedLine.id)
+      : undefined
   const addQtyUnitLabel = materialToAddRow
     ? getBomDisplayUnitLabel(materialToAddRow)
     : componentToAddRow?.unit?.trim() || 'unit'
   const qtyColumnLabel = `Qty (${bomQtyBasisLabel(bomSettings.quantity_mode)}, ${addQtyUnitLabel})`
   const tableQtyColumnLabel = `Qty (${bomQtyBasisLabel(bomSettings.quantity_mode)})`
-  const canAddMoreLines = availableMaterials.length > 0 || availableComponents.length > 0
+  const canAddMoreLines =
+    availableMaterials.length > 0 ||
+    availableLocalComponents.length > 0 ||
+    availableGfcComponents.length > 0
+  const parsedAddQty = parseFloat(addQty)
+  const addQtyValid = addQty.trim() !== '' && Number.isFinite(parsedAddQty) && parsedAddQty > 0
 
   return (
-    <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-      <div className="relative top-10 mx-auto p-6 border w-11/12 md:w-[92%] lg:max-w-5xl shadow-lg rounded-lg bg-white max-h-[90vh] overflow-y-auto">
+    <Modal onClose={onClose} backdropClassName="bg-gray-600/50">
+      <div className="mx-auto p-6 border w-11/12 md:w-[92%] lg:max-w-5xl shadow-lg rounded-lg bg-white max-h-[90vh] overflow-y-auto">
         <div className="flex flex-wrap items-start justify-between gap-4 mb-4 pb-4 border-b border-gray-200">
           <div className="flex items-start gap-3 min-w-0">
             <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
@@ -547,8 +645,8 @@ export function ProductBomModal({
                       </label>
                       <input
                         type="number"
-                        min={0.0001}
-                        step="any"
+                        min={0}
+                        step={1}
                         value={draftYieldPerBatch}
                         onChange={(e) => setDraftYieldPerBatch(e.target.value)}
                         onBlur={applyYieldPerBatch}
@@ -567,58 +665,78 @@ export function ProductBomModal({
                   <div className="border-t border-gray-200 my-4" />
                   <h3 className="text-sm font-medium text-gray-800 mb-3">Add to BOM</h3>
                   <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1.5">Material</label>
-                    <select
-                      value={lineToAdd}
-                      onChange={(e) => setLineToAdd(e.target.value)}
-                      className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
-                      disabled={saving || !canAddMoreLines}
-                    >
-                      <option value="">
-                        {!canAddMoreLines
-                          ? 'No more lines to add'
-                          : 'Select material or component...'}
-                      </option>
-                      {availableMaterials.length > 0 && (
-                        <optgroup label="Raw materials">
-                          {availableMaterials.map((m) => (
-                            <option
-                              key={m.id}
-                              value={`material:${m.id}` satisfies BomLinePickerValue}
-                            >
-                              {m.sku ? `${m.sku} - ` : ''}
-                              {m.material_name} ({getBomDisplayUnitLabel(m)})
-                            </option>
-                          ))}
-                        </optgroup>
-                      )}
-                      {availableComponents.length > 0 && (
-                        <optgroup label="Components">
-                          {availableComponents.map((p) => (
-                            <option
-                              key={p.id}
-                              value={`component:${p.id}` satisfies BomLinePickerValue}
-                            >
-                              {p.sku ? `${p.sku} - ` : ''}
-                              {p.product_name || p.name} ({p.unit || 'pcs'})
-                            </option>
-                          ))}
-                        </optgroup>
-                      )}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1.5">{qtyColumnLabel}</label>
-                    <input
-                      type="number"
-                      min={0.0001}
-                      step="any"
-                      value={addQty}
-                      onChange={(e) => setAddQty(e.target.value)}
-                      className="w-full px-2 py-2 border rounded-lg text-sm bg-white"
-                      disabled={saving}
-                    />
+                  <div className="flex gap-2 items-end">
+                    <div className="min-w-0 flex-1">
+                      <label className="block text-xs text-gray-600 mb-1.5">Material</label>
+                      <select
+                        value={lineToAdd}
+                        onChange={(e) => setLineToAdd(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
+                        disabled={saving || !canAddMoreLines}
+                      >
+                        <option value="">
+                          {!canAddMoreLines
+                            ? 'No more lines to add'
+                            : 'Select item'}
+                        </option>
+                        {availableMaterials.length > 0 && (
+                          <optgroup label="Raw materials">
+                            {availableMaterials.map((m) => (
+                              <option
+                                key={m.id}
+                                value={`material:${m.id}` satisfies BomLinePickerValue}
+                              >
+                                {m.sku ? `${m.sku} - ` : ''}
+                                {m.material_name} ({getBomDisplayUnitLabel(m)})
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {availableLocalComponents.length > 0 && (
+                          <optgroup label="Components">
+                            {availableLocalComponents.map((p) => (
+                              <option
+                                key={p.id}
+                                value={`component:${p.id}` satisfies BomLinePickerValue}
+                              >
+                                {p.sku ? `${p.sku} - ` : ''}
+                                {p.product_name || p.name} ({p.unit || 'pcs'})
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {availableGfcComponents.length > 0 && factoryBrand && (
+                          <optgroup label={`${factoryBrand.name} — Components`}>
+                            {availableGfcComponents.map((p) => (
+                              <option
+                                key={p.id}
+                                value={`gfc-component:${p.id}` satisfies BomLinePickerValue}
+                              >
+                                {p.sku ? `${p.sku} - ` : ''}
+                                {p.product_name || p.name} ({p.unit || 'pcs'})
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                    </div>
+                    <div className="w-14 shrink-0">
+                      <label className="block text-xs text-gray-600 mb-1.5 truncate" title={qtyColumnLabel}>
+                        Qty
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={addQty}
+                        onChange={(e) => setAddQty(e.target.value)}
+                        className="w-full px-1 py-2 border rounded-lg text-sm bg-white tabular-nums text-center"
+                        disabled={saving}
+                        required
+                        placeholder="0"
+                        title={qtyColumnLabel}
+                      />
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs text-gray-600 mb-1.5">Notes</label>
@@ -633,7 +751,7 @@ export function ProductBomModal({
                   <button
                     type="button"
                     onClick={handleAddLine}
-                    disabled={saving || !lineToAdd}
+                    disabled={saving || !lineToAdd || !addQtyValid}
                     className={`flex items-center justify-center gap-1 w-full px-3 py-2 text-white text-sm rounded-lg disabled:opacity-50 ${themeClasses}`}
                   >
                     <Plus className="h-4 w-4" />
@@ -676,7 +794,7 @@ export function ProductBomModal({
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full divide-y divide-gray-200 text-sm min-w-[520px]">
+                <table className="w-full divide-y divide-gray-200 text-sm min-w-[440px]">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
@@ -690,9 +808,6 @@ export function ProductBomModal({
                       </th>
                       <th className="px-2 py-2 text-right text-xs font-medium text-gray-500 uppercase">
                         Cost
-                      </th>
-                      <th className="px-2 py-2 text-right text-xs font-medium text-gray-500 uppercase">
-                        Stock
                       </th>
                       {!guestMode && <th className="px-2 py-2 w-10" />}
                     </tr>
@@ -723,16 +838,12 @@ export function ProductBomModal({
                         : mat
                           ? getBomDisplayUnitLabel(mat)
                           : '—'
-                      const lineCost = lineCostPerProductUnit(item, bomSettings)
-                      const stockQty = isComponentLine
-                        ? computeProductAvailableStock(componentProduct!)
-                        : Number(mat?.current_stock) || 0
-                      const stockUnitLabel = isComponentLine
+                      const itemNameUnitLabel = isComponentLine
                         ? componentProduct?.unit?.trim() || 'pcs'
                         : mat
-                          ? getStockUnitLabel(mat)
+                          ? getPurchaseUnitLabel(mat)
                           : '—'
-                      const stockKindLabel = isComponentLine ? 'product' : 'procurement'
+                      const lineCost = lineCostPerProductUnit(item, bomSettings)
 
                       return (
                         <tr key={item.id} className="hover:bg-gray-50">
@@ -741,7 +852,7 @@ export function ProductBomModal({
                               {lineLabel}
                             </div>
                             <div className="text-xs text-gray-500">
-                              {displayUnit}
+                              {itemNameUnitLabel}
                               {isComponentLine ? (
                                 <span className="ml-1 text-violet-700">· component</span>
                               ) : null}
@@ -756,8 +867,8 @@ export function ProductBomModal({
                               <div className="inline-flex flex-col items-end gap-0.5">
                                 <input
                                   type="number"
-                                  min={0.0001}
-                                  step="any"
+                                  min={0}
+                                  step={1}
                                   defaultValue={displayQty}
                                   key={`${item.id}-q-${item.quantity}-${mat?.factory_bom_uom ?? 'base'}`}
                                   onBlur={(e) => {
@@ -782,19 +893,6 @@ export function ProductBomModal({
                           <td className="px-2 py-2 text-right tabular-nums text-gray-900 whitespace-nowrap">
                             {formatMoney(lineCost)}
                           </td>
-                          <td className="px-2 py-2 text-right text-gray-600 tabular-nums text-xs">
-                            {mat != null || isComponentLine ? (
-                              <>
-                                {formatQty(stockQty)}
-                                <span className="block text-[10px] text-gray-400">
-                                  {stockUnitLabel}
-                                  <span className="text-gray-300"> · {stockKindLabel}</span>
-                                </span>
-                              </>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
                           {!guestMode && (
                             <td className="px-2 py-2 text-right">
                               <button
@@ -813,10 +911,7 @@ export function ProductBomModal({
                   </tbody>
                   <tfoot className="bg-gray-50 border-t border-gray-200">
                     <tr>
-                      <td
-                        colSpan={guestMode ? 5 : 5}
-                        className="px-3 py-2.5 text-sm text-right"
-                      >
+                      <td colSpan={4} className="px-3 py-2.5 text-sm text-right">
                         <span className="font-semibold text-gray-900">Total cost per unit</span>
                         <span className="ml-4 font-semibold text-gray-900 tabular-nums">
                           {formatMoney(totalCostPerUnit)}
@@ -841,6 +936,6 @@ export function ProductBomModal({
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

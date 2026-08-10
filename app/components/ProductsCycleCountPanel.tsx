@@ -11,6 +11,7 @@ import {
   Play,
   History,
 } from 'lucide-react'
+import { Modal } from './Modal'
 import type { Brand, Product, ProductCycleCount, ProductCycleCountLine } from '../../lib/supabase'
 import {
   cancelProductCycleCount,
@@ -371,7 +372,7 @@ export function ProductsCycleCountPanel({
   const readOnly = view === 'posted'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
         <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-gray-200 bg-gradient-to-r from-slate-50 to-white shrink-0">
           <div>
@@ -408,7 +409,7 @@ export function ProductsCycleCountPanel({
                   Snapshots available stock for {countProducts.length} product
                   {countProducts.length === 1 ? '' : 's'}
                   {categoryScope == null
-                    ? ' in non index-0 categories'
+                    ? ' in finished product categories (excludes supplies and components)'
                     : ` in ${cycleCountScopeLabel(categoryScope)}`}
                   . Enter physical counts, then post to apply adjustments to initial stock.
                 </p>
@@ -763,6 +764,6 @@ export function ProductsCycleCountPanel({
           </>
         )}
       </div>
-    </div>
+    </Modal>
   )
 }

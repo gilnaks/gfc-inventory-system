@@ -368,9 +368,9 @@ export const TRANSFER_SHEET_PRINT_STYLES = `
 
   .total-section-three-col {
     display: grid;
-    grid-template-columns: 1fr minmax(220px, 34%) minmax(120px, 18%);
+    grid-template-columns: 1fr minmax(220px, 34%) minmax(132px, 20%);
     gap: 12px 16px;
-    align-items: start;
+    align-items: stretch;
   }
 
   .total-section-breakdown {
@@ -392,21 +392,33 @@ export const TRANSFER_SHEET_PRINT_STYLES = `
     border-left: 1px solid #000;
     padding-left: 12px;
     display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 108px;
+    align-items: stretch;
+    justify-content: stretch;
+    min-width: 0;
   }
 
   .total-qr-box {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
     text-align: center;
   }
 
   .total-qr-image {
-    width: 92px;
-    height: 92px;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    max-width: 100%;
+    object-fit: contain;
+    object-position: center top;
     display: block;
     border: 1px solid #000;
     background: #fff;
+    flex: 0 0 auto;
   }
 
   .total-qr-caption {
@@ -414,12 +426,17 @@ export const TRANSFER_SHEET_PRINT_STYLES = `
     font-size: 11px;
     font-weight: 900;
     text-transform: uppercase;
+    flex-shrink: 0;
   }
 
   .total-qr-empty {
     font-size: 11px;
     text-transform: uppercase;
     color: #000;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .total-grand-block {
@@ -639,4 +656,33 @@ export const TRANSFER_SHEET_PRINT_STYLES = `
       -webkit-font-smoothing: none !important;
     }
   }
+`
+
+/**
+ * Wait for QR/images to decode before opening the print dialog, then close after print/cancel.
+ * Fixes blank QR on the first Print Transfer Sheet click.
+ */
+export const TRANSFER_SHEET_PRINT_SCRIPT = `
+  window.addEventListener('afterprint', function () {
+    window.close();
+  });
+  function waitForImages() {
+    var imgs = Array.prototype.slice.call(document.images || []);
+    if (!imgs.length) return Promise.resolve();
+    return Promise.all(imgs.map(function (img) {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve();
+      return new Promise(function (resolve) {
+        img.onload = function () { resolve(); };
+        img.onerror = function () { resolve(); };
+      });
+    }));
+  }
+  window.addEventListener('load', function () {
+    waitForImages().then(function () {
+      setTimeout(function () {
+        window.focus();
+        window.print();
+      }, 50);
+    });
+  });
 `

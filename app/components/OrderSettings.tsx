@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
 import { Plus, Trash2, Save, X, MapPin, Building2, Key, AlertCircle, Settings, RefreshCw } from 'lucide-react'
+import { Modal } from './Modal'
 
 interface SavedBranch {
   id: string
@@ -139,7 +140,7 @@ export function OrderSettings({ currentLocation, onBranchSwitch, onClose }: Orde
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
         <div className="space-y-6 p-6">
       {/* Header */}
@@ -319,6 +320,6 @@ export function OrderSettings({ currentLocation, onBranchSwitch, onClose }: Orde
       )}
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

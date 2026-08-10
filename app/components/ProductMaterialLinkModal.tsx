@@ -13,6 +13,7 @@ import {
 } from '../../lib/product-material-link'
 import { getStockUnitLabel } from '../../lib/raw-material-uom'
 import { isProductConsumableSupply } from '../../lib/product-category-settings'
+import { Modal } from './Modal'
 
 interface ProductMaterialLinkModalProps {
   product: Product
@@ -29,6 +30,38 @@ function materialVisibleToBrand(material: RawMaterial, brand: Brand) {
   if (material.brand_id === brand.id) return true
   const owners = (material.owner ?? []).map((o) => o.trim()).filter(Boolean)
   return owners.includes(brand.name)
+}
+
+function ownerGroupKey(material: RawMaterial, selectedBrand: Brand): string {
+  const owners = (material.owner ?? []).map((o) => o.trim()).filter(Boolean)
+  if (owners.length === 0) return 'No owner'
+  if (owners.includes(selectedBrand.name)) return selectedBrand.name
+  return [...owners].sort((a, b) => a.localeCompare(b))[0]
+}
+
+function groupMaterialsByOwner(materials: RawMaterial[], selectedBrand: Brand) {
+  const groups = new Map<string, RawMaterial[]>()
+
+  for (const material of materials) {
+    const owner = ownerGroupKey(material, selectedBrand)
+    const list = groups.get(owner) ?? []
+    list.push(material)
+    groups.set(owner, list)
+  }
+
+  for (const list of Array.from(groups.values())) {
+    list.sort((a, b) => a.material_name.localeCompare(b.material_name))
+  }
+
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => {
+      if (a === selectedBrand.name) return -1
+      if (b === selectedBrand.name) return 1
+      if (a === 'No owner') return 1
+      if (b === 'No owner') return -1
+      return a.localeCompare(b)
+    })
+    .map(([owner, items]) => ({ owner, materials: items }))
 }
 
 export function ProductMaterialLinkModal({
@@ -88,6 +121,11 @@ export function ProductMaterialLinkModal({
     loadMaterials()
   }, [loadMaterials])
 
+  const materialsByOwner = useMemo(
+    () => groupMaterialsByOwner(materials, selectedBrand),
+    [materials, selectedBrand]
+  )
+
   const selectedMaterial = useMemo(
     () => materials.find((m) => m.id === materialId),
     [materials, materialId]
@@ -135,7 +173,7 @@ export function ProductMaterialLinkModal({
       : ''
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-lg max-w-sm w-full max-h-[90vh] flex flex-col overflow-hidden shadow-xl">
         <div className="p-5 border-b shrink-0 flex items-start justify-between gap-3">
           <div>
@@ -181,11 +219,15 @@ export function ProductMaterialLinkModal({
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm disabled:bg-gray-50"
               >
                 <option value="">Select material…</option>
-                {materials.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.material_name} ({m.unit})
-                    {m.sku ? ` · ${m.sku}` : ''}
-                  </option>
+                {materialsByOwner.map(({ owner, materials: ownerMaterials }) => (
+                  <optgroup key={owner} label={owner}>
+                    {ownerMaterials.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.material_name} ({m.unit})
+                        {m.sku ? ` · ${m.sku}` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             )}
@@ -259,6 +301,6 @@ export function ProductMaterialLinkModal({
           ) : null}
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

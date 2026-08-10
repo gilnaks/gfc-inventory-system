@@ -1,5 +1,6 @@
 'use client'
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef, type ReactNode, type FocusEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { supabase, Product, Brand } from '../../lib/supabase'
 import {
   Plus,
@@ -9,6 +10,7 @@ import {
   X,
   Package,
   Eye,
+  EyeOff,
   FileText,
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -18,6 +20,7 @@ import {
 import { ProductsCycleCountPanel } from './ProductsCycleCountPanel'
 import type { ProductCycleCountScope } from '../../lib/product-cycle-count'
 import { ProductBomModal } from './ProductBomModal'
+import { Modal } from './Modal'
 import { ProductMaterialLinkModal } from './ProductMaterialLinkModal'
 import { ProductMaterialReceiveModal } from './ProductMaterialReceiveModal'
 import { ProductComponentExportModal } from './ProductComponentExportModal'
@@ -26,6 +29,12 @@ import {
   getAvailableStockTextClass,
   isAvailableCritical,
 } from '../../lib/product-stock-level'
+import {
+  loadProductStockByBranch,
+  type BranchQty,
+  type ProductStockByBranch,
+} from '../../lib/product-stock-by-branch'
+import { isDashboardRole, isDeveloperRole } from '../../lib/dashboard-roles'
 import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
 import {
   categorySortKey,
@@ -36,9 +45,16 @@ import {
   isProductConsumableSupply,
   isProductBomComponent,
   isBomComponentProductCategory,
+  isConsumableSupplyCategory,
+  usesCategoryScopedCycleCount,
   CATEGORY_SORT_INDEX_HELP_LINES,
 } from '../../lib/product-category-settings'
-import { deleteLinkedComponentMaterials } from '../../lib/product-bom-component'
+import {
+  deleteLinkedComponentMaterials,
+  ensureBomComponentMaterial,
+} from '../../lib/product-bom-component'
+import { isFactoryBrand } from '../../lib/brand-roles'
+import { loadGfcProductDestinations } from '../../lib/gfc-production-catalog'
 
 interface ProductManagerProps {
   selectedBrand: Brand | null
@@ -60,12 +76,13 @@ function categorySortRank(displayName: string, sortIndex: number | undefined): n
 function categoryHeaderThemeClasses(
   theme: string,
   sortIndex: number | undefined
-): { bar: string; title: string; editBtn: string } {
+): { bar: string; title: string; editBtn: string; badge: string } {
   if (sortIndex === 0) {
     return {
       bar: 'bg-gray-100 border-gray-200 hover:bg-gray-50',
       title: 'text-gray-800',
       editBtn: 'text-gray-600 hover:bg-gray-200',
+      badge: 'text-gray-600',
     }
   }
   const dark = isBomComponentProductCategory(sortIndex)
@@ -75,11 +92,13 @@ function categoryHeaderThemeClasses(
           bar: 'bg-green-200 border-green-300 hover:bg-green-100',
           title: 'text-green-950',
           editBtn: 'text-green-800 hover:bg-green-300',
+          badge: 'text-green-800',
         }
       : {
           bar: 'bg-green-100 border-green-200 hover:bg-green-50',
           title: 'text-green-900',
           editBtn: 'text-green-700 hover:bg-green-200',
+          badge: 'text-green-700',
         }
   }
   if (theme === 'red') {
@@ -88,11 +107,13 @@ function categoryHeaderThemeClasses(
           bar: 'bg-red-200 border-red-300 hover:bg-red-100',
           title: 'text-red-950',
           editBtn: 'text-red-800 hover:bg-red-300',
+          badge: 'text-red-800',
         }
       : {
           bar: 'bg-red-100 border-red-200 hover:bg-red-50',
           title: 'text-red-900',
           editBtn: 'text-red-700 hover:bg-red-200',
+          badge: 'text-red-700',
         }
   }
   if (theme === 'yellow') {
@@ -101,11 +122,13 @@ function categoryHeaderThemeClasses(
           bar: 'bg-yellow-200 border-yellow-300 hover:bg-yellow-100',
           title: 'text-yellow-950',
           editBtn: 'text-yellow-800 hover:bg-yellow-300',
+          badge: 'text-yellow-800',
         }
       : {
           bar: 'bg-yellow-100 border-yellow-200 hover:bg-yellow-50',
           title: 'text-yellow-900',
           editBtn: 'text-yellow-700 hover:bg-yellow-200',
+          badge: 'text-yellow-700',
         }
   }
   return dark
@@ -113,12 +136,61 @@ function categoryHeaderThemeClasses(
         bar: 'bg-blue-200 border-blue-300 hover:bg-blue-100',
         title: 'text-blue-950',
         editBtn: 'text-blue-800 hover:bg-blue-300',
+        badge: 'text-blue-800',
       }
     : {
         bar: 'bg-blue-100 border-blue-200 hover:bg-blue-50',
         title: 'text-blue-900',
         editBtn: 'text-blue-700 hover:bg-blue-200',
+        badge: 'text-blue-700',
       }
+}
+
+type ProductCategoryGroup = {
+  category: string
+  sortIndex: number | undefined
+  products: Product[]
+}
+
+function gfcInventoryDisplayName(
+  gfcName: string | undefined,
+  brandName: string | undefined,
+  retailName: string | undefined
+): string {
+  if (retailName?.trim()) return retailName.trim()
+  const name = gfcName?.trim() || ''
+  if (brandName && name.startsWith(`${brandName} — `)) {
+    return name.slice(brandName.length + 3)
+  }
+  return name
+}
+
+function groupProductsByCategory(
+  items: Product[],
+  categorySortOrders: Record<string, number>
+): ProductCategoryGroup[] {
+  const grouped = items.reduce(
+    (acc, product) => {
+      const category = productCategoryDisplayName(product.category)
+      if (!acc[category]) acc[category] = []
+      acc[category].push(product)
+      return acc
+    },
+    {} as Record<string, Product[]>
+  )
+
+  return Object.keys(grouped)
+    .sort((a, b) => {
+      const rankA = categorySortRank(a, categorySortOrders[a])
+      const rankB = categorySortRank(b, categorySortOrders[b])
+      if (rankA !== rankB) return rankA - rankB
+      return a.localeCompare(b)
+    })
+    .map((category) => ({
+      category,
+      sortIndex: categorySortOrders[category],
+      products: grouped[category],
+    }))
 }
 
 function isNewCategoryName(
@@ -132,6 +204,240 @@ function isNewCategoryName(
   if (existingCategories.some((c) => c.toLowerCase() === trimmed.toLowerCase())) return false
   if (sortOrders[display] !== undefined) return false
   return true
+}
+
+type ProductTableSkeletonColumn =
+  | {
+      width: string
+      headerWidth: string
+      cell: { kind: 'text'; width: string }
+    }
+  | {
+      width: string
+      headerWidth: string
+      cell: { kind: 'actions'; buttonCount: number }
+    }
+
+const PRODUCT_NAME_SKELETON_WIDTHS = [
+  'max-w-[7rem]',
+  'max-w-[9rem]',
+  'max-w-[5.5rem]',
+  'max-w-[8rem]',
+  'max-w-[6rem]',
+  'max-w-[9.5rem]',
+  'max-w-[5rem]',
+  'max-w-[7.5rem]',
+  'max-w-[8.5rem]',
+  'max-w-[6.5rem]',
+] as const
+
+const PRODUCT_TABLE_SKELETON_COLUMNS: ProductTableSkeletonColumn[] = [
+  {
+    width: '18%',
+    headerWidth: 'w-28',
+    cell: { kind: 'text', width: 'w-full max-w-[9rem]' },
+  },
+  {
+    width: '12%',
+    headerWidth: 'w-10',
+    cell: { kind: 'text', width: 'w-full max-w-[5.5rem]' },
+  },
+  {
+    width: '8%',
+    headerWidth: 'w-8',
+    cell: { kind: 'text', width: 'w-full max-w-[2.75rem]' },
+  },
+  {
+    width: '8%',
+    headerWidth: 'w-10',
+    cell: { kind: 'text', width: 'w-full max-w-[3.25rem]' },
+  },
+  {
+    width: '8%',
+    headerWidth: 'w-14',
+    cell: { kind: 'text', width: 'w-full max-w-[2rem]' },
+  },
+  {
+    width: '7%',
+    headerWidth: 'w-8',
+    cell: { kind: 'text', width: 'w-full max-w-[2rem]' },
+  },
+  {
+    width: '7%',
+    headerWidth: 'w-6',
+    cell: { kind: 'text', width: 'w-full max-w-[2rem]' },
+  },
+  {
+    width: '8%',
+    headerWidth: 'w-16',
+    cell: { kind: 'text', width: 'w-full max-w-[2rem]' },
+  },
+  {
+    width: '7%',
+    headerWidth: 'w-6',
+    cell: { kind: 'text', width: 'w-full max-w-[2rem]' },
+  },
+  {
+    width: '17%',
+    headerWidth: 'w-14',
+    cell: { kind: 'text', width: 'w-full max-w-[2rem]' },
+  },
+]
+
+const PRODUCT_TABLE_ACTIONS_SKELETON_COLUMN: ProductTableSkeletonColumn = {
+  width: '13%',
+  headerWidth: 'w-14',
+  cell: { kind: 'actions', buttonCount: 3 },
+}
+
+function productTableSkeletonColumns(guestMode: boolean) {
+  if (guestMode) return PRODUCT_TABLE_SKELETON_COLUMNS
+
+  const adminColumns = PRODUCT_TABLE_SKELETON_COLUMNS.map((col) => ({ ...col }))
+  adminColumns[0] = { ...adminColumns[0], width: '16%' }
+  adminColumns[1] = { ...adminColumns[1], width: '10%' }
+  adminColumns[9] = { ...adminColumns[9], width: '8%' }
+  return [...adminColumns, PRODUCT_TABLE_ACTIONS_SKELETON_COLUMN]
+}
+
+function ProductInventoryTableSkeleton({
+  guestMode,
+  rows = 10,
+}: {
+  guestMode: boolean
+  rows?: number
+}) {
+  const columns = productTableSkeletonColumns(guestMode)
+
+  return (
+    <table className="w-full table-fixed divide-y divide-gray-200">
+      <colgroup>
+        {columns.map((col, index) => (
+          <col key={`col-${index}`} style={{ width: col.width }} />
+        ))}
+      </colgroup>
+      <thead className="bg-gray-50">
+        <tr>
+          {columns.map((col, index) => (
+            <th
+              key={`header-${index}`}
+              className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500"
+            >
+              <div className={`h-3 rounded ${col.headerWidth} max-w-full bg-gray-200 animate-pulse`} />
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-gray-200 bg-white">
+        {Array.from({ length: rows }).map((_, rowIndex) => (
+          <tr key={rowIndex}>
+            {columns.map((col, cellIndex) => (
+              <td key={cellIndex} className="px-6 py-2 h-10 whitespace-nowrap">
+                {col.cell.kind === 'actions' ? (
+                  <div className="flex items-center gap-2">
+                    {Array.from({ length: col.cell.buttonCount }).map((_, buttonIndex) => (
+                      <div
+                        key={buttonIndex}
+                        className="h-6 w-6 shrink-0 rounded bg-gray-200 animate-pulse"
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div
+                    className={`h-5 rounded bg-gray-200 animate-pulse ${
+                      cellIndex === 0
+                        ? `w-full ${PRODUCT_NAME_SKELETON_WIDTHS[rowIndex % PRODUCT_NAME_SKELETON_WIDTHS.length]}`
+                        : col.cell.width
+                    }`}
+                  />
+                )}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function categoryHeaderSkeletonClasses(theme: string) {
+  const headerTheme = categoryHeaderThemeClasses(theme, 1)
+  const pulseColor =
+    theme === 'green'
+      ? 'bg-green-300'
+      : theme === 'red'
+        ? 'bg-red-300'
+        : theme === 'yellow'
+          ? 'bg-yellow-300'
+          : 'bg-blue-300'
+
+  return { bar: headerTheme.bar, pulseColor }
+}
+
+function BranchQtyHoverTooltip({
+  title,
+  rows,
+  emptyLabel,
+  children,
+  className = '',
+}: {
+  title: string
+  rows: BranchQty[]
+  emptyLabel?: string
+  children: ReactNode
+  className?: string
+}) {
+  const [tooltip, setTooltip] = useState<{ x: number; y: number } | null>(null)
+
+  const showTooltip = (e: FocusEvent<HTMLElement> | ReactMouseEvent<HTMLElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setTooltip({ x: rect.left + rect.width / 2, y: rect.top })
+  }
+
+  return (
+    <>
+      <span
+        className={`inline-flex cursor-help ${className}`}
+        onMouseEnter={showTooltip}
+        onMouseLeave={() => setTooltip(null)}
+        onFocus={showTooltip}
+        onBlur={() => setTooltip(null)}
+        tabIndex={0}
+      >
+        {children}
+      </span>
+      {tooltip &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="fixed z-[9999] pointer-events-none -translate-x-1/2 -translate-y-full rounded-md bg-gray-900 px-2.5 py-2 text-xs text-white shadow-lg max-w-xs"
+            style={{ left: tooltip.x, top: tooltip.y - 6 }}
+            role="tooltip"
+          >
+            <p className="font-semibold mb-1">{title}</p>
+            {rows.length === 0 ? (
+              <p className="text-gray-300">{emptyLabel || 'No open orders by branch'}</p>
+            ) : (
+              <ul className="space-y-0.5">
+                {rows.map((row) => (
+                  <li key={row.locationId} className="flex justify-between gap-4 tabular-nums">
+                    <span className="text-gray-200 truncate">{row.locationName}</span>
+                    <span className="font-medium shrink-0">{row.quantity.toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>,
+          document.body
+        )}
+    </>
+  )
+}
+
+const EMPTY_STOCK_BY_BRANCH: ProductStockByBranch = {
+  byProduct: {},
+  releasedTotals: [],
+  reservedTotals: [],
 }
 
 export function ProductManager({
@@ -194,11 +500,21 @@ export function ProductManager({
     scopeDescription: string
     groupByCategory: boolean
   } | null>(null)
+  const [stockByBranch, setStockByBranch] = useState<ProductStockByBranch>(EMPTY_STOCK_BY_BRANCH)
+  /** Developer can edit all product fields; others only name + price. */
+  const [fullProductEdit, setFullProductEdit] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const role = localStorage.getItem('dashboard_role')
+    setFullProductEdit(isDashboardRole(role) && isDeveloperRole(role))
+  }, [])
   const [newCategorySortIndex, setNewCategorySortIndex] = useState('')
   const [newCategoryShowOnOrder, setNewCategoryShowOnOrder] = useState(true)
   const [newCategoryRemoteStore, setNewCategoryRemoteStore] = useState(false)
   const [addProductPrice, setAddProductPrice] = useState('')
   const [addProductInitialStock, setAddProductInitialStock] = useState('')
+  const isGfcInventory = isFactoryBrand(selectedBrand)
 
   const resetAddProductForm = useCallback(() => {
     setNewProduct({
@@ -569,7 +885,7 @@ export function ProductManager({
 
   useEffect(() => {
     // Close dropdown when clicking outside
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: globalThis.MouseEvent) => {
       const target = event.target as Element
       if (showCategoryDropdown && !target.closest('.category-dropdown')) {
         setShowCategoryDropdown(false)
@@ -680,21 +996,55 @@ export function ProductManager({
       const rows = data || []
       console.log('Products fetched successfully:', rows.length, 'items')
 
-      const productsWithCalculations = rows.map((product) => ({
-        ...product,
-        product_name: product.name,
-        brand_name: selectedBrand.name,
-        brand_slug: selectedBrand.slug,
-        final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
-        available_stock:
-          (product.initial_stock || 0) +
-          (product.production || 0) -
-          (product.released || 0) -
-          (product.reserved || 0),
-      }))
+      let destinationByProductId = new Map<
+        string,
+        { id: string; brandName: string; retailProductName: string }
+      >()
+      if (isFactoryBrand(selectedBrand)) {
+        const destinations = await loadGfcProductDestinations()
+        destinationByProductId = new Map(
+          Array.from(destinations.entries()).map(([gfcId, dest]) => [
+            gfcId,
+            {
+              id: dest.retail_brand_id,
+              brandName: dest.retail_brand_name,
+              retailProductName: dest.retail_product_name,
+            },
+          ])
+        )
+      }
+
+      const productsWithCalculations = rows.map((product) => {
+        const dest = destinationByProductId.get(product.id)
+        const displayName = gfcInventoryDisplayName(
+          product.name,
+          dest?.brandName,
+          dest?.retailProductName
+        )
+        return {
+          ...product,
+          product_name: displayName,
+          brand_name: dest?.brandName || selectedBrand.name,
+          brand_slug: selectedBrand.slug,
+          destination_brand_id: dest?.id,
+          destination_brand_name: dest?.brandName,
+          final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
+          available_stock:
+            (product.initial_stock || 0) +
+            (product.production || 0) -
+            (product.released || 0) -
+            (product.reserved || 0),
+        }
+      })
 
       setProducts(productsWithCalculations)
       await fetchCategorySortOrders(selectedBrand.id)
+      try {
+        setStockByBranch(await loadProductStockByBranch(selectedBrand.id))
+      } catch (branchErr) {
+        console.warn('Failed to load Rel/Res by branch:', branchErr)
+        setStockByBranch(EMPTY_STOCK_BY_BRANCH)
+      }
     } catch (error) {
       console.error('Error fetching products:', error)
       alert('Failed to load products. Please check your internet connection and try again.')
@@ -703,37 +1053,36 @@ export function ProductManager({
     }
   }
 
-  // Memoized grouped products calculation
-  const groupedProducts = useMemo(() => {
-    const grouped = products.reduce((acc, product) => {
-      const category = productCategoryDisplayName(product.category)
-      if (!acc[category]) {
-        acc[category] = []
-      }
-      acc[category].push(product)
-      return acc
-    }, {} as Record<string, Product[]>)
+  const groupedProducts = useMemo(
+    () => groupProductsByCategory(products, categorySortOrders),
+    [products, categorySortOrders]
+  )
 
-    const sortedCategories = Object.keys(grouped).sort((a, b) => {
-      const rankA = categorySortRank(a, categorySortOrders[a])
-      const rankB = categorySortRank(b, categorySortOrders[b])
-      if (rankA !== rankB) return rankA - rankB
-      return a.localeCompare(b)
-    })
+  const inventoryBrandGroups = useMemo(() => {
+    const categories = isGfcInventory
+      ? groupedProducts.filter((g) => !isBomComponentProductCategory(g.sortIndex))
+      : groupedProducts
+    return [
+      {
+        brandName: selectedBrand?.name ?? '',
+        categories,
+      },
+    ]
+  }, [groupedProducts, selectedBrand?.name, isGfcInventory])
 
-    return sortedCategories.map((category) => ({
-      category,
-      sortIndex: categorySortOrders[category],
-      products: grouped[category],
-    }))
-  }, [products, categorySortOrders])
+  const factoryComponentCategoryCount = useMemo(() => {
+    if (!isGfcInventory) return 0
+    return groupedProducts.filter((g) => isBomComponentProductCategory(g.sortIndex)).length
+  }, [groupedProducts, isGfcInventory])
 
   const mainCycleCountProducts = useMemo(
     () =>
-      groupedProducts
-        .filter((g) => g.sortIndex !== 0)
+      inventoryBrandGroups
+        .flatMap((g) => g.categories)
+        .filter((g) => !usesCategoryScopedCycleCount(g.sortIndex))
+        .filter((g) => categoryPortalSettings[g.category]?.show_on_order_portal !== false)
         .flatMap((g) => g.products),
-    [groupedProducts]
+    [inventoryBrandGroups, categoryPortalSettings]
   )
 
   const handleAddProduct = async (e: React.FormEvent) => {
@@ -820,8 +1169,18 @@ export function ProductManager({
         }
         setProducts(prev => [...prev, computedProduct])
 
-        if (addingNewCategory) {
-          const { error: sortError } = await supabase.from('product_category_sort').upsert(
+        const effectiveSortIndex = addingNewCategory
+          ? newCategorySortIndexValue
+          : categorySortOrders[newCategoryDisplay]
+        const isComponent = isBomComponentProductCategory(effectiveSortIndex)
+        const isConsumable = isConsumableSupplyCategory(effectiveSortIndex)
+
+        resetAddProductForm()
+        setShowAddForm(false)
+
+        void (async () => {
+          if (addingNewCategory) {
+            const { error: sortError } = await supabase.from('product_category_sort').upsert(
             {
               brand_id: selectedBrand.id,
               category_name: categorySortKey(newCategoryDisplay),
@@ -858,10 +1217,50 @@ export function ProductManager({
               return [...prev, newCategoryDisplay].sort((a, b) => a.localeCompare(b))
             })
           }
-        }
+          }
 
-        resetAddProductForm()
-        setShowAddForm(false)
+          if (guestMode) return
+
+          if (isComponent) {
+            try {
+              await ensureBomComponentMaterial(
+                {
+                  id: newProductData.id,
+                  product_id: newProductData.id,
+                  product_name: newProductData.name,
+                  name: newProductData.name,
+                  sku: newProductData.sku,
+                  unit: newProductData.unit,
+                  price: newProductData.price,
+                },
+                selectedBrand
+              )
+            } catch (componentErr) {
+              console.warn('component material link:', componentErr)
+            }
+          }
+
+          if (initialStock > 0 && price > 0 && !isConsumable) {
+            try {
+              const { postProductOpeningStockJournalWithNotice } = await import(
+                '../../lib/accounting-product-posting'
+              )
+              await postProductOpeningStockJournalWithNotice(
+                newProductData.id,
+                selectedBrand.id,
+                currentUsername.trim() || 'Dashboard',
+                {
+                  quantity: initialStock,
+                  unitCost: price,
+                  unit: newProduct.unit,
+                  productName: newProductData.name,
+                }
+              )
+            } catch (journalErr) {
+              console.error('Product opening stock journal failed:', journalErr)
+            }
+          }
+        })()
       }
     } catch (error) {
       console.error('Error adding product:', error)
@@ -870,27 +1269,47 @@ export function ProductManager({
   }
 
   const handleUpdateProduct = useCallback(async (product: Product) => {
-    // Clear any existing timeout
     if (updateTimeout) {
       clearTimeout(updateTimeout)
     }
-    
-    // Debounce the update to prevent excessive API calls
+
+    const original = products.find((p) => p.id === product.id)
+    const previousInitialStock = original?.initial_stock ?? 0
+    const newInitialStock = product.initial_stock ?? 0
+    const stockDelta = newInitialStock - previousInitialStock
+    const categoryDisplay = productCategoryDisplayName(product.category)
+    const sortIndex = categorySortOrders[categoryDisplay]
+    const isConsumable = isConsumableSupplyCategory(sortIndex)
+    const unitCost = Number(product.price) || 0
+    const shouldPostStockAdjustment =
+      fullProductEdit &&
+      !guestMode &&
+      selectedBrand &&
+      stockDelta !== 0 &&
+      !isConsumable &&
+      unitCost > 0
+
     const timeout = setTimeout(async () => {
       try {
+        const updatePayload = fullProductEdit
+          ? {
+              name: product.name,
+              sku: product.sku,
+              category: product.category,
+              price: product.price,
+              initial_stock: product.initial_stock,
+              production: product.production,
+              released: product.released,
+              reserved: product.reserved,
+            }
+          : {
+              name: product.name,
+              price: product.price,
+            }
+
         const { data, error } = await supabase
           .from('products')
-          .update({
-            name: product.name,
-            sku: product.sku,
-            category: product.category,
-            unit: product.unit,
-            price: product.price,
-            initial_stock: product.initial_stock,
-            production: product.production,
-            released: product.released,
-            reserved: product.reserved
-          })
+          .update(updatePayload)
           .eq('id', product.id)
           .select()
 
@@ -901,28 +1320,85 @@ export function ProductManager({
         }
 
         if (data) {
-          // Update local state immediately for better UX
+          const saved = data[0]
           setProducts(prev => prev.map(p => 
             p.id === product.id 
               ? {
                   ...p,
-                  ...product,
-                  product_name: product.name,
-                  final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
-                  available_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0) - (product.reserved || 0)
+                  ...(fullProductEdit ? product : { name: product.name, price: product.price }),
+                  ...(!fullProductEdit && saved
+                    ? { name: saved.name, price: saved.price }
+                    : {}),
+                  product_name: fullProductEdit ? product.name : (saved?.name ?? product.name),
+                  final_stock: fullProductEdit
+                    ? (product.initial_stock || 0) + (product.production || 0) - (product.released || 0)
+                    : p.final_stock,
+                  available_stock: fullProductEdit
+                    ? (product.initial_stock || 0) +
+                      (product.production || 0) -
+                      (product.released || 0) -
+                      (product.reserved || 0)
+                    : p.available_stock,
                 }
               : p
           ))
           setEditingProduct(null)
+
+          if (fullProductEdit && shouldPostStockAdjustment && selectedBrand) {
+            void (async () => {
+              try {
+                const amount = Math.round(Math.abs(stockDelta) * unitCost * 100) / 100
+                const { data: adjustment, error: adjustmentErr } = await supabase
+                  .from('product_stock_adjustments')
+                  .insert({
+                    brand_id: selectedBrand.id,
+                    product_id: product.id,
+                    previous_initial_stock: previousInitialStock,
+                    new_initial_stock: newInitialStock,
+                    quantity_delta: stockDelta,
+                    unit_cost: unitCost,
+                    amount,
+                    unit: product.unit || null,
+                    created_by: currentUsername.trim() || 'Dashboard',
+                  })
+                  .select('id')
+                  .single()
+
+                if (adjustmentErr || !adjustment) {
+                  throw adjustmentErr || new Error('Could not record stock adjustment.')
+                }
+
+                const { postProductStockAdjustmentJournalWithNotice } = await import(
+                  '../../lib/accounting-product-posting'
+                )
+                await postProductStockAdjustmentJournalWithNotice(
+                  adjustment.id,
+                  selectedBrand.id,
+                  currentUsername.trim() || 'Dashboard',
+                  product.name
+                )
+              } catch (adjustmentErr) {
+                console.error('Product stock adjustment failed:', adjustmentErr)
+              }
+            })()
+          }
         }
       } catch (error) {
         console.error('Error updating product:', error)
         alert('Error updating product')
       }
-    }, 500) // 500ms debounce
-    
+    }, 500)
+
     setUpdateTimeout(timeout)
-  }, [updateTimeout])
+  }, [
+    updateTimeout,
+    products,
+    guestMode,
+    selectedBrand,
+    categorySortOrders,
+    currentUsername,
+    fullProductEdit,
+  ])
 
   const handleSaveAllProduction = async () => {
     if (!selectedBrand) return
@@ -1216,11 +1692,19 @@ export function ProductManager({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">
-            Product Inventory
+            {isGfcInventory ? 'Finished Goods Inventory' : 'Product Inventory'}
           </h1>
           <p className="text-sm text-gray-600">
-            Manage finished goods and stock levels for {selectedBrand.name}
+            {isGfcInventory
+              ? 'GFC finished goods inventory'
+              : `Manage finished goods and stock levels for ${selectedBrand.name}`}
           </p>
+          {isGfcInventory && factoryComponentCategoryCount > 0 ? (
+            <p className="text-xs text-indigo-800 bg-indigo-50 border border-indigo-200 rounded-md px-3 py-2 mt-2 max-w-xl">
+              Manufacturable components are managed in <strong>Factory → Components</strong>, not
+              here.
+            </p>
+          ) : null}
         </div>
         {!guestMode && (
         <div className="flex flex-wrap gap-2 sm:gap-3">
@@ -1232,7 +1716,7 @@ export function ProductManager({
                   products: mainCycleCountProducts,
                   categoryScope: null,
                   scopeTitle: 'Product cycle count',
-                  scopeDescription: 'Non index-0 categories',
+                  scopeDescription: 'Finished products (excludes supplies and components)',
                   groupByCategory: true,
                 })
               }
@@ -1318,7 +1802,13 @@ export function ProductManager({
 
       {/* Add Product Modal */}
       {showAddForm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <Modal
+          onClose={() => {
+            setShowAddForm(false)
+            resetAddProductForm()
+          }}
+          align="center"
+        >
           <div className="bg-white rounded-lg w-full max-w-md shadow-xl max-h-[90vh] overflow-y-auto p-5">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Add New Product</h3>
@@ -1542,59 +2032,28 @@ export function ProductManager({
               </div>
             </form>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Products List */}
       {loading ? (
         <div className="space-y-6">
           {/* Skeleton for each category */}
-          {[...Array(2)].map((_, categoryIndex) => (
+          {[...Array(2)].map((_, categoryIndex) => {
+            const { bar, pulseColor } = categoryHeaderSkeletonClasses(theme)
+            return (
             <div key={categoryIndex} className="bg-white rounded-lg border shadow-sm overflow-hidden">
               {/* Category header skeleton */}
-              <div className={`px-6 py-3 border-b ${
-                theme === 'green' ? 'bg-green-100 border-green-200' :
-                theme === 'red' ? 'bg-red-100 border-red-200' :
-                theme === 'yellow' ? 'bg-yellow-100 border-yellow-200' :
-                'bg-blue-100 border-blue-200'
-              }`}>
+              <div className={`px-6 py-3 border-b ${bar}`}>
                 <div className="animate-pulse">
-                  <div className={`h-6 rounded w-48 ${
-                    theme === 'green' ? 'bg-green-200' :
-                    theme === 'red' ? 'bg-red-200' :
-                    theme === 'yellow' ? 'bg-yellow-200' :
-                    'bg-blue-200'
-                  }`}></div>
+                  <div className={`h-6 rounded w-48 max-w-full ${pulseColor}`} />
                 </div>
               </div>
               
               {/* Table skeleton */}
-              <div>
-                <table className="w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      {[...Array(guestMode ? 10 : 11)].map((_, i) => (
-                        <th key={i} className="px-6 py-3 text-left">
-                          <div className="h-4 bg-gray-200 rounded w-16 animate-pulse"></div>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {[...Array(3)].map((_, rowIndex) => (
-                      <tr key={rowIndex}>
-                        {[...Array(guestMode ? 10 : 11)].map((_, cellIndex) => (
-                          <td key={cellIndex} className="px-6 py-2 whitespace-nowrap">
-                            <div className="h-4 bg-gray-200 rounded w-20 animate-pulse"></div>
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <ProductInventoryTableSkeleton guestMode={guestMode} />
             </div>
-          ))}
+          )})}
         </div>
       ) : products.length === 0 ? (
         <div className="text-center py-8 text-gray-500">
@@ -1607,11 +2066,29 @@ export function ProductManager({
         </div>
       ) : (
         <div className="space-y-6">
-          {groupedProducts.map(({ category, sortIndex, products: categoryProducts }) => {
-            const isZeroIndexCategory = sortIndex === 0
-            const headerTheme = categoryHeaderThemeClasses(theme, sortIndex)
+          {isGfcInventory &&
+          inventoryBrandGroups.every((g) => g.categories.every((c) => c.products.length === 0)) ? (
+            <div className="text-center py-8 text-gray-500">
+              <p>No finished goods in GFC inventory</p>
+              <p className="text-sm">Add products in the GFC production catalog.</p>
+            </div>
+          ) : (
+          <div className="space-y-8">
+          {inventoryBrandGroups.map((brandGroup) => {
+            const groupTheme = isGfcInventory ? 'blue' : theme
             return (
-            <div key={category} className="bg-white rounded-lg border shadow-sm overflow-hidden hover:shadow-md transition-shadow duration-200 ease-in-out">
+            <div key={brandGroup.brandName} className="space-y-4">
+              <div className="space-y-6">
+          {brandGroup.categories.map(({ category, sortIndex, products: categoryProducts }) => {
+            const isComponentCategory = isBomComponentProductCategory(sortIndex)
+            const headerTheme = categoryHeaderThemeClasses(groupTheme, sortIndex)
+            const showCategoryCycleCount =
+              usesCategoryScopedCycleCount(sortIndex) &&
+              categoryProducts.length > 0 &&
+              (isComponentCategory ||
+                categoryPortalSettings[category]?.show_on_order_portal !== false)
+            return (
+            <div key={`${brandGroup.brandName}-${category}`} className="bg-white rounded-lg border shadow-sm overflow-hidden hover:shadow-md transition-shadow duration-200 ease-in-out">
               <div className={`px-6 py-3 border-b transition-colors duration-200 ease-in-out ${headerTheme.bar}`}>
                 {editingCategory === category ? (
                   <div className="space-y-3">
@@ -1673,9 +2150,9 @@ export function ProductManager({
                       onClick={() => handleSaveCategory(category, categoryProducts)}
                       disabled={savingCategory}
                       className={`flex items-center gap-1 px-3 py-1.5 text-white text-sm rounded-lg disabled:opacity-50 ${
-                        theme === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                        theme === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                        theme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
+                        groupTheme === 'green' ? 'bg-green-600 hover:bg-green-700' :
+                        groupTheme === 'red' ? 'bg-red-600 hover:bg-red-700' :
+                        groupTheme === 'yellow' ? 'bg-yellow-600 hover:bg-yellow-700' :
                         'bg-blue-600 hover:bg-blue-700'
                       }`}
                     >
@@ -1724,8 +2201,11 @@ export function ProductManager({
                         categoryPortalSettings[category]?.remote_store) && (
                         <span className="flex flex-wrap gap-1.5">
                           {categoryPortalSettings[category]?.show_on_order_portal === false ? (
-                            <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-200 text-gray-700">
-                              Hidden on order
+                            <span
+                              className={`inline-flex items-center ${headerTheme.badge}`}
+                              title="Hidden on order"
+                            >
+                              <EyeOff className="h-4 w-4" aria-label="Hidden on order" />
                             </span>
                           ) : null}
                           {categoryPortalSettings[category]?.remote_store ? (
@@ -1738,7 +2218,7 @@ export function ProductManager({
                     </h3>
                     {!guestMode && (
                       <div className="flex items-center gap-1 shrink-0">
-                        {isZeroIndexCategory && categoryProducts.length > 0 ? (
+                        {showCategoryCycleCount ? (
                           <button
                             type="button"
                             onClick={() =>
@@ -1746,7 +2226,9 @@ export function ProductManager({
                                 products: categoryProducts,
                                 categoryScope: category,
                                 scopeTitle: `Cycle count — ${category}`,
-                                scopeDescription: `Index 0 · ${category}`,
+                                scopeDescription: isComponentCategory
+                                  ? `Components · ${category}`
+                                  : `Supplies · ${category}`,
                                 groupByCategory: false,
                               })
                             }
@@ -1793,13 +2275,29 @@ export function ProductManager({
                     Prod
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
-                    Rel
+                    <BranchQtyHoverTooltip
+                      title="Released by branch (all products)"
+                      rows={stockByBranch.releasedTotals}
+                      emptyLabel="No in-transit pans by branch"
+                    >
+                      <span className="underline decoration-dotted decoration-gray-400 underline-offset-2">
+                        Rel
+                      </span>
+                    </BranchQtyHoverTooltip>
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
                     Final Stock
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
-                    Res
+                    <BranchQtyHoverTooltip
+                      title="Reserved by branch (all products)"
+                      rows={stockByBranch.reservedTotals}
+                      emptyLabel="No reserved pans by branch"
+                    >
+                      <span className="underline decoration-dotted decoration-gray-400 underline-offset-2">
+                        Res
+                      </span>
+                    </BranchQtyHoverTooltip>
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-20">
                     Available
@@ -1869,7 +2367,7 @@ export function ProductManager({
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-500">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
+                      {editingProduct?.id === (product.product_id || product.id) && fullProductEdit ? (
                         <input
                           type="text"
                           value={editingProduct.sku || ''}
@@ -1881,26 +2379,7 @@ export function ProductManager({
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-500">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
-                        <select
-                          value={editingProduct.unit}
-                          onChange={(e) => setEditingProduct({...editingProduct, unit: e.target.value})}
-                          className="w-full max-w-20 px-2 h-6 border border-gray-300 rounded text-sm"
-                        >
-                          <option value="pans">Pans</option>
-                          <option value="pcs">Pieces</option>
-                          <option value="gallons">Gallons</option>
-                          <option value="liters">Liters</option>
-                          <option value="kg">Kilograms</option>
-                          <option value="boxes">Boxes</option>
-                          <option value="bags">Bags</option>
-                          <option value="g">Grams</option>
-                          <option value="bottles">Bottles</option>
-                          <option value="packs">Packs</option>
-                        </select>
-                      ) : (
-                        product.unit
-                      )}
+                      {product.unit}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-medium text-green-600">
                       {editingProduct?.id === productKey ? (
@@ -1922,7 +2401,7 @@ export function ProductManager({
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
+                      {editingProduct?.id === (product.product_id || product.id) && fullProductEdit ? (
                         <input
                           type="number"
                           min="0"
@@ -1949,7 +2428,7 @@ export function ProductManager({
                           }}
                           className="w-full max-w-16 px-2 h-6 border-2 border-blue-400 rounded text-sm text-center bg-blue-50 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
-                      ) : editingProduct?.id === (product.product_id || product.id) ? (
+                      ) : editingProduct?.id === (product.product_id || product.id) && fullProductEdit ? (
                         <input
                           type="number"
                           min="0"
@@ -1962,7 +2441,7 @@ export function ProductManager({
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
+                      {editingProduct?.id === (product.product_id || product.id) && fullProductEdit ? (
                         <input
                           type="number"
                           min="0"
@@ -1970,21 +2449,29 @@ export function ProductManager({
                           onChange={(e) => setEditingProduct({...editingProduct, released: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
                           className="w-full max-w-16 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
-                      ) : (
+                      ) : editingProduct?.id === (product.product_id || product.id) ? (
                         product.released || 0
+                      ) : (
+                        <BranchQtyHoverTooltip
+                          title={`Released — ${product.name || product.product_name || 'Product'}`}
+                          rows={stockByBranch.byProduct[productKey]?.released || []}
+                          emptyLabel="No in-transit pans for this item"
+                        >
+                          <span>{product.released || 0}</span>
+                        </BranchQtyHoverTooltip>
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-semibold text-purple-600">
                       {productionInputMode ? (
                         (product.initial_stock || 0) + (productionValues[product.product_id || product.id] || product.production || 0) - (product.released || 0)
-                      ) : editingProduct?.id === (product.product_id || product.id) ? (
+                      ) : editingProduct?.id === (product.product_id || product.id) && fullProductEdit ? (
                         (editingProduct.initial_stock || 0) + (editingProduct.production || 0) - (editingProduct.released || 0)
                       ) : (
                         product.final_stock || 0
                       )}
                     </td>
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm text-gray-900">
-                      {editingProduct?.id === (product.product_id || product.id) ? (
+                      {editingProduct?.id === (product.product_id || product.id) && fullProductEdit ? (
                         <input
                           type="number"
                           min="0"
@@ -1992,8 +2479,16 @@ export function ProductManager({
                           onChange={(e) => setEditingProduct({...editingProduct, reserved: e.target.value === '' ? 0 : parseInt(e.target.value) || 0})}
                           className="w-full max-w-16 px-2 h-6 border border-gray-300 rounded text-sm text-center [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                         />
-                      ) : (
+                      ) : editingProduct?.id === (product.product_id || product.id) ? (
                         product.reserved || 0
+                      ) : (
+                        <BranchQtyHoverTooltip
+                          title={`Reserved — ${product.name || product.product_name || 'Product'}`}
+                          rows={stockByBranch.byProduct[productKey]?.reserved || []}
+                          emptyLabel="No reserved pans for this item"
+                        >
+                          <span>{product.reserved || 0}</span>
+                        </BranchQtyHoverTooltip>
                       )}
                     </td>
                     <td
@@ -2106,7 +2601,7 @@ export function ProductManager({
                                 theme === 'yellow' ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100' :
                                 'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
                               }`}
-                              title="Edit"
+                              title={fullProductEdit ? 'Edit all fields' : 'Edit name & price'}
                             >
                               <Edit className="h-4 w-4" />
                             </button>
@@ -2132,6 +2627,11 @@ export function ProductManager({
             </div>
             )
           })}
+              </div>
+            </div>
+          )})}
+          </div>
+          )}
         </div>
       )}
 
@@ -2191,8 +2691,8 @@ export function ProductManager({
 
       {/* Production Reports Modal */}
       {showProductionReports && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Daily Production Reports</h3>
               <button
@@ -2257,13 +2757,13 @@ export function ProductManager({
               </div>
             )}
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* Report Details Modal */}
       {selectedReport && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-10 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
+        <Modal backdropClassName="bg-gray-600/50">
+          <div className="mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-semibold text-gray-900">
                 Production Report - {new Date(selectedReport.date).toLocaleDateString('en-US', { 
@@ -2340,7 +2840,7 @@ export function ProductManager({
               </div>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {cycleCountPanel && selectedBrand && (

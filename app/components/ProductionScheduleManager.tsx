@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { supabase, Product } from '../../lib/supabase'
 import {
   X,
@@ -15,7 +15,7 @@ import {
   Package,
   FileText,
   Ban,
-  PlusCircle,
+  RotateCcw,
 } from 'lucide-react'
 import { getPhilippinesDate } from '../../lib/timezone'
 import {
@@ -55,15 +55,43 @@ import {
 } from '../../lib/production-schedule-bom'
 import {
   batchesToScheduleQty,
+  buildCategoryPortalMap,
+  getCategoryYieldPerBatch,
   isProductConsumableSupply,
+  parseCategoryPortalRow,
+  productCategoryDisplayName,
+  productCategoryStorageKey,
   scheduleQtyToBatches,
+  type CategoryPortalSettings,
 } from '../../lib/product-category-settings'
 import {
+  fetchProductBomItemsByProductId,
+  fetchProductBomSettingsByProductId,
   fetchProductIdsWithBomItems,
-  parseProductBomSettings,
   scheduleYieldPerBatch,
   type ProductBomSettings,
 } from '../../lib/product-bom'
+import { loadBomComponentProductsForBrand } from '../../lib/product-bom-component'
+import {
+  loadGfcCatalogProducts,
+  loadGfcProducts,
+  loadRetailBrands,
+  isFactoryScheduleAggregateView,
+} from '../../lib/gfc-production-catalog'
+import {
+  fetchBatchesForSchedulesOnDate,
+  revertProductionBatchToInProgress,
+  type FactoryBatchListItem,
+} from '../../lib/factory-batch-production'
+import {
+  getBrandTagClasses,
+} from '../../lib/brand-colors'
+import {
+  DestinationBrandSelect,
+  type DestinationBrandOption,
+} from './DestinationBrandSelect'
+import { Modal } from './Modal'
+import { ProgressFractionCircle } from './ProgressFractionCircle'
 
 function categoryDisplayName(category: string | null | undefined): string {
   return category?.trim() ? category.trim() : 'Uncategorized'
@@ -120,7 +148,7 @@ function ScheduleBatchStepper({
     allowDecimal && safeValue % 1 !== 0 ? String(safeValue) : String(safeValue)
 
   return (
-    <div className="inline-flex items-center gap-1.5">
+    <div className="inline-flex h-8 items-center gap-1.5">
       <button
         type="button"
         onClick={(e) => {
@@ -128,7 +156,7 @@ function ScheduleBatchStepper({
           decrement()
         }}
         disabled={disabled || safeValue <= min}
-        className="px-2 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 disabled:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-gray-100"
+        className="inline-flex h-8 min-w-[2rem] items-center justify-center px-2 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 disabled:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-gray-100"
         aria-label="Decrease"
       >
         -
@@ -142,7 +170,7 @@ function ScheduleBatchStepper({
         onClick={(e) => e.stopPropagation()}
         onWheel={(e) => e.currentTarget.blur()}
         onChange={(e) => handleInputChange(e.target.value)}
-        className="w-12 px-1 py-1 text-center text-sm tabular-nums text-gray-900 border border-gray-300 rounded [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+        className="h-8 w-12 px-1 text-center text-sm tabular-nums text-gray-900 border border-gray-300 rounded [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
       />
       <button
         type="button"
@@ -151,7 +179,7 @@ function ScheduleBatchStepper({
           increment()
         }}
         disabled={disabled}
-        className="px-2 py-1 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200 disabled:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-gray-100"
+        className="inline-flex h-8 min-w-[2rem] items-center justify-center px-2 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200 disabled:bg-gray-100 disabled:text-gray-400 disabled:hover:bg-gray-100"
         aria-label="Increase"
       >
         +
@@ -160,61 +188,60 @@ function ScheduleBatchStepper({
   )
 }
 
-/** Desktop grid for schedule list rows (Product · Printed · Batch · Notes · Print [· Remove]). */
+/** Desktop grid for schedule list rows (Product · Progress · Qty · Floor batch · Notes · Print · Remove). */
 const SCHEDULE_LIST_GRID_EDITABLE =
-  'lg:grid-cols-[minmax(13rem,2fr)_5.5rem_8.75rem_minmax(6rem,10rem)_7.25rem_2.75rem]'
+  'lg:grid-cols-[minmax(0,2fr)_4.5rem_minmax(7.25rem,8rem)_minmax(5.5rem,6.5rem)_minmax(0,1.25fr)_minmax(0,5.75rem)_2.25rem]'
 const SCHEDULE_LIST_GRID_READONLY =
-  'lg:grid-cols-[minmax(13rem,2fr)_5.5rem_8.75rem_minmax(6rem,10rem)_7.25rem]'
+  'lg:grid-cols-[minmax(0,2fr)_4.5rem_minmax(7.25rem,8rem)_minmax(5.5rem,6.5rem)_minmax(0,1.25fr)_minmax(0,5.75rem)]'
+
+const SCHEDULE_SKELETON_GRID_EDITABLE =
+  'lg:grid-cols-[minmax(0,2fr)_4.5rem_minmax(7.25rem,8rem)_minmax(5.5rem,6.5rem)_minmax(0,1.25fr)_minmax(0,5.75rem)_2.25rem]'
+const SCHEDULE_SKELETON_GRID_READONLY =
+  'lg:grid-cols-[minmax(0,2fr)_4.5rem_minmax(7.25rem,8rem)_minmax(5.5rem,6.5rem)_minmax(0,1.25fr)_minmax(0,5.75rem)]'
 
 function ScheduleListSkeleton({ editable }: { editable: boolean }) {
-  const headerGrid = editable ? SCHEDULE_LIST_GRID_EDITABLE : SCHEDULE_LIST_GRID_READONLY
-  const rowGrid = editable
-    ? `grid-cols-1 ${SCHEDULE_LIST_GRID_EDITABLE}`
-    : `grid-cols-1 ${SCHEDULE_LIST_GRID_READONLY}`
+  const gridCols = editable ? SCHEDULE_SKELETON_GRID_EDITABLE : SCHEDULE_SKELETON_GRID_READONLY
 
   return (
-    <div className="overflow-x-auto -mx-px animate-pulse">
-      <div className="divide-y divide-gray-200 min-w-[46rem]">
-        <div
-          className={`hidden lg:grid items-center gap-x-5 px-5 py-2.5 bg-gray-50 border-b border-gray-200 text-[10px] font-medium text-gray-500 uppercase tracking-wide ${headerGrid}`}
-        >
-          <span className="pl-1">Product</span>
-          <span className="text-center">Printed</span>
-          <span className="text-center">Batch</span>
-          <span className="px-1">Notes</span>
-          <span className="text-center">Print</span>
-          {editable ? <span className="text-center sr-only">Remove</span> : null}
-        </div>
-        {[1, 2, 3].map((row) => (
-          <div key={row} className="bg-white">
-            <div className={`grid items-center gap-x-5 gap-y-3 px-5 py-3.5 ${rowGrid}`}>
-              <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 items-center min-w-0">
-                <div className="h-4 w-4 bg-gray-200 rounded shrink-0 row-span-2" />
-                <div className="min-w-0 col-start-2 space-y-1">
-                  <div className="h-3.5 bg-gray-200 rounded w-[78%]" />
-                  <div className="h-2.5 bg-gray-100 rounded w-2/5 lg:hidden" />
-                  <div className="h-2.5 bg-gray-100 rounded w-1/2 lg:hidden" />
-                </div>
-              </div>
-              <div className="justify-self-center h-5 w-14 bg-indigo-100 rounded-full" />
-              <div className="justify-self-center inline-flex items-center gap-1.5">
-                <div className="h-7 w-7 bg-red-100 rounded" />
-                <div className="h-7 w-12 bg-gray-100 rounded border border-gray-200" />
-                <div className="h-7 w-7 bg-green-100 rounded" />
-              </div>
-              <div className="h-7 bg-gray-100 rounded w-full max-w-full" />
-              <div className="flex justify-center min-h-[1.75rem]">
-                <div className="h-7 w-[4.5rem] bg-indigo-200 rounded" />
-              </div>
-              {editable ? (
-                <div className="flex justify-center">
-                  <div className="h-4 w-4 bg-red-100 rounded" />
-                </div>
-              ) : null}
-            </div>
-          </div>
-        ))}
+    <div className="animate-pulse max-w-full overflow-hidden divide-y divide-gray-200">
+      <div
+        className={`hidden lg:grid items-center gap-x-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 ${gridCols}`}
+      >
+        <span className="h-2.5 bg-gray-200 rounded w-12" />
+        <span className="justify-self-center h-2.5 bg-gray-200 rounded w-10" />
+        <span className="justify-self-center h-2.5 bg-gray-200 rounded w-8" />
+        <span className="justify-self-center h-2.5 bg-gray-200 rounded w-12" />
+        <span className="h-2.5 bg-gray-200 rounded w-10" />
+        <span className="justify-self-center h-2.5 bg-gray-200 rounded w-8" />
+        {editable ? <span className="justify-self-center h-2.5 bg-gray-200 rounded w-4" /> : null}
       </div>
+      {[1, 2].map((row) => (
+        <div
+          key={row}
+          className={`grid items-center gap-x-4 gap-y-3 px-4 py-3 min-w-0 grid-cols-1 ${gridCols}`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="h-3.5 w-3.5 bg-gray-200 rounded shrink-0" />
+            <div className="h-3 bg-gray-200 rounded w-[min(100%,11rem)] min-w-0" />
+          </div>
+          <div className="justify-self-center h-14 w-14 bg-gray-100 rounded-full shrink-0" />
+          <div className="flex h-8 items-center justify-center pr-2">
+            <div className="h-8 w-[7rem] bg-gray-100 rounded shrink-0" />
+          </div>
+          <div className="hidden lg:flex h-8 items-center justify-center">
+            <div className="h-5 w-16 bg-slate-100 rounded-full shrink-0" />
+          </div>
+          <div className="flex h-8 items-center pl-3">
+            <div className="h-8 bg-gray-100 rounded w-full min-w-0" />
+          </div>
+          <div className="flex h-8 items-center justify-center">
+            <div className="h-8 w-16 bg-indigo-200 rounded shrink-0" />
+          </div>
+          {editable ? (
+            <div className="justify-self-center h-3.5 w-3.5 bg-red-100 rounded shrink-0" />
+          ) : null}
+        </div>
+      ))}
     </div>
   )
 }
@@ -241,6 +268,70 @@ function formatProductionScannedAt(iso: string | null | undefined): string {
 /** Serial list inside expanded schedule row: serial | sku | production | actions */
 const SERIAL_PANEL_GRID =
   'grid grid-cols-[minmax(0,1fr)_5.5rem_9.5rem_7rem] items-center gap-x-3 sm:gap-x-4'
+
+function countScannedStickers(stickers: StickerLog[]): number {
+  return stickers.filter((s) => isActiveSticker(s) && s.produced_at).length
+}
+
+function primaryFactoryBatchForSchedule(
+  batches: FactoryBatchListItem[] | undefined
+): FactoryBatchListItem | null {
+  if (!batches?.length) return null
+  return (
+    batches.find((b) => b.status === 'in_progress') ??
+    batches.find((b) => b.status === 'completed') ??
+    null
+  )
+}
+
+function FactoryProductionBatchStatusBadge({
+  batch,
+  compact = false,
+}: {
+  batch: FactoryBatchListItem | null
+  compact?: boolean
+}) {
+  if (!batch) {
+    return (
+      <span
+        className={`inline-flex items-center shrink-0 rounded-full font-semibold uppercase tracking-wide border bg-slate-100 text-slate-600 border-slate-200 ${
+          compact ? 'px-1.5 py-0.5 text-[9px]' : 'px-2 py-0.5 text-[10px]'
+        }`}
+      >
+        Not started
+      </span>
+    )
+  }
+
+  const styles =
+    batch.status === 'completed'
+      ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+      : batch.status === 'in_progress'
+        ? 'bg-indigo-100 text-indigo-800 border-indigo-200'
+        : 'bg-slate-100 text-slate-700 border-slate-200'
+
+  const label =
+    batch.status === 'completed'
+      ? 'Completed'
+      : batch.status === 'in_progress'
+        ? 'In progress'
+        : batch.status.replace('_', ' ')
+
+  return (
+    <span
+      className={`inline-flex items-center shrink-0 rounded-full font-semibold uppercase tracking-wide border ${styles} ${
+        compact ? 'px-1.5 py-0.5 text-[9px]' : 'px-2 py-0.5 text-[10px]'
+      }`}
+      title={
+        batch.units > 0
+          ? `${label} · ${batch.units} unit${batch.units === 1 ? '' : 's'}`
+          : label
+      }
+    >
+      {label}
+    </span>
+  )
+}
 
 function SerialProductionCell({ sticker }: { sticker?: StickerLog }) {
   return (
@@ -270,11 +361,20 @@ interface ProductionScheduleItem {
   product_name: string
   sku?: string
   brand_name: string
+  for_brand_id?: string
   quantity_required: number
   batch_number: string
   notes?: string
   printed_count: number
   stickers: StickerLog[]
+}
+
+function scheduleItemKey(
+  item: Pick<ProductionScheduleItem, 'product_id' | 'for_brand_id' | 'schedule_id'>
+): string {
+  if (item.schedule_id) return item.schedule_id
+  if (item.for_brand_id) return `${item.for_brand_id}:${item.product_id}`
+  return item.product_id
 }
 
 function openStickerPrintWindow(
@@ -465,6 +565,7 @@ function openMultiStickerPrintWindow(
 
 type ScheduleSnapshotRow = {
   product_id: string
+  for_brand_id: string | null
   quantity_required: number
   notes: string | null
   batch_number: string
@@ -476,11 +577,16 @@ function scheduleItemsSnapshot(items: ProductionScheduleItem[]): string {
     items
       .map((i) => ({
         product_id: i.product_id,
+        for_brand_id: i.for_brand_id ?? null,
         quantity_required: i.quantity_required,
         notes: i.notes ?? null,
         batch_number: i.batch_number,
       }))
-      .sort((a, b) => a.product_id.localeCompare(b.product_id))
+      .sort((a, b) => {
+        const keyA = `${a.for_brand_id ?? ''}:${a.product_id}`
+        const keyB = `${b.for_brand_id ?? ''}:${b.product_id}`
+        return keyA.localeCompare(keyB)
+      })
   )
 }
 
@@ -499,9 +605,11 @@ function isDeletionOnlyScheduleChange(
 ): boolean {
   const saved = parseScheduleSnapshot(savedSnapshot)
   if (saved.length <= items.length) return false
-  const savedById = new Map(saved.map((s) => [s.product_id, s]))
+  const savedById = new Map(
+    saved.map((s) => [`${s.for_brand_id ?? ''}:${s.product_id}`, s])
+  )
   for (const item of items) {
-    const prev = savedById.get(item.product_id)
+    const prev = savedById.get(`${item.for_brand_id ?? ''}:${item.product_id}`)
     if (!prev) return false
     if (prev.quantity_required !== item.quantity_required) return false
     if ((prev.notes ?? null) !== (item.notes ?? null)) return false
@@ -689,12 +797,19 @@ function BomMaterialsTable({
 
 interface ProductionScheduleManagerProps {
   onClose?: () => void
+  /** GFC factory brand id (product catalog). */
   brandId: string
+  /** Destination consumer brand for this schedule view. */
+  forBrandId: string
   brandName?: string
+  destinationBrands?: DestinationBrandOption[]
+  onForBrandChange?: (brandId: string) => void
   theme?: string
   currentUsername?: string
   /** When true, renders inline in a tab instead of a full-screen modal. */
   embedded?: boolean
+  /** When true, hides schedule editing controls (role-based view-only). */
+  readOnlyMode?: boolean
   scheduleDate?: string
   onScheduleDateChange?: (date: string) => void
 }
@@ -702,10 +817,14 @@ interface ProductionScheduleManagerProps {
 export function ProductionScheduleManager({
   onClose,
   brandId,
+  forBrandId,
   brandName,
+  destinationBrands,
+  onForBrandChange,
   theme = 'blue',
   currentUsername = '',
   embedded = false,
+  readOnlyMode = false,
   scheduleDate: scheduleDateProp,
   onScheduleDateChange,
 }: ProductionScheduleManagerProps) {
@@ -715,11 +834,19 @@ export function ProductionScheduleManager({
   const scheduleDate = scheduleDateProp ?? internalScheduleDate
   const setScheduleDate = onScheduleDateChange ?? setInternalScheduleDate
   const isPastSchedule = scheduleDate < today
-  const isScheduleEditable = !isPastSchedule
+  const isScheduleEditable = !readOnlyMode && !isPastSchedule
   const [items, setItems] = useState<ProductionScheduleItem[]>([])
   const [savedSnapshot, setSavedSnapshot] = useState(() => scheduleItemsSnapshot([]))
   const [allProducts, setAllProducts] = useState<(Product & { brand_name: string })[]>([])
+  /** Full GFC catalog ids for schedule load/save on GFC Main (includes retail-mapped SKUs). */
+  const [scheduleCatalogProductIds, setScheduleCatalogProductIds] = useState<string[]>([])
   const [categorySortOrders, setCategorySortOrders] = useState<Record<string, number>>({})
+  const [categoryPortalSettings, setCategoryPortalSettings] = useState<
+    Record<string, CategoryPortalSettings>
+  >({})
+  const [categoryPortalSettingsByBrand, setCategoryPortalSettingsByBrand] = useState<
+    Record<string, Record<string, CategoryPortalSettings>>
+  >({})
   const [productBomSettingsById, setProductBomSettingsById] = useState<
     Record<string, ProductBomSettings>
   >({})
@@ -742,6 +869,20 @@ export function ProductionScheduleManager({
   const [pendingStickerQtyByScheduleId, setPendingStickerQtyByScheduleId] = useState<
     Record<string, number>
   >({})
+  const [productionBatchesByScheduleId, setProductionBatchesByScheduleId] = useState<
+    Record<string, FactoryBatchListItem[]>
+  >({})
+  const [revertingBatchId, setRevertingBatchId] = useState<string | null>(null)
+  const isAggregateBrandView = isFactoryScheduleAggregateView(forBrandId, brandId)
+
+  const scheduleScopeProductIds = useMemo(() => {
+    const pickerIds = allProducts.map((p) => p.id).filter(Boolean) as string[]
+    if (!isAggregateBrandView) return pickerIds
+    // GFC Main view: schedule covers retail catalog FGs plus factory picker products
+    // (e.g. Components). Using catalog-only IDs dropped saved component rows on reload.
+    const ids = new Set<string>([...scheduleCatalogProductIds, ...pickerIds])
+    return Array.from(ids)
+  }, [isAggregateBrandView, scheduleCatalogProductIds, allProducts])
 
   const scheduleProductIds = useMemo(
     () => Array.from(new Set(items.map((i) => i.product_id).filter(Boolean))),
@@ -752,26 +893,83 @@ export function ProductionScheduleManager({
     () => scheduleItemsSnapshot(items) !== savedSnapshot,
     [items, savedSnapshot]
   )
+  const hasUnsavedChangesRef = useRef(hasUnsavedChanges)
+  const scheduleFetchSeqRef = useRef(0)
+  useEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges
+  }, [hasUnsavedChanges])
+
+  const scheduleProductionTotals = useMemo(() => {
+    let required = 0
+    let scanned = 0
+    for (const item of items) {
+      required += item.quantity_required
+      scanned += countScannedStickers(item.stickers)
+    }
+    const pct = required > 0 ? Math.min(100, Math.round((scanned / required) * 100)) : 0
+    return { required, scanned, pct, done: required > 0 && scanned >= required }
+  }, [items])
 
   const refreshFactoryMaterialRequestQtys = useCallback(async () => {
-    const { released, pending } = await fetchFactoryRequestQtysByMaterial(scheduleDate, {
-      brandId,
-    })
+    const { released, pending } = await fetchFactoryRequestQtysByMaterial(scheduleDate)
     setReleasedQtyByMaterial(released)
     setPendingQtyByMaterial(pending)
-  }, [scheduleDate, brandId])
+  }, [scheduleDate])
 
   const refreshStickerRequests = useCallback(async () => {
-    const rows = await fetchPendingStickerRequests(scheduleDate, { brandId })
+    const rows = await fetchPendingStickerRequests(scheduleDate, {
+      forBrandId,
+      factoryBrandId: brandId,
+    })
     setPendingStickerQtyByScheduleId(buildPendingStickerQtyByScheduleId(rows))
-  }, [scheduleDate, brandId])
+  }, [scheduleDate, forBrandId, brandId])
+
+  const refreshProductionBatches = useCallback(async (scheduleIds: string[]) => {
+    if (!scheduleDate || !scheduleIds.length) {
+      setProductionBatchesByScheduleId({})
+      return
+    }
+    try {
+      const batches = await fetchBatchesForSchedulesOnDate(scheduleIds, scheduleDate)
+      const map: Record<string, FactoryBatchListItem[]> = {}
+      for (const batch of batches) {
+        if (!map[batch.schedule_id]) map[batch.schedule_id] = []
+        map[batch.schedule_id].push(batch)
+      }
+      setProductionBatchesByScheduleId(map)
+    } catch (err) {
+      console.error('fetchBatchesForSchedulesOnDate:', err)
+      setProductionBatchesByScheduleId({})
+    }
+  }, [scheduleDate])
+
+  const handleRevertProductionBatch = async (batch: FactoryBatchListItem, productName: string) => {
+    if (
+      !confirm(
+        `Revert the completed production batch for ${productName} back to in progress?\n\nThis undoes completion stock (component materials / finished goods transfer) and reverses accounting entries so factory scanning can continue. Floor BOM already used for this batch stays deducted.`
+      )
+    ) {
+      return
+    }
+    setRevertingBatchId(batch.id)
+    try {
+      const result = await revertProductionBatchToInProgress(batch.id, { postedBy: requestedBy })
+      if (!result.ok) {
+        alert(result.message || 'Could not revert batch')
+        return
+      }
+      await refreshProductionBatches(items.map((i) => i.schedule_id).filter(Boolean))
+    } finally {
+      setRevertingBatchId(null)
+    }
+  }
 
   useEffect(() => {
     fetchAllProducts()
     fetchFloorStaff()
     refreshFactoryMaterialRequestQtys()
     refreshStickerRequests()
-  }, [scheduleDate, brandId, refreshFactoryMaterialRequestQtys, refreshStickerRequests])
+  }, [scheduleDate, brandId, forBrandId, refreshFactoryMaterialRequestQtys, refreshStickerRequests])
 
   useEffect(() => {
     const onFocus = () => {
@@ -785,7 +983,7 @@ export function ProductionScheduleManager({
   useEffect(() => {
     if (loading) return
     fetchSchedule()
-  }, [scheduleDate, brandId, allProducts, loading])
+  }, [scheduleDate, brandId, forBrandId, allProducts, loading])
 
   useEffect(() => {
     fetchBomForProducts(scheduleProductIds)
@@ -794,14 +992,35 @@ export function ProductionScheduleManager({
   const addableProducts = useMemo(
     () =>
       allProducts.filter((p) => {
-        const idx = categorySortOrders[categoryDisplayName(p.category)]
-        return idx !== undefined && idx > 0
+        if (isProductConsumableSupply(p, categorySortOrders)) return false
+        return true
       }),
     [allProducts, categorySortOrders]
   )
 
-  const yieldForProductId = (productId: string) =>
-    scheduleYieldPerBatch(productBomSettingsById[productId])
+  const yieldForProductId = useCallback(
+    (productId: string) => {
+      const bomYield = scheduleYieldPerBatch(productBomSettingsById[productId])
+      if (bomYield > 1) return bomYield
+      const product = allProducts.find((p) => p.id === productId)
+      if (product) {
+        const portalSettings =
+          isAggregateBrandView && product.brand_id
+            ? categoryPortalSettingsByBrand[product.brand_id] || categoryPortalSettings
+            : categoryPortalSettings
+        const categoryYield = getCategoryYieldPerBatch(product.category, portalSettings)
+        if (categoryYield > 1) return categoryYield
+      }
+      return bomYield
+    },
+    [
+      productBomSettingsById,
+      allProducts,
+      categoryPortalSettings,
+      categoryPortalSettingsByBrand,
+      isAggregateBrandView,
+    ]
+  )
 
   const selectedProductHasBom = selectedProduct
     ? productIdsWithBom.has(selectedProduct)
@@ -870,12 +1089,10 @@ export function ProductionScheduleManager({
     for (const p of addableProducts) {
       if (isProductConsumableSupply(p, categorySortOrders)) {
         reasons[p.id] = 'Supplies — use Product Inventory material link'
-      } else if (!productIdsWithBom.has(p.id)) {
-        reasons[p.id] = 'No BOM'
       }
     }
     return reasons
-  }, [addableProducts, productIdsWithBom, categorySortOrders])
+  }, [addableProducts, categorySortOrders])
 
   useEffect(() => {
     if (selectedProduct && !productIdsWithBom.has(selectedProduct)) {
@@ -983,50 +1200,107 @@ export function ProductionScheduleManager({
   ])
 
   const fetchAllProducts = async () => {
-    if (!brandId) return
+    if (!brandId || !forBrandId) return
     setLoading(true)
     setAllProducts([])
     try {
-      const [productsRes, sortRes] = await Promise.all([
-        supabase
-          .from('products')
-          .select(
-            'id, brand_id, name, sku, category, unit, minimum_stock, initial_stock, production, released, reserved, bom_quantity_mode, bom_yield_per_batch, brands(name)'
-          )
-          .eq('brand_id', brandId)
-          .order('name'),
-        supabase
-          .from('product_category_sort')
-          .select('category_name, sort_index')
-          .eq('brand_id', brandId),
-      ])
+      const categorySortSelect =
+        'category_name, sort_index, show_on_order_portal, remote_store, yield_per_batch'
+      const shouldLoadGfcComponents = !isAggregateBrandView && brandId !== forBrandId
+      const [pickerProducts, sortRes, catalogProducts, retailBrands, gfcComponentsLoad] =
+        await Promise.all([
+          loadGfcProducts(forBrandId),
+          supabase
+            .from('product_category_sort')
+            .select(categorySortSelect)
+            .eq('brand_id', brandId),
+          isAggregateBrandView ? loadGfcCatalogProducts() : Promise.resolve(null),
+          isAggregateBrandView ? loadRetailBrands() : Promise.resolve(null),
+          shouldLoadGfcComponents
+            ? loadBomComponentProductsForBrand(brandId)
+            : Promise.resolve({ products: [], categorySortOrders: {} }),
+        ])
+      const factoryBrandName =
+        destinationBrands?.find((b) => b.id === brandId)?.name || brandName || 'GFC Main'
+      const pickerIds = new Set(pickerProducts.map((p) => p.id))
+      const mergedPickerProducts = [
+        ...pickerProducts,
+        ...gfcComponentsLoad.products
+          .filter((p) => p.id && !pickerIds.has(p.id))
+          .map((p) => ({
+            ...p,
+            brand_id: brandId,
+            name: p.product_name || p.name || '',
+            product_name: p.product_name || p.name || '',
+          })),
+      ]
+      const catalogIds = (catalogProducts || []).map((p) => p.id)
+      setScheduleCatalogProductIds(
+        isAggregateBrandView ? catalogIds : mergedPickerProducts.map((p) => p.id)
+      )
 
-      if (productsRes.error) throw productsRes.error
-
-      const productsWithBrand = (productsRes.data || []).map((p: any) => ({
-        ...p,
-        brand_name: p.brands?.name || brandName || 'Unknown',
-      }))
+      const productsWithBrand = mergedPickerProducts.map((p) => {
+        const displayName = p.name || ''
+        const isGfcComponent = p.brand_id === brandId && brandId !== forBrandId
+        return {
+          ...p,
+          name: displayName,
+          product_name: displayName,
+          brand_name: isGfcComponent
+            ? factoryBrandName
+            : isAggregateBrandView
+              ? brandName || 'GFC Main'
+              : brandName || 'Unknown',
+        }
+      })
+      const bomProductIds = productsWithBrand.map((p) => p.id)
       setAllProducts(productsWithBrand)
 
-      const bomSettings: Record<string, ProductBomSettings> = {}
-      const productIds: string[] = []
-      for (const p of productsWithBrand) {
-        productIds.push(p.id)
-        bomSettings[p.id] = parseProductBomSettings(p)
-      }
+      const [bomItemsByProduct, productIdsWithBom] = await Promise.all([
+        fetchProductBomItemsByProductId(bomProductIds),
+        fetchProductIdsWithBomItems(bomProductIds),
+      ])
+      const bomSettings = await fetchProductBomSettingsByProductId(
+        bomProductIds,
+        bomItemsByProduct
+      )
       setProductBomSettingsById(bomSettings)
-      setProductIdsWithBom(await fetchProductIdsWithBomItems(productIds))
+      setProductIdsWithBom(productIdsWithBom)
 
       if (sortRes.error) {
         console.warn('product_category_sort:', sortRes.error.message)
         setCategorySortOrders({})
+        setCategoryPortalSettings({})
       } else {
-        const orders: Record<string, number> = {}
+        const orders: Record<string, number> = { ...gfcComponentsLoad.categorySortOrders }
         for (const row of sortRes.data || []) {
-          orders[categoryDisplayName(row.category_name)] = row.sort_index
+          orders[productCategoryDisplayName(row.category_name)] = row.sort_index
         }
         setCategorySortOrders(orders)
+        setCategoryPortalSettings(buildCategoryPortalMap(sortRes.data))
+      }
+
+      if (isAggregateBrandView && retailBrands?.length) {
+        const retailBrandIds = retailBrands.map((b) => b.id as string)
+        const { data: retailSortRows, error: retailSortErr } = await supabase
+          .from('product_category_sort')
+          .select(`brand_id, ${categorySortSelect}`)
+          .in('brand_id', retailBrandIds)
+        if (retailSortErr) {
+          console.warn('product_category_sort (retail):', retailSortErr.message)
+          setCategoryPortalSettingsByBrand({})
+        } else {
+          const byBrand: Record<string, Record<string, CategoryPortalSettings>> = {}
+          for (const row of retailSortRows || []) {
+            const bid = row.brand_id as string
+            if (!byBrand[bid]) byBrand[bid] = {}
+            byBrand[bid][productCategoryStorageKey(row.category_name)] =
+              parseCategoryPortalRow(row)
+          }
+          setCategoryPortalSettingsByBrand(byBrand)
+        }
+      } else {
+        setCategoryPortalSettingsByBrand({})
       }
     } catch (err) {
       console.error('Error fetching products:', err)
@@ -1064,28 +1338,46 @@ export function ProductionScheduleManager({
     }
   }
 
-  const fetchSchedule = async () => {
-    if (!scheduleDate) return
-    setScheduleLoading(true)
+  const fetchSchedule = async (options?: { background?: boolean; force?: boolean }) => {
+    if (!scheduleDate || !forBrandId) return
+    const seq = ++scheduleFetchSeqRef.current
+    if (!options?.background) {
+      setScheduleLoading(true)
+      // Keep current rows visible during forced refresh after save (avoids empty skeleton flash).
+      if (!options?.force) {
+        setItems([])
+        setSavedSnapshot(scheduleItemsSnapshot([]))
+        setSchedulePersistStatus(null)
+      }
+    }
     try {
-      const currentBrandProductIds = allProducts.map((p) => p.id)
-      if (currentBrandProductIds.length === 0) {
+      if (scheduleScopeProductIds.length === 0) {
+        if (seq !== scheduleFetchSeqRef.current) return
+        if (hasUnsavedChangesRef.current && !options?.force) return
         setItems([])
         setSavedSnapshot(scheduleItemsSnapshot([]))
         setSchedulePersistStatus(null)
         return
       }
 
-      const { data: scheduleData, error } = await supabase
+      let scheduleQuery = supabase
         .from('production_schedules')
-        .select('id, product_id, quantity_required, batch_number, notes, status')
+        .select('id, product_id, quantity_required, batch_number, notes, status, for_brand_id')
         .eq('schedule_date', scheduleDate)
-        .in('product_id', currentBrandProductIds)
+        .in('product_id', scheduleScopeProductIds)
         .in('status', ['draft', 'active'])
+
+      if (!isAggregateBrandView) {
+        scheduleQuery = scheduleQuery.eq('for_brand_id', forBrandId)
+      }
+
+      const { data: scheduleData, error } = await scheduleQuery
 
       if (error) throw error
 
       if (!scheduleData || scheduleData.length === 0) {
+        if (seq !== scheduleFetchSeqRef.current) return
+        if (hasUnsavedChangesRef.current && !options?.force) return
         setItems([])
         setSavedSnapshot(scheduleItemsSnapshot([]))
         setSchedulePersistStatus(null)
@@ -1095,14 +1387,29 @@ export function ProductionScheduleManager({
       const statuses = new Set(
         scheduleData.map((r: { status?: string }) => r.status).filter(Boolean)
       )
-      setSchedulePersistStatus(statuses.has('draft') ? 'draft' : 'active')
+      const fetchedPersistStatus: ProductionScheduleStatus = statuses.has('draft')
+        ? 'draft'
+        : 'active'
+
+      const forBrandIds = Array.from(
+        new Set(
+          scheduleData
+            .map((r: { for_brand_id?: string | null }) => r.for_brand_id)
+            .filter(Boolean)
+        )
+      ) as string[]
+      const { data: forBrandsData } = forBrandIds.length
+        ? await supabase.from('brands').select('id, name').in('id', forBrandIds)
+        : { data: [] as { id: string; name: string }[] }
+      const forBrandNameById = new Map(
+        (forBrandsData || []).map((b) => [b.id as string, b.name as string])
+      )
 
       const productIds = scheduleData.map(s => s.product_id)
       const { data: productsData } = await supabase
         .from('products')
         .select('id, name, sku, brand_id, brands(name)')
         .in('id', productIds)
-        .eq('brand_id', brandId)
 
       const productMap = new Map((productsData || []).map((p: any) => [
         p.id,
@@ -1136,12 +1443,18 @@ export function ProductionScheduleManager({
           }))
         const activeCount = countActiveStickers(stickers)
         const batchNum = row.batch_number || `BATCH-${scheduleDate.replace(/-/g, '')}-${(prod?.sku || '').replace(/-/g, '')}`
+        const rowForBrandId = row.for_brand_id as string | undefined
+        const destBrandName = rowForBrandId
+          ? forBrandNameById.get(rowForBrandId) || brandName || 'Unknown'
+          : brandName || prod?.brand_name || 'Unknown'
+        const displayName = prod?.name || 'Unknown'
         return [{
           schedule_id: row.id,
           product_id: row.product_id,
-          product_name: prod?.name || 'Unknown',
+          product_name: displayName,
           sku: prod?.sku,
-          brand_name: prod?.brand_name || 'Unknown',
+          brand_name: destBrandName,
+          for_brand_id: rowForBrandId,
           quantity_required: row.quantity_required,
           batch_number: batchNum,
           notes: row.notes,
@@ -1149,17 +1462,51 @@ export function ProductionScheduleManager({
           stickers,
         }]
       })
+      if (isAggregateBrandView) {
+        scheduleItems.sort((a, b) => {
+          const byBrand = a.brand_name.localeCompare(b.brand_name, undefined, {
+            sensitivity: 'base',
+          })
+          if (byBrand !== 0) return byBrand
+          return a.product_name.localeCompare(b.product_name, undefined, {
+            sensitivity: 'base',
+          })
+        })
+      }
+
+      if (seq !== scheduleFetchSeqRef.current) return
+      if (hasUnsavedChangesRef.current && !options?.force) return
+
+      setSchedulePersistStatus(fetchedPersistStatus)
       setItems(scheduleItems)
       setSavedSnapshot(scheduleItemsSnapshot(scheduleItems))
+      void refreshProductionBatches(scheduleItems.map((i) => i.schedule_id).filter(Boolean))
     } catch (err) {
       console.error('Error fetching schedule:', err)
+      if (seq !== scheduleFetchSeqRef.current) return
+      if (hasUnsavedChangesRef.current && !options?.force) return
       setItems([])
       setSavedSnapshot(scheduleItemsSnapshot([]))
       setSchedulePersistStatus(null)
     } finally {
-      setScheduleLoading(false)
+      if (!options?.background && seq === scheduleFetchSeqRef.current) {
+        setScheduleLoading(false)
+      }
     }
   }
+
+  useEffect(() => {
+    const refreshInBackground = () => {
+      if (document.visibilityState !== 'visible' || loading) return
+      void fetchSchedule({ background: true })
+    }
+    window.addEventListener('focus', refreshInBackground)
+    document.addEventListener('visibilitychange', refreshInBackground)
+    return () => {
+      window.removeEventListener('focus', refreshInBackground)
+      document.removeEventListener('visibilitychange', refreshInBackground)
+    }
+  }, [loading, scheduleDate, forBrandId, brandId, allProducts, scheduleScopeProductIds])
 
   const generateBatchNumber = (product: { sku?: string }) => {
     const skuPart = (product.sku || '').replace(/-/g, '')
@@ -1181,11 +1528,22 @@ export function ProductionScheduleManager({
     if (qty < 1) return
 
     const batchNum = generateBatchNumber(product)
+    const itemForBrandId = isAggregateBrandView
+      ? product.brand_id || brandId
+      : forBrandId
+    const itemBrandName = isAggregateBrandView
+      ? product.brand_name || brandName || 'GFC'
+      : brandName || product.brand_name
     setItems(prev => {
-      const existing = prev.find(i => i.product_id === selectedProduct)
+      const existing = prev.find(
+        (i) =>
+          i.product_id === selectedProduct &&
+          (i.for_brand_id || forBrandId) === itemForBrandId
+      )
       if (existing) {
-        return prev.map(i =>
-          i.product_id === selectedProduct
+        return prev.map((i) =>
+          i.product_id === selectedProduct &&
+          (i.for_brand_id || forBrandId) === itemForBrandId
             ? { ...i, quantity_required: i.quantity_required + qty }
             : i
         )
@@ -1195,7 +1553,8 @@ export function ProductionScheduleManager({
         product_id: selectedProduct,
         product_name: product.name || '',
         sku: product.sku,
-        brand_name: product.brand_name,
+        brand_name: itemBrandName,
+        for_brand_id: itemForBrandId,
         quantity_required: qty,
         batch_number: batchNum,
         printed_count: 0,
@@ -1217,24 +1576,32 @@ export function ProductionScheduleManager({
 
     if (!confirm(message)) return
 
-    setItems((prev) => prev.filter((i) => i.product_id !== item.product_id))
+    const key = scheduleItemKey(item)
+    setItems((prev) => prev.filter((i) => scheduleItemKey(i) !== key))
   }
 
-  const handleUpdateScheduleBatches = (productId: string, batches: number) => {
-    const yieldPerBatch = yieldForProductId(productId)
+  const handleUpdateScheduleBatches = (item: ProductionScheduleItem, batches: number) => {
+    const yieldPerBatch = yieldForProductId(item.product_id)
     const quantity = batchesToScheduleQty(batches, yieldPerBatch)
+    const key = scheduleItemKey(item)
     setItems((prev) =>
       prev.map((i) =>
-        i.product_id === productId ? { ...i, quantity_required: quantity } : i
+        scheduleItemKey(i) === key ? { ...i, quantity_required: quantity } : i
       )
     )
   }
 
-  const handleUpdateNotes = (productId: string, notes: string) => {
-    setItems(prev => prev.map(i =>
-      i.product_id === productId ? { ...i, notes: notes || undefined } : i
-    ))
+  const handleUpdateNotes = (item: ProductionScheduleItem, notes: string) => {
+    const key = scheduleItemKey(item)
+    setItems((prev) =>
+      prev.map((i) =>
+        scheduleItemKey(i) === key ? { ...i, notes: notes || undefined } : i
+      )
+    )
   }
+
+  const resolveItemForBrandId = (item: ProductionScheduleItem) =>
+    item.for_brand_id || forBrandId
 
   const generateSerialNumber = (releaseId: string, manufactureDate: string) => {
     const datePart = manufactureDate.replace(/-/g, '')
@@ -1314,6 +1681,7 @@ export function ProductionScheduleManager({
       .select('id')
       .eq('product_id', item.product_id)
       .eq('schedule_date', scheduleDate)
+      .eq('for_brand_id', resolveItemForBrandId(item))
       .eq('status', 'active')
       .maybeSingle()
     return data?.id
@@ -1323,7 +1691,7 @@ export function ProductionScheduleManager({
     status: ProductionScheduleStatus
   ): Promise<boolean> => {
     if (!scheduleDate || status === 'cancelled') return false
-    const currentBrandProductIds = allProducts.map((p) => p.id)
+    const currentBrandProductIds = scheduleScopeProductIds
     try {
       const idByProduct = new Map<string, string>()
       for (const item of items) {
@@ -1331,20 +1699,22 @@ export function ProductionScheduleManager({
         const batchNum =
           item.batch_number ||
           (product ? generateBatchNumber(product) : `BATCH-${scheduleDate.replace(/-/g, '')}`)
+        const itemForBrandId = resolveItemForBrandId(item)
         const { data, error } = await supabase
           .from('production_schedules')
           .upsert(
             {
               product_id: item.product_id,
               schedule_date: scheduleDate,
+              for_brand_id: itemForBrandId,
               quantity_required: item.quantity_required,
               batch_number: batchNum,
               notes: item.notes || null,
               status,
             },
-            { onConflict: 'product_id,schedule_date' }
+            { onConflict: 'product_id,schedule_date,for_brand_id' }
           )
-          .select('id, product_id')
+          .select('id, product_id, for_brand_id')
 
         if (error) {
           if (error.message.includes('status')) {
@@ -1357,26 +1727,45 @@ export function ProductionScheduleManager({
           return false
         }
         for (const row of data || []) {
-          idByProduct.set(row.product_id as string, row.id as string)
+          const mapKey = `${row.for_brand_id as string}:${row.product_id as string}`
+          idByProduct.set(mapKey, row.id as string)
         }
       }
 
-      const { data: existing } = await supabase
+      let existingQuery = supabase
         .from('production_schedules')
-        .select('id, product_id')
+        .select('id, product_id, for_brand_id')
         .eq('schedule_date', scheduleDate)
         .in('product_id', currentBrandProductIds)
         .in('status', ['draft', 'active'])
 
+      if (!isAggregateBrandView) {
+        existingQuery = existingQuery.eq('for_brand_id', forBrandId)
+      }
+
+      const { data: existing } = await existingQuery
+
       for (const row of existing || []) {
-        if (!items.some((i) => i.product_id === row.product_id)) {
-          await supabase.from('production_schedules').delete().eq('id', row.id)
+        const rowForBrandId = row.for_brand_id as string
+        if (
+          !items.some(
+            (i) =>
+              i.product_id === row.product_id &&
+              resolveItemForBrandId(i) === rowForBrandId
+          )
+        ) {
+          const { error: deleteError } = await supabase
+            .from('production_schedules')
+            .delete()
+            .eq('id', row.id)
+          if (deleteError) throw deleteError
         }
       }
 
       const nextItems = items.map((i) => ({
         ...i,
-        schedule_id: idByProduct.get(i.product_id) || i.schedule_id,
+        schedule_id:
+          idByProduct.get(`${resolveItemForBrandId(i)}:${i.product_id}`) || i.schedule_id,
       }))
       setItems(nextItems)
       setSavedSnapshot(scheduleItemsSnapshot(nextItems))
@@ -1415,14 +1804,17 @@ export function ProductionScheduleManager({
     }
     setSaving(true)
     try {
-      const productIds = allProducts.map((p) => p.id)
-      if (productIds.length > 0) {
-        const { error } = await supabase
+      if (scheduleScopeProductIds.length > 0) {
+        let cancelQuery = supabase
           .from('production_schedules')
           .update({ status: 'cancelled' })
           .eq('schedule_date', scheduleDate)
-          .in('product_id', productIds)
+          .in('product_id', scheduleScopeProductIds)
           .eq('status', 'draft')
+        if (!isAggregateBrandView) {
+          cancelQuery = cancelQuery.eq('for_brand_id', forBrandId)
+        }
+        const { error } = await cancelQuery
         if (error) {
           if (error.message.includes('status')) {
             alert(
@@ -1469,7 +1861,7 @@ export function ProductionScheduleManager({
         })),
         {
           scheduleDate,
-          brandId,
+          brandId: isAggregateBrandView ? brandId : forBrandId,
           requestedBy,
         }
       )
@@ -1610,7 +2002,7 @@ export function ProductionScheduleManager({
       alert(saveBeforePrintTitle)
       return
     }
-    setPrintingAllId(item.product_id)
+    setPrintingAllId(scheduleItemKey(item))
     try {
       const manufactureDate = getPhilippinesDate()
       const scheduleId = await resolveScheduleId(item)
@@ -1701,7 +2093,7 @@ export function ProductionScheduleManager({
       const ok = await persistScheduleRows('active')
       if (ok) {
         alert('Production schedule confirmed and saved.')
-        await fetchSchedule()
+        await fetchSchedule({ force: true })
       }
     } finally {
       setSaving(false)
@@ -1716,10 +2108,10 @@ export function ProductionScheduleManager({
   }[theme]
 
   const header = (
-    <div className="flex flex-wrap items-center justify-between gap-4 mb-6 pb-4 border-b border-gray-200">
-      <div className="flex flex-wrap items-center gap-4 min-w-0">
+    <div className="mb-4 pb-4 border-b border-gray-200 space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         {!embedded && (
-          <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+          <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2 shrink-0">
             <Calendar className="h-5 w-5" />
             Production Schedule
           </h2>
@@ -1728,17 +2120,108 @@ export function ProductionScheduleManager({
           type="date"
           value={scheduleDate}
           onChange={(e) => setScheduleDate(e.target.value)}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+          className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 shrink-0"
         />
-        {embedded && brandName && (
-          <span className="text-sm text-gray-500">{brandName}</span>
-        )}
+        {destinationBrands && destinationBrands.length > 0 && onForBrandChange ? (
+          <DestinationBrandSelect
+            brands={destinationBrands}
+            value={forBrandId}
+            onChange={onForBrandChange}
+          />
+        ) : brandName ? (
+          <span className="text-sm text-gray-500 shrink-0">
+            {isAggregateBrandView ? 'All destination brands' : brandName}
+          </span>
+        ) : null}
+
+        {isScheduleEditable ? (
+          <>
+            <span className="hidden md:block w-px h-7 bg-gray-200 shrink-0" aria-hidden />
+            <div className="flex flex-wrap items-center gap-2 min-w-[min(100%,240px)] flex-1 basis-[280px]">
+              <div className="min-w-[min(100%,200px)] flex-1 h-9 [&>div]:h-full [&_button]:h-full">
+                <StockLevelProductPicker
+                  value={selectedProduct}
+                  onChange={setSelectedProduct}
+                  productsByCategory={addableProductsByCategory}
+                  scheduleQty={selectedAddScheduleQty}
+                  disabled={addableProducts.length === 0}
+                  disabledProductIds={pickerDisabledProductIds}
+                  disabledProductReasonById={pickerDisabledReasonById}
+                />
+              </div>
+              <div className="h-9 flex items-stretch shrink-0 [&>div]:h-full [&_button]:h-full [&_input]:h-full [&_input]:py-0">
+                <ScheduleBatchStepper
+                  value={Math.max(1, selectedAddBatches || 1)}
+                  onChange={(n) => setAddQuantity(String(Math.max(1, n)))}
+                  min={1}
+                  step={1}
+                  disabled={addableProducts.length === 0}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleAddProduct}
+                disabled={
+                  addableProducts.length === 0 ||
+                  !selectedProduct ||
+                  !selectedProductHasBom
+                }
+                className={`inline-flex h-9 items-center justify-center gap-1.5 px-3 text-sm font-medium text-white rounded-lg disabled:opacity-50 shrink-0 ${themeClasses}`}
+              >
+                <Plus className="h-4 w-4" />
+                Add
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        <span className="hidden md:block w-px h-7 bg-gray-200 shrink-0" aria-hidden />
+        <div
+          className="flex items-center gap-2 min-w-0 flex-[1_1_auto] basis-[160px]"
+          title={`Factory staff on floor for ${scheduleDate} (from /factory)`}
+        >
+          <Users className="h-4 w-4 text-slate-500 shrink-0" aria-hidden />
+          {floorStaff.length === 0 ? (
+            <span className="text-xs text-gray-400">No staff on floor</span>
+          ) : (
+            <ul className="flex flex-wrap gap-1.5 min-w-0">
+              {floorStaff.map((row) => (
+                <li
+                  key={row.id}
+                  className="inline-flex items-center px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-full text-xs text-gray-800"
+                >
+                  {row.full_name}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {!embedded && onClose ? (
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 p-1 shrink-0 ml-auto"
+          >
+            <X className="h-6 w-6" />
+          </button>
+        ) : null}
       </div>
-      {!embedded && onClose && (
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 shrink-0">
-          <X className="h-6 w-6" />
-        </button>
-      )}
+
+      {isScheduleEditable && selectedProduct ? (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          {selectedAddYield > 1 && selectedAddBatches > 0 ? (
+            <p className="text-xs text-indigo-700">
+              {selectedAddBatches} batch{selectedAddBatches === 1 ? '' : 'es'} × {selectedAddYield} ={' '}
+              {selectedAddScheduleQty} qty
+            </p>
+          ) : null}
+          <ScheduleAddStockSimulation
+            product={addableProducts.find((p) => p.id === selectedProduct)}
+            batches={selectedAddBatches}
+            scheduleQty={selectedAddScheduleQty}
+          />
+        </div>
+      ) : null}
     </div>
   )
 
@@ -1753,121 +2236,7 @@ export function ProductionScheduleManager({
           </p>
         ) : null}
 
-        {isScheduleEditable && schedulePersistStatus === 'draft' && !hasUnsavedChanges ? (
-          <p className="mb-4 text-sm text-indigo-900 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
-            <span className="font-medium">Draft schedule</span> — material requests can be sent to
-            Procurement. Confirm with <span className="font-medium">Save schedule</span> when on-floor stock
-            is sufficient. Printing is disabled until confirmed.
-          </p>
-        ) : null}
-
-        {isScheduleEditable && isScheduleConfirmed ? (
-          <p className="mb-4 text-sm text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-            Schedule confirmed for this date — you can print stickers.
-          </p>
-        ) : null}
-
         <div className="mb-5 space-y-4">
-          <div
-            className={
-              isScheduleEditable
-                ? 'grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch'
-                : 'grid grid-cols-1'
-            }
-          >
-            {isScheduleEditable ? (
-              <div className="p-4 bg-gray-50 rounded-lg border border-gray-200 min-w-0">
-                <h4 className="text-sm font-medium text-gray-800 mb-3">Add Product</h4>
-                <div className="space-y-3">
-                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-3 gap-y-1.5 items-center">
-                    <label className="text-xs text-gray-500 col-start-1 row-start-1">Product</label>
-                    <label className="text-xs text-gray-500 col-start-2 row-start-1">Batch</label>
-                    <span className="col-start-3 row-start-1 h-[1.125rem] shrink-0" aria-hidden />
-                    <div className="col-start-1 row-start-2 min-w-0 h-9 [&>div]:h-full [&_button]:h-full">
-                      <StockLevelProductPicker
-                        value={selectedProduct}
-                        onChange={setSelectedProduct}
-                        productsByCategory={addableProductsByCategory}
-                        scheduleQty={selectedAddScheduleQty}
-                        disabled={addableProducts.length === 0}
-                        disabledProductIds={pickerDisabledProductIds}
-                        disabledProductTitle="No BOM"
-                        disabledProductReasonById={pickerDisabledReasonById}
-                      />
-                    </div>
-                    <div className="col-start-2 row-start-2 h-9 flex items-stretch [&>div]:h-full [&_button]:h-full [&_input]:h-full [&_input]:py-0">
-                      <ScheduleBatchStepper
-                        value={Math.max(1, selectedAddBatches || 1)}
-                        onChange={(n) => setAddQuantity(String(Math.max(1, n)))}
-                        min={1}
-                        step={1}
-                        disabled={addableProducts.length === 0}
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleAddProduct}
-                      disabled={
-                        addableProducts.length === 0 ||
-                        !selectedProduct ||
-                        !selectedProductHasBom
-                      }
-                      className={`col-start-3 row-start-2 inline-flex h-9 items-center justify-center gap-2 px-4 text-sm font-medium text-white rounded-lg disabled:opacity-50 shrink-0 ${themeClasses}`}
-                    >
-                      <Plus className="h-4 w-4" />
-                      Add
-                    </button>
-                  </div>
-                  {selectedAddYield > 1 && selectedAddBatches > 0 ? (
-                    <p className="text-xs text-indigo-700">
-                      {selectedAddBatches} batch{selectedAddBatches === 1 ? '' : 'es'} × {selectedAddYield} ={' '}
-                      {selectedAddScheduleQty} qty
-                    </p>
-                  ) : null}
-                  <ScheduleAddStockSimulation
-                    product={addableProducts.find((p) => p.id === selectedProduct)}
-                    batches={selectedAddBatches}
-                    scheduleQty={selectedAddScheduleQty}
-                  />
-                </div>
-              </div>
-            ) : null}
-
-            <div
-              className={`p-4 bg-slate-50 rounded-lg border border-slate-200 min-w-0 flex flex-col ${
-                isScheduleEditable ? '' : 'lg:max-w-none'
-              }`}
-            >
-              <h3 className="text-sm font-medium text-gray-800 flex items-center gap-2 mb-1 shrink-0">
-                <Users className="h-4 w-4 text-slate-600 shrink-0" />
-                Factory staff on floor
-              </h3>
-              <p className="text-xs text-gray-500 mb-3 shrink-0">
-                From{' '}
-                <a href="/factory" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">
-                  /factory
-                </a>{' '}
-                for {scheduleDate}.
-              </p>
-              <div className="flex-1 min-h-0">
-                {floorStaff.length === 0 ? (
-                  <p className="text-sm text-gray-400">No staff on the floor for this date.</p>
-                ) : (
-                  <ul className="flex flex-wrap gap-2 content-start">
-                    {floorStaff.map((row) => (
-                      <li
-                        key={row.id}
-                        className="inline-flex items-center px-2.5 py-1 bg-white border border-slate-200 rounded-full text-xs text-gray-900"
-                      >
-                        {row.full_name}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
-          </div>
-
           <div
             className={`grid gap-4 items-start ${
               isScheduleEditable || items.length > 0
@@ -1875,62 +2244,110 @@ export function ProductionScheduleManager({
                 : 'grid-cols-1'
             }`}
           >
+            {!loading && !scheduleLoading && items.length > 0 ? (
+              <div className="lg:col-span-2 rounded-lg border border-gray-200 bg-white px-4 py-3">
+                <div className="flex items-baseline justify-between gap-2 mb-1.5">
+                  <p className="text-sm text-gray-700 tabular-nums">
+                    <span
+                      className={`text-base font-semibold ${
+                        scheduleProductionTotals.done
+                          ? 'text-emerald-700'
+                          : scheduleProductionTotals.scanned > 0
+                            ? 'text-indigo-700'
+                            : 'text-gray-900'
+                      }`}
+                    >
+                      {scheduleProductionTotals.scanned}
+                    </span>
+                    <span className="text-gray-400 font-medium">
+                      /{scheduleProductionTotals.required}
+                    </span>
+                    <span className="ml-1.5 text-xs text-gray-500">scanned</span>
+                  </p>
+                  <span
+                    className={`text-sm font-semibold tabular-nums ${
+                      scheduleProductionTotals.done ? 'text-emerald-700' : 'text-gray-600'
+                    }`}
+                  >
+                    {scheduleProductionTotals.pct}%
+                  </span>
+                </div>
+                <div className="h-2.5 rounded-full bg-slate-200 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-[width] duration-500 ${
+                      scheduleProductionTotals.done
+                        ? 'bg-emerald-500'
+                        : scheduleProductionTotals.scanned > 0
+                          ? 'bg-indigo-500'
+                          : 'bg-slate-300'
+                    }`}
+                    style={{ width: `${scheduleProductionTotals.pct}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
+
             <div className="min-w-0 rounded-lg border border-gray-200 bg-white overflow-hidden">
-              {loading || scheduleLoading ? (
+              {(loading || scheduleLoading) && items.length === 0 ? (
                 <ScheduleListSkeleton editable={isScheduleEditable} />
               ) : items.length === 0 ? (
                 <div className="text-center py-12 px-4 text-gray-500">
                   <p>No products in schedule for {scheduleDate}</p>
                   <p className="text-sm mt-1">
                     {isScheduleEditable
-                      ? 'Add products using the form above'
+                      ? 'Add a product using the picker above'
                       : 'This date has no scheduled products'}
                   </p>
                 </div>
               ) : (
-                <div className="overflow-x-auto -mx-px">
-                <div className="divide-y divide-gray-200 min-w-[46rem]">
+                <div className="w-full min-w-0 overflow-hidden">
+                <div className="divide-y divide-gray-200">
                   <div
-                    className={`hidden lg:grid items-center gap-x-5 px-5 py-2.5 bg-gray-50 border-b border-gray-200 text-[10px] font-medium text-gray-500 uppercase tracking-wide ${
+                    className={`hidden lg:grid items-center gap-x-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[10px] font-medium text-gray-500 uppercase tracking-wide ${
                       isScheduleEditable ? SCHEDULE_LIST_GRID_EDITABLE : SCHEDULE_LIST_GRID_READONLY
                     }`}
                   >
-                    <span className="pl-1">Product</span>
-                    <span className="text-center">Printed</span>
-                    <span className="text-center">Batch</span>
-                    <span className="px-1">Notes</span>
-                    <span className="text-center">Print</span>
+                    <span className="pl-1 min-w-0">Product</span>
+                    <span className="text-center">Progress</span>
+                    <span className="text-center pr-2 self-center">Qty</span>
+                    <span className="text-center self-center">Floor batch</span>
+                    <span className="px-1 min-w-0 pl-3 self-center">Notes</span>
+                    <span className="text-center self-center">Print</span>
                     {isScheduleEditable ? <span className="text-center sr-only">Remove</span> : null}
                   </div>
                   {items.map((item) => {
+                    const itemKey = scheduleItemKey(item)
                     const itemYield = yieldForProductId(item.product_id)
                     const itemBatches = scheduleQtyToBatches(item.quantity_required, itemYield)
                     const remaining = getRequiredRemainingCount(item)
                     const pendingStickerCount = getPendingStickerCount(item)
                     const requestedRemaining = getRequestedRemainingCount(item)
-                    const expanded = !!expandedProductIds[item.product_id]
-                    const isPrintingAll = printingAllId === item.product_id
+                    const expanded = !!expandedProductIds[itemKey]
+                    const isPrintingAll = printingAllId === itemKey
                     const activeStickers = item.stickers.filter(isActiveSticker)
                     const voidedStickers = item.stickers.filter((s) => s.voided_at)
-                    const activePrinted = activeStickers.length
+                    const scannedCount = countScannedStickers(item.stickers)
                     const requiredSlots = Array.from({ length: item.quantity_required }, (_, i) => ({
                       unit: i + 1,
                       sticker: activeStickers[i] as StickerLog | undefined,
                     }))
                     const extraStickers = activeStickers.slice(item.quantity_required)
+                    const productionBatch = primaryFactoryBatchForSchedule(
+                      productionBatchesByScheduleId[item.schedule_id]
+                    )
 
                     const rowGridClass = isScheduleEditable
                       ? `grid-cols-1 ${SCHEDULE_LIST_GRID_EDITABLE}`
                       : `grid-cols-1 ${SCHEDULE_LIST_GRID_READONLY}`
 
                     return (
-                      <div key={item.product_id} className="bg-white">
+                      <div key={itemKey} className="bg-white">
                         <div
-                          className={`grid items-center gap-x-5 gap-y-3 px-5 py-3.5 hover:bg-gray-50 ${rowGridClass}`}
+                          className={`grid items-center gap-x-4 gap-y-3 px-4 py-3.5 hover:bg-gray-50 min-w-0 ${rowGridClass}`}
                         >
                           <button
                             type="button"
-                            onClick={() => toggleExpanded(item.product_id)}
+                            onClick={() => toggleExpanded(itemKey)}
                             className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 items-center min-w-0 text-left"
                           >
                             {expanded ? (
@@ -1942,7 +2359,15 @@ export function ProductionScheduleManager({
                               <span className="text-sm font-medium text-gray-900 truncate block">
                                 {item.product_name}
                               </span>
-                              <span className="text-xs text-gray-400 truncate block lg:hidden">
+                              <div className="flex flex-wrap items-center gap-1.5 lg:hidden">
+                                <FactoryProductionBatchStatusBadge
+                                  batch={productionBatch}
+                                  compact
+                                />
+                              </div>
+                              <span
+                                className={`text-xs text-gray-400 truncate block ${isAggregateBrandView ? '' : 'lg:hidden'}`}
+                              >
                                 {item.brand_name}
                               </span>
                               <span className="text-xs text-gray-500 truncate block lg:hidden">
@@ -1950,97 +2375,187 @@ export function ProductionScheduleManager({
                               </span>
                             </div>
                           </button>
-                          <span className="text-xs tabular-nums text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full justify-self-center whitespace-nowrap">
-                            {activePrinted}/{item.quantity_required}
+                          <div className="flex flex-col items-center justify-center gap-0.5 justify-self-center">
+                            <ProgressFractionCircle
+                              current={scannedCount}
+                              total={item.quantity_required}
+                              size="sm"
+                              strokeClass={
+                                item.quantity_required > 0 && scannedCount >= item.quantity_required
+                                  ? 'text-emerald-600'
+                                  : scannedCount > 0
+                                    ? 'text-indigo-600'
+                                    : 'text-slate-400'
+                              }
+                            />
                             {pendingStickerCount > 0 ? (
-                              <span className="text-amber-700"> +{pendingStickerCount}</span>
+                              <span className="text-[10px] font-semibold tabular-nums text-amber-700">
+                                +{pendingStickerCount}
+                              </span>
                             ) : null}
-                          </span>
-                          <div className="justify-self-center">
+                          </div>
+                          <div className="flex min-w-0 items-center justify-center self-center pr-2">
                             {isScheduleEditable ? (
                               <ScheduleBatchStepper
                                 value={itemBatches}
-                                onChange={(n) =>
-                                  handleUpdateScheduleBatches(item.product_id, n)
-                                }
+                                onChange={(n) => handleUpdateScheduleBatches(item, n)}
                                 min={0}
                                 step={1}
                                 allowDecimal={itemYield > 1}
                               />
                             ) : (
-                              <span className="text-sm tabular-nums text-gray-900 block text-center">
+                              <span className="text-sm tabular-nums text-gray-900">
                                 {itemYield > 1 && itemBatches % 1 !== 0
                                   ? itemBatches.toFixed(2)
                                   : itemBatches}
                               </span>
                             )}
                           </div>
-                          <div className="min-w-0 justify-self-stretch">
+                          <div className="hidden lg:flex min-w-0 items-center justify-center self-center">
+                            <FactoryProductionBatchStatusBadge batch={productionBatch} />
+                          </div>
+                          <div className="flex min-w-0 items-center self-center pl-3">
                             {isScheduleEditable ? (
                               <input
                                 type="text"
-                                placeholder="Notes"
                                 value={item.notes || ''}
                                 onClick={(e) => e.stopPropagation()}
-                                onChange={(e) =>
-                                  handleUpdateNotes(item.product_id, e.target.value)
-                                }
-                                className="w-full max-w-full px-2 py-1 border rounded text-xs"
+                                onChange={(e) => handleUpdateNotes(item, e.target.value)}
+                                className="h-8 w-full max-w-full px-2 border rounded text-xs leading-none"
                               />
                             ) : (
-                              <span className="text-xs text-gray-500 truncate block">
+                              <span className="text-xs text-gray-500 truncate">
                                 {item.notes || '—'}
                               </span>
                             )}
                           </div>
-                          <div className="flex justify-center min-h-[1.75rem]">
+                          <div className="flex min-w-0 items-center justify-center self-center">
                             {canShowPrintActions(item) ? (
-                              <div className="flex flex-col items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  void handlePrintAll(item)
+                                }}
+                                disabled={
+                                  remaining <= 0 ||
+                                  isNewPrintBlocked(item) ||
+                                  isPrintingAll ||
+                                  printingStickerKey !== null
+                                }
+                                title={
+                                  remaining <= 0
+                                    ? pendingStickerCount > 0
+                                      ? 'All scheduled stickers printed — use Print requested below'
+                                      : 'All stickers printed'
+                                    : isNewPrintBlocked(item)
+                                      ? saveBeforePrintTitle
+                                      : `Print all (${remaining})`
+                                }
+                                aria-label={`Print all (${remaining})`}
+                                className="inline-flex h-8 max-w-full items-center justify-center gap-1 px-1.5 bg-indigo-500 text-white rounded text-xs hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                <Printer className="h-3 w-3 shrink-0" />
+                                <span className="truncate">Print ({remaining})</span>
+                              </button>
+                            ) : null}
+                          </div>
+                          {isScheduleEditable ? (
+                            <div className="flex items-center justify-center self-center min-w-0">
+                              {scannedCount === 0 ? (
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation()
-                                    void handlePrintAll(item)
+                                    handleRemoveItem(item)
                                   }}
-                                  disabled={
-                                    remaining <= 0 ||
-                                    isNewPrintBlocked(item) ||
-                                    isPrintingAll ||
-                                    printingStickerKey !== null
-                                  }
-                                  title={
-                                    remaining <= 0
-                                      ? pendingStickerCount > 0
-                                        ? 'All scheduled stickers printed — use Print requested below'
-                                        : 'All stickers printed'
-                                      : isNewPrintBlocked(item)
-                                        ? saveBeforePrintTitle
-                                        : undefined
-                                  }
-                                  className="flex items-center gap-1 px-2 py-1 bg-indigo-500 text-white rounded text-xs hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                                  className="text-red-600 hover:text-red-800 p-1 shrink-0"
+                                  title="Remove from schedule"
                                 >
-                                  <Printer className="h-3 w-3 shrink-0" />
-                                  <span className="hidden md:inline">Print all </span>({remaining})
+                                  <Trash2 className="h-4 w-4" />
                                 </button>
-                              </div>
-                            ) : null}
-                          </div>
-                          {isScheduleEditable ? (
-                            <div className="flex justify-center">
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveItem(item)}
-                                className="text-red-600 hover:text-red-800 p-1"
-                                title="Remove from schedule"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </button>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>
 
                         {expanded ? (
                           <div className="px-4 pb-4 pt-3 bg-slate-50/80 border-t border-gray-100">
+                            {(() => {
+                              const productionBatches =
+                                productionBatchesByScheduleId[item.schedule_id] || []
+                              const inProgressBatch = productionBatches.find(
+                                (b) => b.status === 'in_progress'
+                              )
+                              const completedBatch = productionBatches.find(
+                                (b) => b.status === 'completed'
+                              )
+                              const activeBatch = inProgressBatch ?? completedBatch
+
+                              return (
+                                <div className="mb-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+                                  <div className="flex flex-wrap items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                                          Factory production batch
+                                        </p>
+                                        <FactoryProductionBatchStatusBadge
+                                          batch={activeBatch}
+                                          compact
+                                        />
+                                      </div>
+                                      {activeBatch ? (
+                                        <p className="text-sm text-gray-700 mt-1">
+                                          {activeBatch.units} unit
+                                          {activeBatch.units === 1 ? '' : 's'}
+                                          {activeBatch.started_by
+                                            ? ` · started by ${activeBatch.started_by}`
+                                            : ''}
+                                          {activeBatch.completed_at
+                                            ? ` · completed ${new Date(activeBatch.completed_at).toLocaleString([], {
+                                                month: 'short',
+                                                day: 'numeric',
+                                                hour: 'numeric',
+                                                minute: '2-digit',
+                                              })}`
+                                            : activeBatch.started_at
+                                              ? ` · started ${new Date(activeBatch.started_at).toLocaleString([], {
+                                                  month: 'short',
+                                                  day: 'numeric',
+                                                  hour: 'numeric',
+                                                  minute: '2-digit',
+                                                })}`
+                                              : ''}
+                                        </p>
+                                      ) : (
+                                        <p className="text-sm text-gray-500 mt-1">
+                                          No batch started on the factory floor yet.
+                                        </p>
+                                      )}
+                                    </div>
+                                    {completedBatch && !inProgressBatch ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void handleRevertProductionBatch(
+                                            completedBatch,
+                                            item.product_name
+                                          )
+                                        }
+                                        disabled={revertingBatchId === completedBatch.id}
+                                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-medium text-gray-700 hover:bg-slate-50 disabled:opacity-50 shrink-0"
+                                      >
+                                        <RotateCcw className="h-3.5 w-3.5" />
+                                        {revertingBatchId === completedBatch.id
+                                          ? 'Reverting…'
+                                          : 'Revert to in progress'}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              )
+                            })()}
                             {pendingStickerCount > 0 ? (
                               <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
                                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2066,12 +2581,13 @@ export function ProductionScheduleManager({
                                       title={
                                         isAdditionalPrintBlocked(item)
                                           ? saveBeforePrintTitle
-                                          : undefined
+                                          : `Print requested (${requestedRemaining})`
                                       }
+                                      aria-label={`Print requested (${requestedRemaining})`}
                                       className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-amber-600 text-white rounded text-xs font-medium hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
                                     >
                                       <Printer className="h-3 w-3 shrink-0" />
-                                      Print requested ({requestedRemaining})
+                                      Print ({requestedRemaining})
                                     </button>
                                   ) : null}
                                 </div>
@@ -2083,12 +2599,7 @@ export function ProductionScheduleManager({
                               >
                                 <span>Serial</span>
                                 <span className="text-center">SKU</span>
-                                <span
-                                  className="text-center truncate min-w-0 px-1 normal-case font-mono text-gray-700"
-                                  title={item.batch_number}
-                                >
-                                  {item.batch_number}
-                                </span>
+                                <span className="text-center">Scanned</span>
                                 <span className="text-right">Actions</span>
                               </div>
                               <ul className="divide-y divide-slate-100">
@@ -2117,7 +2628,7 @@ export function ProductionScheduleManager({
                                     </span>
                                     <SerialProductionCell sticker={sticker} />
                                     <div className="flex justify-end gap-1">
-                                      {sticker && !sticker.voided_at ? (
+                                      {sticker && !sticker.voided_at && !sticker.produced_at ? (
                                         <button
                                           type="button"
                                           onClick={() => void handleVoidSticker(sticker, item)}
@@ -2142,12 +2653,14 @@ export function ProductionScheduleManager({
                                         title={
                                           !sticker && isNewPrintBlocked(item)
                                             ? saveBeforePrintTitle
-                                            : undefined
+                                            : sticker
+                                              ? 'Reprint'
+                                              : 'Print'
                                         }
-                                        className="flex items-center gap-1 px-2 py-1 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700 disabled:opacity-50"
+                                        aria-label={sticker ? 'Reprint sticker' : 'Print sticker'}
+                                        className="inline-flex items-center justify-center min-w-[1.75rem] min-h-[1.75rem] p-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
                                       >
-                                        <Printer className="h-3 w-3 shrink-0" />
-                                        {sticker ? 'Reprint' : 'Print'}
+                                        <Printer className="h-3.5 w-3.5 shrink-0" />
                                       </button>
                                     </div>
                                   </li>
@@ -2187,12 +2700,12 @@ export function ProductionScheduleManager({
                                         title={
                                           isAdditionalPrintBlocked(item)
                                             ? saveBeforePrintTitle
-                                            : undefined
+                                            : 'Print'
                                         }
-                                        className="flex items-center gap-1 px-2 py-1 bg-amber-600 text-white rounded text-xs hover:bg-amber-700 disabled:opacity-50"
+                                        aria-label="Print sticker"
+                                        className="inline-flex items-center justify-center min-w-[1.75rem] min-h-[1.75rem] p-1 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50"
                                       >
-                                        <Printer className="h-3 w-3 shrink-0" />
-                                        Print
+                                        <Printer className="h-3.5 w-3.5 shrink-0" />
                                       </button>
                                     </div>
                                   </li>
@@ -2218,24 +2731,27 @@ export function ProductionScheduleManager({
                                     </span>
                                     <SerialProductionCell sticker={sticker} />
                                     <div className="flex justify-end gap-1">
-                                      <button
-                                        type="button"
-                                        onClick={() => void handleVoidSticker(sticker, item)}
-                                        disabled={printingStickerKey !== null || isPrintingAll}
-                                        title="Void sticker"
-                                        aria-label="Void sticker"
-                                        className="inline-flex items-center justify-center min-w-[1.75rem] min-h-[1.75rem] p-1 border border-red-200 text-red-700 rounded text-xs hover:bg-red-50 disabled:opacity-50"
-                                      >
-                                        <Ban className="h-3.5 w-3.5 shrink-0" />
-                                      </button>
+                                      {!sticker.produced_at ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleVoidSticker(sticker, item)}
+                                          disabled={printingStickerKey !== null || isPrintingAll}
+                                          title="Void sticker"
+                                          aria-label="Void sticker"
+                                          className="inline-flex items-center justify-center min-w-[1.75rem] min-h-[1.75rem] p-1 border border-red-200 text-red-700 rounded text-xs hover:bg-red-50 disabled:opacity-50"
+                                        >
+                                          <Ban className="h-3.5 w-3.5 shrink-0" />
+                                        </button>
+                                      ) : null}
                                       <button
                                         type="button"
                                         onClick={() => void handlePrintSticker(item, sticker)}
                                         disabled={printingStickerKey !== null || isPrintingAll}
-                                        className="flex items-center gap-1 px-2 py-1 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700 disabled:opacity-50"
+                                        title="Reprint"
+                                        aria-label="Reprint sticker"
+                                        className="inline-flex items-center justify-center min-w-[1.75rem] min-h-[1.75rem] p-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
                                       >
-                                        <Printer className="h-3 w-3 shrink-0" />
-                                        Reprint
+                                        <Printer className="h-3.5 w-3.5 shrink-0" />
                                       </button>
                                     </div>
                                   </li>
@@ -2279,10 +2795,11 @@ export function ProductionScheduleManager({
                                   type="button"
                                   onClick={() => void handlePrintAdditional(item)}
                                   disabled={printingStickerKey !== null || isPrintingAll}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 text-white rounded text-xs font-medium hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
+                                  title="Print additional"
+                                  aria-label="Print additional sticker"
+                                  className="inline-flex items-center justify-center min-w-[1.75rem] min-h-[1.75rem] p-1 bg-slate-700 text-white rounded hover:bg-slate-800 disabled:opacity-50 shrink-0"
                                 >
-                                  <PlusCircle className="h-3 w-3 shrink-0" />
-                                  Print additional
+                                  <Printer className="h-3.5 w-3.5 shrink-0" />
                                 </button>
                               </div>
                             ) : null}
@@ -2344,13 +2861,16 @@ export function ProductionScheduleManager({
                       <div className="space-y-3">
                         {perSkuBom.map(({ item, lines }) => (
                           <div
-                            key={item.product_id}
+                            key={scheduleItemKey(item)}
                             className="rounded-md border border-gray-100 bg-gray-50/80 p-2"
                           >
                             <p className="text-xs font-medium text-gray-900 mb-1.5 truncate" title={item.product_name}>
                               <span className="text-gray-500">{item.sku || '—'}</span>
                               {' · '}
                               {item.product_name}
+                              {isAggregateBrandView ? (
+                                <span className="text-gray-400 font-normal"> · {item.brand_name}</span>
+                              ) : null}
                               <span className="text-gray-500 font-normal">
                                 {' '}
                                 (×{item.quantity_required})
@@ -2368,7 +2888,25 @@ export function ProductionScheduleManager({
           </div>
         </div>
 
-        <div className="mt-5 pt-4 border-t border-gray-200 flex flex-wrap justify-end gap-3">
+        <div className="mt-5 pt-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-h-[2.25rem]">
+            {items.length > 0 && isScheduleConfirmed ? (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+                Confirmed
+              </span>
+            ) : items.length > 0 &&
+              schedulePersistStatus === 'draft' &&
+              !hasUnsavedChanges ? (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-indigo-50 text-indigo-800 border border-indigo-200">
+                Draft
+              </span>
+            ) : items.length > 0 && hasUnsavedChanges ? (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200">
+                Unsaved
+              </span>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap justify-end gap-3 ml-auto">
           {!embedded && onClose && (
             <button onClick={onClose} className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700">
               Close
@@ -2434,6 +2972,7 @@ export function ProductionScheduleManager({
               </button>
             </>
           ) : null}
+          </div>
         </div>
     </>
   )
@@ -2447,10 +2986,10 @@ export function ProductionScheduleManager({
   }
 
   return (
-    <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-      <div className="relative top-6 mx-auto p-5 border w-[calc(100%-1.5rem)] max-w-7xl shadow-lg rounded-lg bg-white max-h-[92vh] overflow-y-auto">
+    <Modal backdropClassName="bg-gray-600/50">
+      <div className="mx-auto p-5 border w-[calc(100%-1.5rem)] max-w-7xl shadow-lg rounded-lg bg-white max-h-[92vh] overflow-y-auto">
         {body}
       </div>
-    </div>
+    </Modal>
   )
 }

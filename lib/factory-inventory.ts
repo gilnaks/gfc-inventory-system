@@ -11,6 +11,7 @@ export const DEFAULT_RAW_MATERIAL_CATEGORIES = [
   'Ingredients',
   'Packaging',
   'Supplies',
+  'Components',
 ] as const
 
 export const FACTORY_INVENTORY_KIND_LABELS: Record<FactoryInventoryKind, string> = {
@@ -79,37 +80,19 @@ export const FACTORY_INVENTORY_META: Record<
   FactoryInventoryKind,
   {
     title: string
-    description: string
-    emptyHint: string
     labelPlaceholder: string
-    footer: string
   }
 > = {
   ingredients: {
     title: 'Ingredients',
-    description:
-      'Opened ingredients on the floor (flavoring bottles, sacks of sugar, etc.) for production and BOM usage.',
-    emptyHint: 'Record when an ingredient container is opened for production.',
     labelPlaceholder: 'e.g. Mango flavoring bottle #2',
-    footer:
-      'Request materials from Procurement before opening a package. After release, record the opened container here. BOM lines show which products use each item.',
   },
   packaging: {
     title: 'Packaging',
-    description:
-      'Opened packaging on the floor (cups, lids, boxes, pouches, etc.) ready for production lines.',
-    emptyHint: 'Record when a packaging unit is opened on the factory floor.',
     labelPlaceholder: 'e.g. 16oz cup sleeve #4',
-    footer:
-      'Request packaging from Procurement before opening on the floor. Assign materials to Packaging in Materials Inventory when needed.',
   },
   supplies: {
     title: 'Supplies',
-    description:
-      'Opened factory supplies (gloves, liners, cleaning, small tools, etc.) used during production.',
-    emptyHint: 'Record when a supplies package is opened for floor use.',
     labelPlaceholder: 'e.g. Nitrile gloves box B',
-    footer:
-      'Request supplies from Procurement before opening a package on the floor. Assign materials to Supplies in Materials Inventory when needed.',
   },
 }

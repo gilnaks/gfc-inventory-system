@@ -1,4 +1,4 @@
-import type { FactoryMaterialRequest } from './supabase'
+import type { FactoryMaterialRequest, FactoryOpenedMaterial } from './supabase'
 import {
   factoryRequestQtyToStockUnits,
   formatFactoryRequestQtyDisplay,
@@ -119,4 +119,32 @@ export function hasPendingRequest(
   materialId: string
 ): boolean {
   return requests.some((r) => r.material_id === materialId && r.status === 'pending')
+}
+
+export type RequestOpenProgress = {
+  total: number
+  consumed: number
+  available: number
+  pct: number
+  packageCount: number
+  openPackageCount: number
+}
+
+export function requestOpenProgress(
+  request: FactoryMaterialRequest,
+  packages: Array<Pick<FactoryOpenedMaterial, 'factory_request_id' | 'status'>>
+): RequestOpenProgress {
+  const total = Number(request.quantity) || 0
+  const consumed = Math.min(total, Number(request.quantity_used ?? 0) || 0)
+  const available = releasedRequestAvailable(request)
+  const pct = total > 0 ? Math.min(100, (consumed / total) * 100) : 0
+  const linked = packages.filter((p) => p.factory_request_id === request.id)
+  return {
+    total,
+    consumed,
+    available,
+    pct,
+    packageCount: linked.length,
+    openPackageCount: linked.filter((p) => p.status === 'open').length,
+  }
 }

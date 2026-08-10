@@ -1,0 +1,1016 @@
+table_name,ordinal_position,column_name,data_type,is_nullable,column_default
+accounting_accounts,1,id,uuid,NO,gen_random_uuid()
+accounting_accounts,2,brand_id,uuid,NO,
+accounting_accounts,3,code,character varying,NO,
+accounting_accounts,4,name,character varying,NO,
+accounting_accounts,5,account_type,character varying,NO,
+accounting_accounts,6,normal_balance,character varying,NO,
+accounting_accounts,7,parent_id,uuid,YES,
+accounting_accounts,8,is_system,boolean,NO,false
+accounting_accounts,9,is_active,boolean,NO,true
+accounting_accounts,10,created_at,timestamp with time zone,YES,now()
+accounting_accounts,11,updated_at,timestamp with time zone,YES,now()
+accounting_bank_accounts,1,id,uuid,NO,gen_random_uuid()
+accounting_bank_accounts,2,brand_id,uuid,NO,
+accounting_bank_accounts,3,name,character varying,NO,
+accounting_bank_accounts,4,account_last4,character varying,YES,
+accounting_bank_accounts,5,gl_account_id,uuid,NO,
+accounting_bank_accounts,6,is_active,boolean,NO,true
+accounting_bank_accounts,7,created_at,timestamp with time zone,YES,now()
+accounting_bank_accounts,8,updated_at,timestamp with time zone,YES,now()
+accounting_bank_reconciliation_items,1,id,uuid,NO,gen_random_uuid()
+accounting_bank_reconciliation_items,2,reconciliation_id,uuid,NO,
+accounting_bank_reconciliation_items,3,voucher_id,uuid,YES,
+accounting_bank_reconciliation_items,4,journal_entry_id,uuid,YES,
+accounting_bank_reconciliation_items,5,description,text,YES,
+accounting_bank_reconciliation_items,6,amount,numeric,NO,0
+accounting_bank_reconciliation_items,7,is_cleared,boolean,NO,false
+accounting_bank_reconciliation_items,8,created_at,timestamp with time zone,YES,now()
+accounting_bank_reconciliations,1,id,uuid,NO,gen_random_uuid()
+accounting_bank_reconciliations,2,brand_id,uuid,NO,
+accounting_bank_reconciliations,3,bank_account_id,uuid,NO,
+accounting_bank_reconciliations,4,statement_date,date,NO,
+accounting_bank_reconciliations,5,statement_ending_balance,numeric,NO,0
+accounting_bank_reconciliations,6,book_balance,numeric,NO,0
+accounting_bank_reconciliations,7,notes,text,YES,
+accounting_bank_reconciliations,8,reconciled_by,character varying,YES,
+accounting_bank_reconciliations,9,created_at,timestamp with time zone,YES,now()
+accounting_bank_reconciliations,10,updated_at,timestamp with time zone,YES,now()
+accounting_gl_balances,1,id,uuid,NO,gen_random_uuid()
+accounting_gl_balances,2,brand_id,uuid,NO,
+accounting_gl_balances,3,account_id,uuid,NO,
+accounting_gl_balances,4,period_id,uuid,NO,
+accounting_gl_balances,5,debit_total,numeric,NO,0
+accounting_gl_balances,6,credit_total,numeric,NO,0
+accounting_gl_balances,7,balance,numeric,NO,0
+accounting_gl_balances,8,updated_at,timestamp with time zone,YES,now()
+accounting_journal_entries,1,id,uuid,NO,gen_random_uuid()
+accounting_journal_entries,2,brand_id,uuid,NO,
+accounting_journal_entries,3,entry_number,character varying,NO,
+accounting_journal_entries,4,entry_date,date,NO,CURRENT_DATE
+accounting_journal_entries,5,memo,text,YES,
+accounting_journal_entries,6,status,character varying,NO,'draft'::character varying
+accounting_journal_entries,7,source_type,character varying,NO,
+accounting_journal_entries,8,source_id,uuid,YES,
+accounting_journal_entries,9,posted_at,timestamp with time zone,YES,
+accounting_journal_entries,10,posted_by,character varying,YES,
+accounting_journal_entries,11,reverses_entry_id,uuid,YES,
+accounting_journal_entries,12,created_by,character varying,YES,
+accounting_journal_entries,13,created_at,timestamp with time zone,YES,now()
+accounting_journal_entries,14,updated_at,timestamp with time zone,YES,now()
+accounting_journal_lines,1,id,uuid,NO,gen_random_uuid()
+accounting_journal_lines,2,journal_entry_id,uuid,NO,
+accounting_journal_lines,3,account_id,uuid,NO,
+accounting_journal_lines,4,line_no,integer,NO,1
+accounting_journal_lines,5,debit,numeric,NO,0
+accounting_journal_lines,6,credit,numeric,NO,0
+accounting_journal_lines,7,memo,text,YES,
+accounting_journal_lines,8,voucher_line_id,uuid,YES,
+accounting_journal_lines,9,created_at,timestamp with time zone,YES,now()
+accounting_periods,1,id,uuid,NO,gen_random_uuid()
+accounting_periods,2,brand_id,uuid,NO,
+accounting_periods,3,year,integer,NO,
+accounting_periods,4,month,integer,NO,
+accounting_periods,5,status,character varying,NO,'open'::character varying
+accounting_periods,6,created_at,timestamp with time zone,YES,now()
+accounting_periods,7,updated_at,timestamp with time zone,YES,now()
+accounting_periods,8,year_closed,boolean,NO,false
+accounting_petty_cash_reconciliations,1,id,uuid,NO,gen_random_uuid()
+accounting_petty_cash_reconciliations,2,brand_id,uuid,NO,
+accounting_petty_cash_reconciliations,3,count_date,date,NO,CURRENT_DATE
+accounting_petty_cash_reconciliations,4,fund_amount,numeric,NO,0
+accounting_petty_cash_reconciliations,5,cash_on_hand,numeric,NO,0
+accounting_petty_cash_reconciliations,6,pcv_expenses_total,numeric,NO,0
+accounting_petty_cash_reconciliations,7,variance,numeric,NO,0
+accounting_petty_cash_reconciliations,8,notes,text,YES,
+accounting_petty_cash_reconciliations,9,counted_by,character varying,YES,
+accounting_petty_cash_reconciliations,10,created_at,timestamp with time zone,YES,now()
+accounting_posting_errors,1,id,uuid,NO,gen_random_uuid()
+accounting_posting_errors,2,brand_id,uuid,NO,
+accounting_posting_errors,3,source_type,character varying,NO,
+accounting_posting_errors,4,source_id,uuid,NO,
+accounting_posting_errors,5,error_message,text,NO,
+accounting_posting_errors,6,created_at,timestamp with time zone,YES,now()
+accounting_posting_errors,7,resolved_at,timestamp with time zone,YES,
+accounting_voucher_lines,1,id,uuid,NO,gen_random_uuid()
+accounting_voucher_lines,2,voucher_id,uuid,NO,
+accounting_voucher_lines,3,line_no,integer,NO,1
+accounting_voucher_lines,4,description,text,NO,''::text
+accounting_voucher_lines,5,amount,numeric,NO,0
+accounting_voucher_lines,6,reference_doc,character varying,YES,
+accounting_voucher_lines,7,po_id,uuid,YES,
+accounting_voucher_lines,8,created_at,timestamp with time zone,YES,now()
+accounting_voucher_lines,9,debit_account_id,uuid,YES,
+accounting_voucher_links,1,id,uuid,NO,gen_random_uuid()
+accounting_voucher_links,2,voucher_id,uuid,NO,
+accounting_voucher_links,3,source_type,character varying,NO,
+accounting_voucher_links,4,source_id,uuid,NO,
+accounting_voucher_links,5,link_role,character varying,NO,'primary'::character varying
+accounting_voucher_links,6,attachment_url,text,YES,
+accounting_voucher_links,7,notes,text,YES,
+accounting_voucher_links,8,created_at,timestamp with time zone,YES,now()
+accounting_voucher_settings,1,id,uuid,NO,gen_random_uuid()
+accounting_voucher_settings,2,brand_id,uuid,NO,
+accounting_voucher_settings,3,company_name,character varying,YES,'GILNAKS'::character varying
+accounting_voucher_settings,4,company_address,text,YES,"'Lapu-lapu City, Cebu'::text"
+accounting_voucher_settings,5,approved_by_name,character varying,YES,'WENDELLIN C. NAKILA'::character varying
+accounting_voucher_settings,6,approved_by_title,character varying,YES,'Accounting Manager'::character varying
+accounting_voucher_settings,7,petty_cash_custodian_name,character varying,YES,'John Gilbert G. Nakila'::character varying
+accounting_voucher_settings,8,petty_cash_custodian_title,character varying,YES,'Procurement Manager / Petty Cash Custodian'::character varying
+accounting_voucher_settings,9,liquidated_by_name,character varying,YES,'WENDELLIN C. NAKILA'::character varying
+accounting_voucher_settings,10,liquidated_by_title,character varying,YES,'Accounting Manager'::character varying
+accounting_voucher_settings,11,pv_number_prefix,character varying,YES,'PV'::character varying
+accounting_voucher_settings,12,pcv_number_prefix,character varying,YES,'PCV'::character varying
+accounting_voucher_settings,13,pv_next_seq,integer,YES,1
+accounting_voucher_settings,14,pcv_next_seq,integer,YES,1
+accounting_voucher_settings,15,created_at,timestamp with time zone,YES,now()
+accounting_voucher_settings,16,updated_at,timestamp with time zone,YES,now()
+accounting_voucher_settings,17,petty_cash_fund_amount,numeric,YES,5000
+accounting_voucher_settings,18,je_number_prefix,character varying,YES,'JE'::character varying
+accounting_voucher_settings,19,je_next_seq,integer,YES,1
+accounting_voucher_settings,20,default_cash_account_id,uuid,YES,
+accounting_voucher_settings,21,default_ap_account_id,uuid,YES,
+accounting_voucher_settings,22,default_ar_account_id,uuid,YES,
+accounting_voucher_settings,23,default_sales_account_id,uuid,YES,
+accounting_voucher_settings,24,default_delivery_income_account_id,uuid,YES,
+accounting_voucher_settings,25,default_inventory_account_id,uuid,YES,
+accounting_voucher_settings,26,default_petty_cash_account_id,uuid,YES,
+accounting_voucher_settings,27,coa_seeded_at,timestamp with time zone,YES,
+accounting_voucher_settings,28,default_payroll_expense_account_id,uuid,YES,
+accounting_voucher_settings,29,default_accrued_payroll_account_id,uuid,YES,
+accounting_voucher_settings,30,default_staff_advance_account_id,uuid,YES,
+accounting_voucher_settings,31,default_inventory_variance_account_id,uuid,YES,
+accounting_voucher_settings,32,default_intercompany_sales_account_id,uuid,YES,
+accounting_voucher_settings,33,default_intercompany_cogs_account_id,uuid,YES,
+accounting_voucher_settings,34,default_intercompany_markup_account_id,uuid,YES,
+accounting_voucher_settings,35,default_due_to_gfc_account_id,uuid,YES,
+accounting_voucher_settings,36,default_intercompany_markup_percent,numeric,YES,15.00
+accounting_voucher_settings,37,intercompany_default_markup_percent,numeric,NO,15
+accounting_vouchers,1,id,uuid,NO,gen_random_uuid()
+accounting_vouchers,2,brand_id,uuid,NO,
+accounting_vouchers,3,voucher_type,character varying,NO,
+accounting_vouchers,4,voucher_number,character varying,NO,
+accounting_vouchers,5,voucher_date,date,NO,CURRENT_DATE
+accounting_vouchers,6,department,character varying,YES,
+accounting_vouchers,7,requested_by,character varying,YES,
+accounting_vouchers,8,prepared_by,character varying,YES,
+accounting_vouchers,9,payee_name,character varying,YES,
+accounting_vouchers,10,payment_for,text,YES,
+accounting_vouchers,11,payee_kind,character varying,YES,
+accounting_vouchers,12,payment_mode,character varying,YES,
+accounting_vouchers,13,check_number,character varying,YES,
+accounting_vouchers,14,check_date,date,YES,
+accounting_vouchers,15,bank_ref_number,character varying,YES,
+accounting_vouchers,16,bank_ref_date,date,YES,
+accounting_vouchers,17,received_by,character varying,YES,
+accounting_vouchers,18,purpose,text,YES,
+accounting_vouchers,19,amount_requested,numeric,YES,0
+accounting_vouchers,20,amount_released,numeric,YES,0
+accounting_vouchers,21,date_released,date,YES,
+accounting_vouchers,22,actual_expense,numeric,YES,
+accounting_vouchers,23,cash_advance,numeric,YES,
+accounting_vouchers,24,excess_returned,numeric,YES,
+accounting_vouchers,25,additional_reimbursement,numeric,YES,
+accounting_vouchers,26,status,character varying,NO,'draft'::character varying
+accounting_vouchers,27,submitted_at,timestamp with time zone,YES,
+accounting_vouchers,28,approved_at,timestamp with time zone,YES,
+accounting_vouchers,29,liquidated_at,timestamp with time zone,YES,
+accounting_vouchers,30,prepared_by_name,character varying,YES,
+accounting_vouchers,31,requestor_name,character varying,YES,
+accounting_vouchers,32,approved_by_name,character varying,YES,
+accounting_vouchers,33,approved_by_title,character varying,YES,
+accounting_vouchers,34,liquidated_by_name,character varying,YES,
+accounting_vouchers,35,liquidated_by_title,character varying,YES,
+accounting_vouchers,36,has_or,boolean,YES,false
+accounting_vouchers,37,has_si,boolean,YES,false
+accounting_vouchers,38,has_dr,boolean,YES,false
+accounting_vouchers,39,has_transport_receipt,boolean,YES,false
+accounting_vouchers,40,has_po,boolean,YES,false
+accounting_vouchers,41,has_invoice,boolean,YES,false
+accounting_vouchers,42,has_receiving_report,boolean,YES,false
+accounting_vouchers,43,supporting_docs_other,text,YES,
+accounting_vouchers,44,notes,text,YES,
+accounting_vouchers,45,created_by,character varying,YES,
+accounting_vouchers,46,created_at,timestamp with time zone,YES,now()
+accounting_vouchers,47,updated_at,timestamp with time zone,YES,now()
+accounting_vouchers,48,journal_entry_id,uuid,YES,
+accounting_vouchers,49,posted_at,timestamp with time zone,YES,
+accounting_year_end_closes,1,id,uuid,NO,gen_random_uuid()
+accounting_year_end_closes,2,brand_id,uuid,NO,
+accounting_year_end_closes,3,fiscal_year,integer,NO,
+accounting_year_end_closes,4,journal_entry_id,uuid,NO,
+accounting_year_end_closes,5,closed_at,timestamp with time zone,YES,now()
+accounting_year_end_closes,6,closed_by,character varying,YES,
+admin_credentials,1,id,uuid,NO,gen_random_uuid()
+admin_credentials,2,username,character varying,NO,
+admin_credentials,3,passcode,character varying,NO,
+admin_credentials,4,is_active,boolean,YES,true
+admin_credentials,5,created_at,timestamp with time zone,YES,now()
+admin_credentials,6,updated_at,timestamp with time zone,YES,now()
+admin_credentials,7,role,text,NO,'admin'::text
+announcements,1,id,uuid,NO,uuid_generate_v4()
+announcements,2,title,text,NO,
+announcements,3,message,text,NO,
+announcements,4,type,text,NO,
+announcements,5,staff_registration_id,uuid,YES,
+announcements,6,created_by,text,YES,
+announcements,7,created_at,timestamp with time zone,YES,now()
+announcements,8,updated_at,timestamp with time zone,YES,now()
+announcements,9,is_active,boolean,YES,true
+brands,1,id,uuid,NO,gen_random_uuid()
+brands,2,name,character varying,NO,
+brands,3,slug,character varying,NO,
+brands,4,logo_url,text,YES,
+brands,5,created_at,timestamp with time zone,YES,now()
+brands,6,updated_at,timestamp with time zone,YES,now()
+brands,7,brand_role,character varying,NO,'retail'::character varying
+customer_order_status_history,1,id,uuid,NO,gen_random_uuid()
+customer_order_status_history,2,order_id,uuid,NO,
+customer_order_status_history,3,old_status,character varying,YES,
+customer_order_status_history,4,new_status,character varying,NO,
+customer_order_status_history,5,changed_by,character varying,NO,
+customer_order_status_history,6,notes,text,YES,
+customer_order_status_history,7,created_at,timestamp with time zone,YES,now()
+customer_orders,1,id,uuid,NO,gen_random_uuid()
+customer_orders,2,location_id,uuid,NO,
+customer_orders,3,brand_id,uuid,NO,
+customer_orders,4,customer_name,character varying,YES,
+customer_orders,5,customer_contact,character varying,YES,
+customer_orders,6,status,character varying,NO,'pending'::character varying
+customer_orders,7,total_amount,numeric,YES,0
+customer_orders,8,notes,text,YES,
+customer_orders,9,created_at,timestamp with time zone,YES,now()
+customer_orders,10,updated_at,timestamp with time zone,YES,now()
+customer_orders,11,deposit_slip_url,text,YES,
+customer_orders,12,delivery_type,character varying,NO,'delivery'::character varying
+customer_orders,14,returnable_pans_image_url,text,YES,
+customer_orders,15,freight_fee,numeric,NO,0
+customer_orders,16,bill_of_lading_url,text,YES,
+customer_orders,17,deposit_slip_uploaded_at,timestamp with time zone,YES,
+customer_orders,18,journal_entry_id_revenue,uuid,YES,
+customer_orders,19,journal_entry_id_cash,uuid,YES,
+customer_orders,20,journal_entry_id_cogs,uuid,YES,
+daily_stock_summaries,1,id,uuid,NO,gen_random_uuid()
+daily_stock_summaries,2,brand_id,uuid,NO,
+daily_stock_summaries,3,date,date,NO,
+daily_stock_summaries,4,total_production,integer,YES,0
+daily_stock_summaries,5,total_released,integer,YES,0
+daily_stock_summaries,6,total_final_stock,integer,YES,0
+daily_stock_summaries,7,created_at,timestamp with time zone,YES,now()
+daily_stock_summaries,8,production_details,jsonb,YES,'[]'::jsonb
+delivery_receipt_items,1,id,uuid,NO,gen_random_uuid()
+delivery_receipt_items,2,delivery_receipt_id,uuid,NO,
+delivery_receipt_items,3,po_item_id,uuid,NO,
+delivery_receipt_items,4,quantity_received,numeric,NO,
+delivery_receipt_items,5,notes,text,YES,
+delivery_receipt_items,6,created_at,timestamp with time zone,YES,now()
+delivery_receipts,1,id,uuid,NO,gen_random_uuid()
+delivery_receipts,2,po_id,uuid,NO,
+delivery_receipts,3,receipt_number,character varying,NO,
+delivery_receipts,4,delivery_date,date,NO,CURRENT_DATE
+delivery_receipts,5,received_by,character varying,NO,
+delivery_receipts,6,condition,character varying,YES,'good'::character varying
+delivery_receipts,7,notes,text,YES,
+delivery_receipts,8,delivery_receipt_url,text,YES,
+delivery_receipts,9,inspection_notes,text,YES,
+delivery_receipts,10,created_at,timestamp with time zone,YES,now()
+delivery_receipts,11,updated_at,timestamp with time zone,YES,now()
+delivery_receipts,12,journal_entry_id,uuid,YES,
+dsir_discounts,1,id,uuid,NO,gen_random_uuid()
+dsir_discounts,2,dsir_report_id,uuid,NO,
+dsir_discounts,3,name,character varying,NO,
+dsir_discounts,4,id_type,character varying,NO,
+dsir_discounts,5,order_amount,numeric,NO,0
+dsir_discounts,7,created_at,timestamp with time zone,YES,now()
+dsir_discounts,8,updated_at,timestamp with time zone,YES,now()
+dsir_discounts,9,id_no,character varying,YES,
+dsir_discounts,10,attach_url,text,YES,
+dsir_discounts,11,order_type,character varying,YES,
+dsir_discounts,12,discount_amount,numeric,YES,
+dsir_expenses,1,id,uuid,NO,gen_random_uuid()
+dsir_expenses,2,dsir_report_id,uuid,NO,
+dsir_expenses,3,expense_type,character varying,YES,
+dsir_expenses,4,description,character varying,YES,
+dsir_expenses,5,amount,numeric,YES,0
+dsir_expenses,6,created_at,timestamp with time zone,YES,now()
+dsir_expenses,7,updated_at,timestamp with time zone,YES,now()
+dsir_ice_cream_inventory,1,id,uuid,NO,gen_random_uuid()
+dsir_ice_cream_inventory,2,dsir_report_id,uuid,NO,
+dsir_ice_cream_inventory,3,flavor,character varying,NO,
+dsir_ice_cream_inventory,4,beginning,integer,YES,0
+dsir_ice_cream_inventory,5,arrival,integer,YES,0
+dsir_ice_cream_inventory,6,pull_out,integer,YES,0
+dsir_ice_cream_inventory,7,ending,integer,YES,
+dsir_ice_cream_inventory,8,created_at,timestamp with time zone,YES,now()
+dsir_ice_cream_inventory,9,updated_at,timestamp with time zone,YES,now()
+dsir_materials_inventory,1,id,uuid,NO,gen_random_uuid()
+dsir_materials_inventory,2,dsir_report_id,uuid,NO,
+dsir_materials_inventory,3,material_name,character varying,NO,
+dsir_materials_inventory,4,beginning,integer,YES,0
+dsir_materials_inventory,5,arrival,integer,YES,0
+dsir_materials_inventory,6,ending,integer,YES,
+dsir_materials_inventory,7,created_at,timestamp with time zone,YES,now()
+dsir_materials_inventory,8,updated_at,timestamp with time zone,YES,now()
+dsir_materials_inventory,10,pull_out,integer,YES,0
+dsir_predefined_items,1,id,uuid,NO,gen_random_uuid()
+dsir_predefined_items,2,brand_id,uuid,NO,
+dsir_predefined_items,3,category,character varying,NO,
+dsir_predefined_items,4,name,character varying,NO,
+dsir_predefined_items,5,price,numeric,YES,0
+dsir_predefined_items,6,is_active,boolean,YES,true
+dsir_predefined_items,7,created_at,timestamp with time zone,YES,now()
+dsir_predefined_items,8,updated_at,timestamp with time zone,YES,now()
+dsir_predefined_items,9,show_in_local,boolean,YES,true
+dsir_predefined_items,10,show_in_remote,boolean,YES,true
+dsir_reports,1,id,uuid,NO,gen_random_uuid()
+dsir_reports,2,location_id,uuid,NO,
+dsir_reports,3,staff_registration_id,uuid,NO,
+dsir_reports,4,report_date,date,NO,
+dsir_reports,5,store_hours,character varying,YES,
+dsir_reports,6,staff_name,character varying,YES,
+dsir_reports,7,initial,character varying,YES,
+dsir_reports,8,gross_sales,numeric,YES,0
+dsir_reports,9,total_discounts,numeric,YES,0
+dsir_reports,10,total_expenses,numeric,YES,0
+dsir_reports,11,net_sales,numeric,YES,0
+dsir_reports,12,total_cash,numeric,YES,0
+dsir_reports,13,discrepancy,numeric,YES,0
+dsir_reports,14,status,character varying,YES,'draft'::character varying
+dsir_reports,15,notes,text,YES,
+dsir_reports,16,created_at,timestamp with time zone,YES,now()
+dsir_reports,17,updated_at,timestamp with time zone,YES,now()
+dsir_reports,18,big_cup_sales,numeric,YES,0
+dsir_reports,19,small_cup_sales,numeric,YES,0
+dsir_reports,20,water_sales,numeric,YES,0
+dsir_reports,21,ml_500_sales,numeric,YES,0
+dsir_reports,22,choco_coated_sales,numeric,YES,0
+dsir_sales_inventory,1,id,uuid,NO,gen_random_uuid()
+dsir_sales_inventory,2,dsir_report_id,uuid,NO,
+dsir_sales_inventory,3,item_name,character varying,NO,
+dsir_sales_inventory,4,beginning_inventory,integer,YES,0
+dsir_sales_inventory,5,arrival,integer,YES,0
+dsir_sales_inventory,6,pull_out,integer,YES,0
+dsir_sales_inventory,7,new_inventory,integer,YES,0
+dsir_sales_inventory,8,ending_inventory,integer,YES,
+dsir_sales_inventory,9,sold,integer,YES,0
+dsir_sales_inventory,10,price,numeric,YES,0
+dsir_sales_inventory,11,sales,numeric,YES,0
+dsir_sales_inventory,12,created_at,timestamp with time zone,YES,now()
+dsir_sales_inventory,13,updated_at,timestamp with time zone,YES,now()
+dsir_sales_recon,1,id,uuid,NO,gen_random_uuid()
+dsir_sales_recon,2,dsir_report_id,uuid,NO,
+dsir_sales_recon,3,denomination,character varying,NO,
+dsir_sales_recon,4,quantity,integer,YES,0
+dsir_sales_recon,5,amount,numeric,YES,0
+dsir_sales_recon,6,created_at,timestamp with time zone,YES,now()
+dsir_sales_recon,7,updated_at,timestamp with time zone,YES,now()
+factory_batch_material_usage,1,id,uuid,NO,gen_random_uuid()
+factory_batch_material_usage,2,batch_id,uuid,NO,
+factory_batch_material_usage,3,opened_material_id,uuid,YES,
+factory_batch_material_usage,4,material_id,uuid,NO,
+factory_batch_material_usage,5,quantity_used,numeric,NO,
+factory_batch_material_usage,6,unit,text,NO,
+factory_batch_material_usage,7,created_at,timestamp with time zone,YES,now()
+factory_daily_staff,1,id,uuid,NO,gen_random_uuid()
+factory_daily_staff,2,work_date,date,NO,
+factory_daily_staff,3,staff_registration_id,uuid,NO,
+factory_daily_staff,4,created_at,timestamp with time zone,YES,now()
+factory_material_requests,1,id,uuid,NO,gen_random_uuid()
+factory_material_requests,2,material_id,uuid,NO,
+factory_material_requests,3,quantity,numeric,NO,
+factory_material_requests,4,status,character varying,NO,'pending'::character varying
+factory_material_requests,5,notes,text,YES,
+factory_material_requests,6,request_date,date,NO,CURRENT_DATE
+factory_material_requests,7,released_at,timestamp with time zone,YES,
+factory_material_requests,8,created_at,timestamp with time zone,YES,now()
+factory_material_requests,9,quantity_used,numeric,NO,0
+factory_material_requests,10,brand_id,uuid,YES,
+factory_material_requests,11,schedule_date,date,YES,
+factory_material_requests,12,requested_by,character varying,YES,
+factory_material_requests,13,released_by,character varying,YES,
+factory_opened_materials,1,id,uuid,NO,gen_random_uuid()
+factory_opened_materials,2,material_id,uuid,NO,
+factory_opened_materials,3,label,text,YES,
+factory_opened_materials,4,quantity_opened,numeric,NO,
+factory_opened_materials,5,quantity_remaining,numeric,NO,
+factory_opened_materials,6,unit,text,NO,
+factory_opened_materials,7,status,text,NO,'open'::text
+factory_opened_materials,8,opened_at,timestamp with time zone,NO,now()
+factory_opened_materials,9,opened_by,text,YES,
+factory_opened_materials,10,notes,text,YES,
+factory_opened_materials,11,created_at,timestamp with time zone,YES,now()
+factory_opened_materials,12,updated_at,timestamp with time zone,YES,now()
+factory_opened_materials,13,inventory_kind,text,NO,'ingredients'::text
+factory_opened_materials,14,factory_request_id,uuid,YES,
+factory_production_batches,1,id,uuid,NO,gen_random_uuid()
+factory_production_batches,2,schedule_id,uuid,NO,
+factory_production_batches,3,product_id,uuid,NO,
+factory_production_batches,4,work_date,date,NO,
+factory_production_batches,5,batch_number,text,NO,
+factory_production_batches,6,units,integer,NO,1
+factory_production_batches,7,status,text,NO,'in_progress'::text
+factory_production_batches,8,started_at,timestamp with time zone,NO,now()
+factory_production_batches,9,started_by,text,YES,
+factory_production_batches,10,completed_at,timestamp with time zone,YES,
+factory_production_batches,11,created_at,timestamp with time zone,YES,now()
+factory_production_batches,12,journal_entry_id,uuid,YES,
+factory_production_batches,13,intercompany_transfer_id,uuid,YES,
+factory_sticker_requests,1,id,uuid,NO,gen_random_uuid()
+factory_sticker_requests,2,schedule_id,uuid,NO,
+factory_sticker_requests,3,product_id,uuid,NO,
+factory_sticker_requests,4,schedule_date,date,NO,
+factory_sticker_requests,5,quantity,integer,NO,
+factory_sticker_requests,6,quantity_fulfilled,integer,NO,0
+factory_sticker_requests,7,status,character varying,NO,'pending'::character varying
+factory_sticker_requests,8,requested_by,text,YES,
+factory_sticker_requests,9,notes,text,YES,
+factory_sticker_requests,10,request_date,date,NO,CURRENT_DATE
+factory_sticker_requests,11,fulfilled_at,timestamp with time zone,YES,
+factory_sticker_requests,12,created_at,timestamp with time zone,YES,now()
+fixed_assets,1,id,uuid,NO,gen_random_uuid()
+fixed_assets,2,brand_id,uuid,NO,
+fixed_assets,3,supplier_id,uuid,YES,
+fixed_assets,4,asset_name,character varying,NO,
+fixed_assets,5,sku,character varying,YES,
+fixed_assets,6,category,character varying,YES,
+fixed_assets,7,unit,character varying,NO,'unit'::character varying
+fixed_assets,8,unit_cost,numeric,NO,0
+fixed_assets,9,quantity,numeric,NO,0
+fixed_assets,10,location,character varying,YES,
+fixed_assets,11,notes,text,YES,
+fixed_assets,12,is_active,boolean,NO,true
+fixed_assets,13,created_at,timestamp with time zone,YES,now()
+fixed_assets,14,updated_at,timestamp with time zone,YES,now()
+gfc_attendance_logs,1,id,uuid,NO,gen_random_uuid()
+gfc_attendance_logs,2,enrollment_no,integer,NO,
+gfc_attendance_logs,3,terminal_no,integer,YES,
+gfc_attendance_logs,4,verify_mode,integer,YES,
+gfc_attendance_logs,5,device_name,text,NO,
+gfc_attendance_logs,6,work_date,date,NO,
+gfc_attendance_logs,7,punch_at,timestamp with time zone,NO,
+gfc_attendance_logs,8,staff_registration_id,uuid,YES,
+gfc_attendance_logs,9,created_at,timestamp with time zone,YES,now()
+intercompany_brand_settings,1,id,uuid,NO,gen_random_uuid()
+intercompany_brand_settings,2,factory_brand_id,uuid,NO,
+intercompany_brand_settings,3,retail_brand_id,uuid,NO,
+intercompany_brand_settings,4,due_from_account_id,uuid,YES,
+intercompany_brand_settings,5,due_to_account_id,uuid,YES,
+intercompany_brand_settings,6,default_markup_percent,numeric,NO,15.00
+intercompany_brand_settings,7,created_at,timestamp with time zone,YES,now()
+intercompany_brand_settings,8,updated_at,timestamp with time zone,YES,now()
+intercompany_transfer_lines,1,id,uuid,NO,gen_random_uuid()
+intercompany_transfer_lines,2,transfer_id,uuid,NO,
+intercompany_transfer_lines,3,line_no,integer,NO,1
+intercompany_transfer_lines,4,source_product_id,uuid,YES,
+intercompany_transfer_lines,5,dest_product_id,uuid,YES,
+intercompany_transfer_lines,6,sku,character varying,YES,
+intercompany_transfer_lines,7,description,character varying,YES,
+intercompany_transfer_lines,8,quantity,numeric,NO,0
+intercompany_transfer_lines,9,unit_cost,numeric,NO,0
+intercompany_transfer_lines,10,unit_price,numeric,NO,0
+intercompany_transfer_lines,11,line_cost,numeric,NO,0
+intercompany_transfer_lines,12,line_price,numeric,NO,0
+intercompany_transfer_lines,13,created_at,timestamp with time zone,YES,now()
+intercompany_transfers,1,id,uuid,NO,gen_random_uuid()
+intercompany_transfers,2,transfer_number,character varying,NO,
+intercompany_transfers,3,from_brand_id,uuid,NO,
+intercompany_transfers,4,to_brand_id,uuid,NO,
+intercompany_transfers,5,transfer_date,date,NO,CURRENT_DATE
+intercompany_transfers,6,status,character varying,NO,'draft'::character varying
+intercompany_transfers,7,transfer_price_total,numeric,NO,0
+intercompany_transfers,8,cost_amount_total,numeric,NO,0
+intercompany_transfers,9,margin_total,numeric,NO,0
+intercompany_transfers,10,markup_percent,numeric,YES,
+intercompany_transfers,11,notes,text,YES,
+intercompany_transfers,12,journal_entry_id_from,uuid,YES,
+intercompany_transfers,13,journal_entry_id_to,uuid,YES,
+intercompany_transfers,14,created_by,character varying,YES,
+intercompany_transfers,15,posted_at,timestamp with time zone,YES,
+intercompany_transfers,16,posted_by,character varying,YES,
+intercompany_transfers,17,created_at,timestamp with time zone,YES,now()
+intercompany_transfers,18,updated_at,timestamp with time zone,YES,now()
+intercompany_transfers,19,settled_at,timestamp with time zone,YES,
+intercompany_transfers,20,settled_by,character varying,YES,
+intercompany_transfers,21,settlement_journal_entry_id_from,uuid,YES,
+intercompany_transfers,22,settlement_journal_entry_id_to,uuid,YES,
+inventory_summary,1,product_id,uuid,YES,
+inventory_summary,2,brand_id,uuid,YES,
+inventory_summary,3,product_name,character varying,YES,
+inventory_summary,4,sku,character varying,YES,
+inventory_summary,5,category,character varying,YES,
+inventory_summary,6,unit,character varying,YES,
+inventory_summary,7,price,numeric,YES,
+inventory_summary,8,initial_stock,integer,YES,
+inventory_summary,9,production,integer,YES,
+inventory_summary,10,released,integer,YES,
+inventory_summary,11,reserved,integer,YES,
+inventory_summary,12,brand_name,character varying,YES,
+inventory_summary,13,brand_slug,character varying,YES,
+inventory_summary,14,final_stock,integer,YES,
+inventory_summary,15,available_stock,integer,YES,
+inventory_summary,16,created_at,timestamp with time zone,YES,
+inventory_summary,17,updated_at,timestamp with time zone,YES,
+leave_requests,1,id,uuid,NO,gen_random_uuid()
+leave_requests,2,staff_registration_id,uuid,NO,
+leave_requests,3,location_id,uuid,NO,
+leave_requests,4,request_type,character varying,NO,
+leave_requests,5,start_date,date,NO,
+leave_requests,6,end_date,date,NO,
+leave_requests,7,reason,text,NO,
+leave_requests,8,status,character varying,NO,'pending'::character varying
+leave_requests,9,admin_notes,text,YES,
+leave_requests,10,created_at,timestamp with time zone,YES,now()
+leave_requests,11,updated_at,timestamp with time zone,YES,now()
+leave_requests,12,approved_by,uuid,YES,
+leave_requests,13,approved_at,timestamp with time zone,YES,
+locations,1,id,uuid,NO,gen_random_uuid()
+locations,2,name,character varying,NO,
+locations,3,passkey,character varying,NO,
+locations,4,brand_id,uuid,YES,
+locations,5,franchisee,character varying,YES,
+locations,6,contact_number,character varying,YES,
+locations,7,created_at,timestamp with time zone,YES,now()
+locations,8,updated_at,timestamp with time zone,YES,now()
+locations,9,company_owned,boolean,YES,false
+locations,10,can_access_order_features,boolean,YES,false
+locations,11,is_remote,boolean,YES,false
+locations,12,is_factory_floor,boolean,NO,false
+locations,13,incentive_regular_sales_threshold,numeric,YES,
+locations,14,incentive_holiday_sales_threshold,numeric,YES,
+locations,15,incentive_base_amount,numeric,YES,
+logistics_assignments,1,id,uuid,NO,gen_random_uuid()
+logistics_assignments,2,order_id,uuid,NO,
+logistics_assignments,3,date,date,NO,
+logistics_assignments,4,time_slot,character varying,NO,
+logistics_assignments,5,status,character varying,NO,'scheduled'::character varying
+logistics_assignments,6,notes,text,YES,
+logistics_assignments,7,created_at,timestamp with time zone,YES,now()
+logistics_assignments,8,updated_at,timestamp with time zone,YES,now()
+material_cycle_count_lines,1,id,uuid,NO,gen_random_uuid()
+material_cycle_count_lines,2,cycle_count_id,uuid,NO,
+material_cycle_count_lines,3,material_id,uuid,NO,
+material_cycle_count_lines,4,system_stock,numeric,NO,
+material_cycle_count_lines,5,counted_stock,numeric,YES,
+material_cycle_count_lines,6,notes,text,YES,
+material_cycle_count_lines,7,adjustment_movement_id,uuid,YES,
+material_cycle_count_lines,8,created_at,timestamp with time zone,NO,now()
+material_cycle_count_lines,9,updated_at,timestamp with time zone,NO,now()
+material_cycle_counts,1,id,uuid,NO,gen_random_uuid()
+material_cycle_counts,2,brand_id,uuid,NO,
+material_cycle_counts,3,count_date,date,NO,CURRENT_DATE
+material_cycle_counts,4,status,text,NO,'in_progress'::text
+material_cycle_counts,5,notes,text,YES,
+material_cycle_counts,6,created_by,character varying,YES,
+material_cycle_counts,7,posted_by,character varying,YES,
+material_cycle_counts,8,posted_at,timestamp with time zone,YES,
+material_cycle_counts,9,created_at,timestamp with time zone,NO,now()
+material_cycle_counts,10,updated_at,timestamp with time zone,NO,now()
+material_cycle_counts,11,journal_entry_id,uuid,YES,
+material_stock_alerts,1,id,uuid,NO,gen_random_uuid()
+material_stock_alerts,2,material_id,uuid,NO,
+material_stock_alerts,3,alert_type,character varying,NO,
+material_stock_alerts,4,alert_date,date,NO,CURRENT_DATE
+material_stock_alerts,5,is_resolved,boolean,YES,false
+material_stock_alerts,6,resolved_date,date,YES,
+material_stock_alerts,7,created_at,timestamp with time zone,YES,now()
+material_stock_movements,1,id,uuid,NO,gen_random_uuid()
+material_stock_movements,2,material_id,uuid,NO,
+material_stock_movements,3,movement_type,character varying,NO,
+material_stock_movements,4,quantity,numeric,NO,
+material_stock_movements,5,unit_cost,numeric,YES,
+material_stock_movements,6,reference_type,character varying,YES,
+material_stock_movements,7,reference_id,uuid,YES,
+material_stock_movements,8,reference_number,character varying,YES,
+material_stock_movements,9,notes,text,YES,
+material_stock_movements,10,movement_date,date,NO,CURRENT_DATE
+material_stock_movements,11,created_by,character varying,YES,
+material_stock_movements,12,created_at,timestamp with time zone,YES,now()
+material_stock_movements,13,journal_entry_id,uuid,YES,
+material_transfer_lines,1,id,uuid,NO,gen_random_uuid()
+material_transfer_lines,2,transfer_id,uuid,NO,
+material_transfer_lines,3,line_no,integer,NO,1
+material_transfer_lines,4,source_material_id,uuid,YES,
+material_transfer_lines,5,dest_material_id,uuid,YES,
+material_transfer_lines,6,sku,character varying,YES,
+material_transfer_lines,7,description,character varying,YES,
+material_transfer_lines,8,quantity,numeric,NO,0
+material_transfer_lines,9,unit_cost,numeric,NO,0
+material_transfer_lines,10,line_cost,numeric,NO,0
+material_transfer_lines,11,created_at,timestamp with time zone,YES,now()
+material_transfers,1,id,uuid,NO,gen_random_uuid()
+material_transfers,2,transfer_number,character varying,NO,
+material_transfers,3,from_brand_id,uuid,NO,
+material_transfers,4,to_brand_id,uuid,NO,
+material_transfers,5,transfer_date,date,NO,CURRENT_DATE
+material_transfers,6,status,character varying,NO,'draft'::character varying
+material_transfers,7,cost_amount_total,numeric,NO,0
+material_transfers,8,notes,text,YES,
+material_transfers,9,journal_entry_id_from,uuid,YES,
+material_transfers,10,journal_entry_id_to,uuid,YES,
+material_transfers,11,created_by,character varying,YES,
+material_transfers,12,posted_at,timestamp with time zone,YES,
+material_transfers,13,posted_by,character varying,YES,
+material_transfers,14,created_at,timestamp with time zone,YES,now()
+material_transfers,15,updated_at,timestamp with time zone,YES,now()
+materials_stock_view,1,id,uuid,YES,
+materials_stock_view,2,brand_id,uuid,YES,
+materials_stock_view,3,supplier_id,uuid,YES,
+materials_stock_view,4,material_name,character varying,YES,
+materials_stock_view,5,sku,character varying,YES,
+materials_stock_view,6,category,character varying,YES,
+materials_stock_view,7,unit,character varying,YES,
+materials_stock_view,8,unit_cost,numeric,YES,
+materials_stock_view,9,minimum_stock,numeric,YES,
+materials_stock_view,10,current_stock,numeric,YES,
+materials_stock_view,11,is_active,boolean,YES,
+materials_stock_view,12,brand_name,character varying,YES,
+materials_stock_view,13,supplier_name,character varying,YES,
+materials_stock_view,14,stock_status,text,YES,
+materials_stock_view,15,stock_value,numeric,YES,
+materials_stock_view,16,created_at,timestamp with time zone,YES,
+materials_stock_view,17,updated_at,timestamp with time zone,YES,
+order_details,1,id,uuid,NO,gen_random_uuid()
+order_details,2,order_id,uuid,NO,
+order_details,3,product_id,uuid,NO,
+order_details,4,quantity,integer,NO,1
+order_details,5,unit_price,numeric,YES,0
+order_details,6,created_at,timestamp with time zone,YES,now()
+payroll_deductions_refunds,1,id,uuid,NO,gen_random_uuid()
+payroll_deductions_refunds,2,staff_id,uuid,NO,
+payroll_deductions_refunds,3,week_start_date,date,NO,
+payroll_deductions_refunds,4,week_end_date,date,NO,
+payroll_deductions_refunds,5,utilities,numeric,YES,0
+payroll_deductions_refunds,6,shortages,numeric,YES,0
+payroll_deductions_refunds,7,cash_advances,numeric,YES,0
+payroll_deductions_refunds,8,penalties,numeric,YES,0
+payroll_deductions_refunds,9,others,numeric,YES,0
+payroll_deductions_refunds,10,refunds,numeric,YES,0
+payroll_deductions_refunds,11,created_at,timestamp with time zone,YES,now()
+payroll_deductions_refunds,12,updated_at,timestamp with time zone,YES,now()
+payroll_run_brand_totals,1,id,uuid,NO,gen_random_uuid()
+payroll_run_brand_totals,2,payroll_run_id,uuid,NO,
+payroll_run_brand_totals,3,brand_id,uuid,NO,
+payroll_run_brand_totals,4,gross_pay,numeric,NO,0
+payroll_run_brand_totals,5,total_deductions,numeric,NO,0
+payroll_run_brand_totals,6,refunds,numeric,NO,0
+payroll_run_brand_totals,7,net_pay,numeric,NO,0
+payroll_run_brand_totals,8,withholdings_other,numeric,NO,0
+payroll_run_brand_totals,9,cash_advances_withheld,numeric,NO,0
+payroll_run_brand_totals,10,journal_entry_id_accrual,uuid,YES,
+payroll_run_brand_totals,11,journal_entry_id_payment,uuid,YES,
+payroll_run_brand_totals,12,payment_voucher_id,uuid,YES,
+payroll_run_brand_totals,13,created_at,timestamp with time zone,YES,now()
+payroll_run_lines,1,id,uuid,NO,gen_random_uuid()
+payroll_run_lines,2,payroll_run_id,uuid,NO,
+payroll_run_lines,3,staff_id,uuid,NO,
+payroll_run_lines,4,hourly_rate_snapshot,numeric,NO,0
+payroll_run_lines,5,total_hours,numeric,NO,0
+payroll_run_lines,6,regular_hours,numeric,NO,0
+payroll_run_lines,7,overtime_hours,numeric,NO,0
+payroll_run_lines,8,double_pay_hours,numeric,NO,0
+payroll_run_lines,9,special_pay_hours,numeric,NO,0
+payroll_run_lines,10,regular_pay,numeric,NO,0
+payroll_run_lines,11,overtime_pay,numeric,NO,0
+payroll_run_lines,12,double_pay,numeric,NO,0
+payroll_run_lines,13,special_pay,numeric,NO,0
+payroll_run_lines,14,gross_pay,numeric,NO,0
+payroll_run_lines,15,deductions_refund_id,uuid,YES,
+payroll_run_lines,16,utilities,numeric,NO,0
+payroll_run_lines,17,shortages,numeric,NO,0
+payroll_run_lines,18,cash_advances,numeric,NO,0
+payroll_run_lines,19,penalties,numeric,NO,0
+payroll_run_lines,20,others,numeric,NO,0
+payroll_run_lines,21,refunds,numeric,NO,0
+payroll_run_lines,22,total_deductions,numeric,NO,0
+payroll_run_lines,23,net_pay,numeric,NO,0
+payroll_run_lines,24,created_at,timestamp with time zone,YES,now()
+payroll_run_lines,25,incentive_pay,numeric,NO,0
+payroll_runs,1,id,uuid,NO,gen_random_uuid()
+payroll_runs,2,week_start_date,date,NO,
+payroll_runs,3,week_end_date,date,NO,
+payroll_runs,4,status,character varying,NO,'draft'::character varying
+payroll_runs,5,calculated_at,timestamp with time zone,YES,
+payroll_runs,6,approved_at,timestamp with time zone,YES,
+payroll_runs,7,accrued_at,timestamp with time zone,YES,
+payroll_runs,8,paid_at,timestamp with time zone,YES,
+payroll_runs,9,created_by,character varying,YES,
+payroll_runs,10,approved_by,character varying,YES,
+payroll_runs,11,notes,text,YES,
+payroll_runs,12,created_at,timestamp with time zone,YES,now()
+payroll_runs,13,updated_at,timestamp with time zone,YES,now()
+po_payments,1,id,uuid,NO,gen_random_uuid()
+po_payments,2,po_id,uuid,NO,
+po_payments,3,payment_number,character varying,NO,
+po_payments,4,payment_date,date,NO,CURRENT_DATE
+po_payments,5,payment_type,character varying,NO,
+po_payments,6,payment_method,character varying,NO,
+po_payments,7,amount,numeric,NO,
+po_payments,8,check_number,character varying,YES,
+po_payments,9,bank_name,character varying,YES,
+po_payments,10,reference_number,character varying,YES,
+po_payments,11,proof_of_payment_url,text,YES,
+po_payments,12,notes,text,YES,
+po_payments,13,created_at,timestamp with time zone,YES,now()
+po_payments,14,updated_at,timestamp with time zone,YES,now()
+po_purchaser_templates,1,id,uuid,NO,gen_random_uuid()
+po_purchaser_templates,2,brand_id,uuid,NO,
+po_purchaser_templates,3,template_name,character varying,NO,'Default'::character varying
+po_purchaser_templates,4,is_default,boolean,NO,false
+po_purchaser_templates,5,purchasing_agent,character varying,YES,
+po_purchaser_templates,6,payment_terms,character varying,YES,
+po_purchaser_templates,7,payment_method,character varying,YES,
+po_purchaser_templates,8,payment_timing,character varying,YES,'after_delivery'::character varying
+po_purchaser_templates,9,payment_account_name,character varying,YES,
+po_purchaser_templates,10,payment_account_number,character varying,YES,
+po_purchaser_templates,11,delivery_address,text,YES,
+po_purchaser_templates,12,delivery_contact,character varying,YES,
+po_purchaser_templates,13,delivery_phone,character varying,YES,
+po_purchaser_templates,14,notes,text,YES,
+po_purchaser_templates,15,created_at,timestamp with time zone,YES,now()
+po_purchaser_templates,16,updated_at,timestamp with time zone,YES,now()
+po_purchaser_templates,17,approved_by,character varying,YES,
+po_purchaser_templates,18,approved_by_signatories,ARRAY,YES,'{}'::text[]
+po_status_history,1,id,uuid,NO,gen_random_uuid()
+po_status_history,2,po_id,uuid,NO,
+po_status_history,3,old_status,character varying,YES,
+po_status_history,4,new_status,character varying,NO,
+po_status_history,5,changed_by,character varying,NO,
+po_status_history,6,notes,text,YES,
+po_status_history,7,created_at,timestamp with time zone,YES,now()
+po_summary_view,1,id,uuid,YES,
+po_summary_view,2,po_number,character varying,YES,
+po_summary_view,3,brand_id,uuid,YES,
+po_summary_view,4,brand_name,character varying,YES,
+po_summary_view,5,supplier_id,uuid,YES,
+po_summary_view,6,supplier_name,character varying,YES,
+po_summary_view,7,order_date,date,YES,
+po_summary_view,8,expected_delivery_date,date,YES,
+po_summary_view,9,status,character varying,YES,
+po_summary_view,10,total_amount,numeric,YES,
+po_summary_view,11,paid_amount,numeric,YES,
+po_summary_view,12,balance_amount,numeric,YES,
+po_summary_view,13,payment_timing,character varying,YES,
+po_summary_view,14,item_count,bigint,YES,
+po_summary_view,15,created_at,timestamp with time zone,YES,
+product_bom_items,1,id,uuid,NO,gen_random_uuid()
+product_bom_items,2,product_id,uuid,NO,
+product_bom_items,3,material_id,uuid,NO,
+product_bom_items,4,quantity,numeric,NO,1
+product_bom_items,5,notes,text,YES,
+product_bom_items,6,created_at,timestamp with time zone,YES,now()
+product_bom_items,7,updated_at,timestamp with time zone,YES,now()
+product_bom_items,8,quantity_mode,text,NO,'unit'::text
+product_bom_items,9,yield_per_batch,numeric,YES,
+product_category_sort,1,id,uuid,NO,gen_random_uuid()
+product_category_sort,2,brand_id,uuid,NO,
+product_category_sort,3,category_name,text,NO,''::text
+product_category_sort,4,sort_index,integer,NO,0
+product_category_sort,5,created_at,timestamp with time zone,YES,now()
+product_category_sort,6,updated_at,timestamp with time zone,YES,now()
+product_category_sort,7,show_on_order_portal,boolean,NO,true
+product_category_sort,8,remote_store,boolean,NO,false
+product_category_sort,9,yield_per_batch,numeric,NO,1
+product_cycle_count_lines,1,id,uuid,NO,gen_random_uuid()
+product_cycle_count_lines,2,cycle_count_id,uuid,NO,
+product_cycle_count_lines,3,product_id,uuid,NO,
+product_cycle_count_lines,4,system_available,numeric,NO,
+product_cycle_count_lines,5,counted_available,numeric,YES,
+product_cycle_count_lines,6,notes,text,YES,
+product_cycle_count_lines,7,created_at,timestamp with time zone,NO,now()
+product_cycle_count_lines,8,updated_at,timestamp with time zone,NO,now()
+product_cycle_counts,1,id,uuid,NO,gen_random_uuid()
+product_cycle_counts,2,brand_id,uuid,NO,
+product_cycle_counts,3,count_date,date,NO,CURRENT_DATE
+product_cycle_counts,4,status,text,NO,'in_progress'::text
+product_cycle_counts,5,notes,text,YES,
+product_cycle_counts,6,created_by,character varying,YES,
+product_cycle_counts,7,posted_by,character varying,YES,
+product_cycle_counts,8,posted_at,timestamp with time zone,YES,
+product_cycle_counts,9,created_at,timestamp with time zone,NO,now()
+product_cycle_counts,10,updated_at,timestamp with time zone,NO,now()
+product_cycle_counts,11,category_scope,text,YES,
+product_cycle_counts,12,journal_entry_id,uuid,YES,
+production_schedules,1,id,uuid,NO,gen_random_uuid()
+production_schedules,2,product_id,uuid,NO,
+production_schedules,3,schedule_date,date,NO,
+production_schedules,4,quantity_required,integer,NO,0
+production_schedules,5,batch_number,character varying,NO,
+production_schedules,6,allow_override,boolean,YES,false
+production_schedules,7,created_at,timestamp with time zone,YES,now()
+production_schedules,8,updated_at,timestamp with time zone,YES,now()
+production_schedules,9,notes,text,YES,
+production_schedules,10,status,character varying,NO,'active'::character varying
+production_schedules,11,for_brand_id,uuid,YES,
+production_sticker_logs,1,id,uuid,NO,gen_random_uuid()
+production_sticker_logs,2,product_id,uuid,NO,
+production_sticker_logs,3,schedule_id,uuid,YES,
+production_sticker_logs,4,batch_number,character varying,NO,
+production_sticker_logs,5,manufacture_date,date,NO,
+production_sticker_logs,6,released_at,timestamp with time zone,YES,
+production_sticker_logs,7,created_at,timestamp with time zone,YES,now()
+production_sticker_logs,8,serial_number,character varying,YES,
+production_sticker_logs,9,produced_at,timestamp with time zone,YES,
+production_sticker_logs,10,voided_at,timestamp with time zone,YES,
+products,1,id,uuid,NO,gen_random_uuid()
+products,2,brand_id,uuid,NO,
+products,3,name,character varying,NO,
+products,4,sku,character varying,YES,
+products,5,category,character varying,YES,
+products,6,unit,character varying,YES,'pcs'::character varying
+products,7,price,numeric,YES,0.00
+products,8,initial_stock,integer,YES,0
+products,9,production,integer,YES,0
+products,10,released,integer,YES,0
+products,11,reserved,integer,YES,0
+products,12,created_at,timestamp with time zone,YES,now()
+products,13,updated_at,timestamp with time zone,YES,now()
+products,14,minimum_stock,integer,NO,0
+products,15,bom_quantity_mode,text,NO,'unit'::text
+products,16,bom_yield_per_batch,numeric,YES,
+products,17,linked_material_id,uuid,YES,
+products,18,material_inventory_uom,character varying,YES,
+purchase_order_items,1,id,uuid,NO,gen_random_uuid()
+purchase_order_items,2,po_id,uuid,NO,
+purchase_order_items,3,pr_item_id,uuid,YES,
+purchase_order_items,4,product_description,text,NO,
+purchase_order_items,5,quantity,numeric,NO,
+purchase_order_items,6,unit,character varying,NO,
+purchase_order_items,7,unit_price,numeric,NO,
+purchase_order_items,8,total_price,numeric,YES,
+purchase_order_items,9,quantity_received,numeric,YES,0
+purchase_order_items,10,quantity_remaining,numeric,YES,
+purchase_order_items,11,notes,text,YES,
+purchase_order_items,12,created_at,timestamp with time zone,YES,now()
+purchase_order_items,13,material_id,uuid,YES,
+purchase_order_items,14,fixed_asset_id,uuid,YES,
+purchase_orders,1,id,uuid,NO,gen_random_uuid()
+purchase_orders,2,po_number,character varying,NO,
+purchase_orders,3,pr_id,uuid,YES,
+purchase_orders,4,quotation_id,uuid,YES,
+purchase_orders,5,supplier_id,uuid,YES,
+purchase_orders,6,brand_id,uuid,NO,
+purchase_orders,7,order_date,date,NO,CURRENT_DATE
+purchase_orders,8,expected_delivery_date,date,YES,
+purchase_orders,9,actual_delivery_date,date,YES,
+purchase_orders,10,purchasing_agent,character varying,NO,
+purchase_orders,11,approved_by,character varying,YES,
+purchase_orders,12,approved_date,date,YES,
+purchase_orders,13,payment_terms,character varying,YES,
+purchase_orders,14,payment_method,character varying,YES,
+purchase_orders,15,payment_timing,character varying,NO,'after_delivery'::character varying
+purchase_orders,16,status,character varying,NO,'draft'::character varying
+purchase_orders,17,subtotal,numeric,YES,0
+purchase_orders,18,tax_amount,numeric,YES,0
+purchase_orders,19,total_amount,numeric,YES,0
+purchase_orders,20,paid_amount,numeric,YES,0
+purchase_orders,21,balance_amount,numeric,YES,0
+purchase_orders,22,delivery_address,text,YES,
+purchase_orders,23,delivery_contact,character varying,YES,
+purchase_orders,24,delivery_phone,character varying,YES,
+purchase_orders,25,po_attachment_url,text,YES,
+purchase_orders,26,notes,text,YES,
+purchase_orders,27,created_at,timestamp with time zone,YES,now()
+purchase_orders,28,updated_at,timestamp with time zone,YES,now()
+purchase_orders,29,payment_account_name,character varying,YES,
+purchase_orders,30,payment_account_number,character varying,YES,
+purchase_requisition_items,1,id,uuid,NO,gen_random_uuid()
+purchase_requisition_items,2,pr_id,uuid,NO,
+purchase_requisition_items,3,product_description,text,NO,
+purchase_requisition_items,4,quantity,numeric,NO,
+purchase_requisition_items,5,unit,character varying,NO,
+purchase_requisition_items,6,estimated_price,numeric,YES,
+purchase_requisition_items,7,notes,text,YES,
+purchase_requisition_items,8,created_at,timestamp with time zone,YES,now()
+purchase_requisitions,1,id,uuid,NO,gen_random_uuid()
+purchase_requisitions,2,pr_number,character varying,NO,
+purchase_requisitions,3,brand_id,uuid,NO,
+purchase_requisitions,4,requested_by,character varying,NO,
+purchase_requisitions,5,department,character varying,YES,
+purchase_requisitions,6,request_date,date,NO,CURRENT_DATE
+purchase_requisitions,7,required_date,date,YES,
+purchase_requisitions,8,status,character varying,NO,'draft'::character varying
+purchase_requisitions,9,purpose,text,YES,
+purchase_requisitions,10,notes,text,YES,
+purchase_requisitions,11,created_at,timestamp with time zone,YES,now()
+purchase_requisitions,12,updated_at,timestamp with time zone,YES,now()
+quotation_items,1,id,uuid,NO,gen_random_uuid()
+quotation_items,2,quotation_id,uuid,NO,
+quotation_items,3,product_description,text,NO,
+quotation_items,4,quantity,numeric,NO,
+quotation_items,5,unit,character varying,NO,
+quotation_items,6,unit_price,numeric,NO,
+quotation_items,7,total_price,numeric,YES,
+quotation_items,8,notes,text,YES,
+quotation_items,9,created_at,timestamp with time zone,YES,now()
+quotations,1,id,uuid,NO,gen_random_uuid()
+quotations,2,quotation_number,character varying,NO,
+quotations,3,pr_id,uuid,YES,
+quotations,4,supplier_id,uuid,NO,
+quotations,5,brand_id,uuid,NO,
+quotations,6,quotation_date,date,NO,CURRENT_DATE
+quotations,7,valid_until,date,YES,
+quotations,8,status,character varying,NO,'pending'::character varying
+quotations,9,total_amount,numeric,YES,0
+quotations,10,notes,text,YES,
+quotations,11,attachment_url,text,YES,
+quotations,12,created_at,timestamp with time zone,YES,now()
+quotations,13,updated_at,timestamp with time zone,YES,now()
+raw_materials,1,id,uuid,NO,gen_random_uuid()
+raw_materials,2,brand_id,uuid,NO,
+raw_materials,3,material_name,character varying,NO,
+raw_materials,4,sku,character varying,YES,
+raw_materials,5,category,character varying,YES,
+raw_materials,6,unit,character varying,NO,
+raw_materials,7,unit_cost,numeric,YES,0
+raw_materials,8,minimum_stock,numeric,YES,0
+raw_materials,9,current_stock,numeric,YES,0
+raw_materials,10,notes,text,YES,
+raw_materials,11,is_active,boolean,YES,true
+raw_materials,12,created_at,timestamp with time zone,YES,now()
+raw_materials,13,updated_at,timestamp with time zone,YES,now()
+raw_materials,14,supplier_id,uuid,YES,
+raw_materials,15,owner,ARRAY,YES,
+raw_materials,16,uom_base_unit,character varying,YES,
+raw_materials,17,uom_base_per_unit,numeric,YES,1
+raw_materials,18,uom_purchase_unit,character varying,YES,
+raw_materials,19,uom_stock_per_purchase,numeric,YES,1
+raw_materials,20,linked_product_id,uuid,YES,
+raw_materials,21,factory_inventory_kind,text,YES,
+raw_materials,22,factory_request_uom,character varying,YES,
+raw_materials,23,factory_bom_uom,character varying,YES,
+staff_advance_disbursements,1,id,uuid,NO,gen_random_uuid()
+staff_advance_disbursements,2,staff_id,uuid,NO,
+staff_advance_disbursements,3,brand_id,uuid,NO,
+staff_advance_disbursements,4,voucher_id,uuid,YES,
+staff_advance_disbursements,5,amount,numeric,NO,
+staff_advance_disbursements,6,amount_recovered,numeric,NO,0
+staff_advance_disbursements,7,status,character varying,NO,'open'::character varying
+staff_advance_disbursements,8,disbursed_date,date,NO,CURRENT_DATE
+staff_advance_disbursements,9,notes,text,YES,
+staff_advance_disbursements,10,created_at,timestamp with time zone,NO,now()
+staff_advance_disbursements,11,updated_at,timestamp with time zone,NO,now()
+staff_assignments,1,id,uuid,NO,gen_random_uuid()
+staff_assignments,2,staff_registration_id,uuid,NO,
+staff_assignments,3,location_id,uuid,NO,
+staff_assignments,4,assigned_by_location_id,uuid,NO,
+staff_assignments,5,created_at,timestamp with time zone,YES,now()
+staff_registrations,1,id,uuid,NO,gen_random_uuid()
+staff_registrations,2,full_name,character varying,NO,
+staff_registrations,3,mobile_number,character varying,NO,
+staff_registrations,4,staff_code,character varying,NO,
+staff_registrations,5,is_active,boolean,YES,true
+staff_registrations,6,created_at,timestamp with time zone,YES,now()
+staff_registrations,7,updated_at,timestamp with time zone,YES,now()
+staff_registrations,8,hourly_rate,numeric,YES,0.00
+staff_registrations,9,employment_date,date,YES,
+staff_registrations,10,leave_balance,integer,YES,10
+staff_registrations,11,total_warnings,integer,YES,0
+staff_schedules,1,id,uuid,NO,gen_random_uuid()
+staff_schedules,2,location_id,uuid,NO,
+staff_schedules,3,staff_registration_id,uuid,NO,
+staff_schedules,4,schedule_date,date,NO,
+staff_schedules,6,created_at,timestamp with time zone,YES,now()
+staff_schedules,7,updated_at,timestamp with time zone,YES,now()
+staff_schedules,8,hours,numeric,YES,8.0
+staff_schedules,10,day_type,character varying,YES,'default'::character varying
+staff_schedules,11,is_absent,boolean,YES,false
+staff_schedules,12,hours_manual_override,boolean,NO,false
+supplier_invoice_lines,1,id,uuid,NO,gen_random_uuid()
+supplier_invoice_lines,2,supplier_invoice_id,uuid,NO,
+supplier_invoice_lines,3,po_item_id,uuid,NO,
+supplier_invoice_lines,4,quantity_invoiced,numeric,NO,0
+supplier_invoice_lines,5,unit_price,numeric,NO,0
+supplier_invoice_lines,6,line_amount,numeric,NO,0
+supplier_invoice_lines,7,created_at,timestamp with time zone,YES,now()
+supplier_invoices,1,id,uuid,NO,gen_random_uuid()
+supplier_invoices,2,brand_id,uuid,NO,
+supplier_invoices,3,po_id,uuid,NO,
+supplier_invoices,4,supplier_id,uuid,YES,
+supplier_invoices,5,invoice_number,character varying,NO,
+supplier_invoices,6,invoice_date,date,NO,CURRENT_DATE
+supplier_invoices,7,total_amount,numeric,NO,0
+supplier_invoices,8,attachment_url,text,YES,
+supplier_invoices,9,status,character varying,NO,'draft'::character varying
+supplier_invoices,10,match_summary,jsonb,YES,
+supplier_invoices,11,payment_voucher_id,uuid,YES,
+supplier_invoices,12,notes,text,YES,
+supplier_invoices,13,created_at,timestamp with time zone,YES,now()
+supplier_invoices,14,updated_at,timestamp with time zone,YES,now()
+supplier_invoices,15,match_fingerprint,text,YES,
+supplier_invoices,16,matched_at,timestamp with time zone,YES,
+suppliers,1,id,uuid,NO,gen_random_uuid()
+suppliers,2,name,character varying,NO,
+suppliers,3,contact_person,character varying,YES,
+suppliers,4,email,character varying,YES,
+suppliers,5,phone,character varying,YES,
+suppliers,6,address,text,YES,
+suppliers,7,payment_terms,character varying,YES,
+suppliers,8,bank_name,character varying,YES,
+suppliers,9,bank_account_number,character varying,YES,
+suppliers,10,bank_account_name,character varying,YES,
+suppliers,11,is_active,boolean,YES,true
+suppliers,12,notes,text,YES,
+suppliers,13,created_at,timestamp with time zone,YES,now()
+suppliers,14,updated_at,timestamp with time zone,YES,now()
+suppliers,15,payment_method,text,YES,
+suppliers,16,lead_time_days,integer,YES,0

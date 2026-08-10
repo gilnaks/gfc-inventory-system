@@ -11,6 +11,7 @@ import {
   transferMaterialToProductInventory,
 } from '../../lib/product-material-link'
 import { formatFactoryRequestQtyDisplay, getStockUnitLabel } from '../../lib/raw-material-uom'
+import { Modal } from './Modal'
 
 interface ProductMaterialReceiveModalProps {
   product: Product
@@ -97,6 +98,18 @@ export function ProductMaterialReceiveModal({
         createdBy: currentUsername.trim() || 'Unknown',
         notes: receiveNotes.trim() || undefined,
       })
+
+      if (result.movementId && material.brand_id) {
+        const { postMaterialMovementJournalWithNotice } = await import(
+          '../../lib/accounting-movement-posting'
+        )
+        await postMaterialMovementJournalWithNotice(
+          result.movementId,
+          material.brand_id,
+          currentUsername.trim() || 'Unknown',
+          'receive from materials'
+        )
+      }
       setReceiveQty('1')
       setReceiveNotes('')
       onReceived()
@@ -135,7 +148,7 @@ export function ProductMaterialReceiveModal({
     : ''
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-lg max-w-sm w-full max-h-[90vh] flex flex-col overflow-hidden shadow-xl">
         <div className="p-5 border-b shrink-0 flex items-start justify-between gap-3">
           <div>
@@ -246,6 +259,6 @@ export function ProductMaterialReceiveModal({
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

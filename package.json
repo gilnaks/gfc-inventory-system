@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:access": "npx --yes tsx lib/module-access.test.ts",
+    "test:accounting": "npx --yes tsx lib/accounting-preflight.test.ts && npx --yes tsx lib/accounting-backfill.test.ts && npx --yes tsx lib/accounting-factory-wip-posting.test.ts && npx --yes tsx lib/accounting-journal-service.test.ts && npx --yes tsx lib/accounting-bank-grouping.test.ts && npx --yes tsx lib/accounting-three-way-match.test.ts && npx --yes tsx lib/accounting-voucher-batch.test.ts && npx --yes tsx lib/resolve-payment-voucher-credit-account.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.2",
@@ -19,16 +21,19 @@
     "@types/qrcode": "^1.5.6",
     "@yudiel/react-qr-scanner": "^2.5.1",
     "date-fns": "^2.30.0",
+    "leaflet": "^1.9.4",
     "lucide-react": "^0.294.0",
     "next": "14.0.0",
     "qrcode": "^1.5.3",
     "react": "^18",
     "react-dom": "^18",
     "react-hook-form": "^7.47.0",
+    "react-leaflet": "^4.2.1",
     "recharts": "^2.8.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/leaflet": "^1.9.21",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

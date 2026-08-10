@@ -1,5 +1,7 @@
 import { supabase } from './supabase'
 import { isActiveSticker } from './production-sticker'
+import { hasInProgressBatchForSchedule } from './factory-batch-production'
+import { getPhilippinesDate } from './timezone'
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -69,6 +71,8 @@ export async function resolveStickerIdFromCode(raw: string): Promise<string | nu
 export type RecordProductionScanOptions = {
   expectedProductId?: string
   expectedProductName?: string
+  scheduleId?: string
+  workDate?: string
 }
 
 export async function recordProductionScan(
@@ -102,19 +106,32 @@ export async function recordProductionScan(
       }
     }
 
+    const workDate = options?.workDate || getPhilippinesDate()
+    let scheduleId = options?.scheduleId
+    if (!scheduleId) {
+      const { data: stickerRow } = await supabase
+        .from('production_sticker_logs')
+        .select('schedule_id')
+        .eq('id', stickerId)
+        .maybeSingle()
+      scheduleId = (stickerRow?.schedule_id as string | undefined) || undefined
+    }
+
+    if (scheduleId) {
+      const batchActive = await hasInProgressBatchForSchedule(scheduleId, workDate)
+      if (!batchActive) {
+        return {
+          ok: false,
+          message:
+            'Start a production batch for this item on the Factory page before scanning stickers.',
+        }
+      }
+    }
+
     if (sticker.produced_at) {
       const label = sticker.serial_number ? ` (${sticker.serial_number})` : ''
       return { ok: true, message: `Already in production inventory${label}` }
     }
-
-    const { data: product } = await supabase
-      .from('products')
-      .select('production')
-      .eq('id', sticker.product_id)
-      .single()
-
-    const newProduction = (product?.production || 0) + 1
-    await supabase.from('products').update({ production: newProduction }).eq('id', sticker.product_id)
 
     await supabase
       .from('production_sticker_logs')

@@ -45,7 +45,13 @@ export function newExtraStickersPrinted(
 
 export async function fetchPendingStickerRequests(
   scheduleDate: string,
-  options?: { brandId?: string; scheduleIds?: string[] }
+  options?: {
+    brandId?: string
+    forBrandId?: string
+    scheduleIds?: string[]
+    /** When forBrandId matches this (GFC Main), include all destination schedules. */
+    factoryBrandId?: string
+  }
 ): Promise<FactoryStickerRequest[]> {
   let query = supabase
     .from('factory_sticker_requests')
@@ -72,7 +78,21 @@ export async function fetchPendingStickerRequests(
   }
 
   let rows = (data || []) as FactoryStickerRequest[]
-  if (options?.brandId) {
+
+  const forBrandId = options?.forBrandId ?? options?.brandId
+  const skipDestinationFilter =
+    options?.factoryBrandId && forBrandId === options.factoryBrandId
+  if (forBrandId && !skipDestinationFilter) {
+    const { data: schedules } = await supabase
+      .from('production_schedules')
+      .select('id')
+      .eq('schedule_date', scheduleDate)
+      .eq('for_brand_id', forBrandId)
+
+    const allowedScheduleIds = new Set((schedules || []).map((s) => s.id as string))
+    if (allowedScheduleIds.size === 0) return []
+    rows = rows.filter((r) => allowedScheduleIds.has(r.schedule_id))
+  } else if (options?.brandId && !skipDestinationFilter) {
     const productIds = Array.from(new Set(rows.map((r) => r.product_id)))
     if (productIds.length === 0) return []
 

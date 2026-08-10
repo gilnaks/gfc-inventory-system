@@ -10,6 +10,7 @@ import {
   exportComponentToProcurement,
 } from '../../lib/product-bom-component'
 import { getStockUnitLabel } from '../../lib/raw-material-uom'
+import { Modal } from './Modal'
 
 type AdminPasswordConfirm = (options: {
   title: string
@@ -149,7 +150,7 @@ export function ProductComponentExportModal({
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-lg max-w-sm w-full max-h-[90vh] flex flex-col overflow-hidden shadow-xl">
         <div className="p-5 border-b shrink-0 flex items-start justify-between gap-3">
           <div>
@@ -276,6 +277,6 @@ export function ProductComponentExportModal({
           </button>
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

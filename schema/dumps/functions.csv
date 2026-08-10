@@ -1,0 +1,23 @@
+routine_name,return_type
+apply_fixed_asset_from_delivery,trigger
+authenticate_dashboard_passcode,jsonb
+check_material_stock_level,trigger
+create_material_movement_from_delivery,trigger
+generate_grn_number,character varying
+generate_po_number,text
+generate_pr_number,character varying
+get_admin_credentials,record
+log_po_status_change,trigger
+log_purchase_order_changes,trigger
+log_purchase_order_changes_v2,trigger
+set_po_number,trigger
+update_dsir_calculations,trigger
+update_leave_requests_updated_at,trigger
+update_material_stock,trigger
+update_po_balance,trigger
+update_po_item_received,trigger
+update_po_total,trigger
+update_po_totals,trigger
+update_updated_at_column,trigger
+validate_admin_credentials,boolean
+validate_admin_passcode,boolean

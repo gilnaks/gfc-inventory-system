@@ -130,7 +130,7 @@ export function renderTransferSheetTotalsSection(params: TransferSheetTotalsPara
             ? `
           <div class="total-qr-box">
             <img src="${qrDataUrl}" alt="Transfer QR" class="total-qr-image" />
-            <div class="total-qr-caption">${escapeHtml(qrCaption || 'DSIR scan')}</div>
+            <div class="total-qr-caption">${escapeHtml(qrCaption || 'Receive stock')}</div>
           </div>
         `
             : `<div class="total-qr-empty">No QR</div>`

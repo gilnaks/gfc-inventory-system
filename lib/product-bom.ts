@@ -1,6 +1,10 @@
 import { supabase } from './supabase'
-import type { ProductBomItem } from './supabase'
-import { bomBaseQtyToStockUnits, bomCostPerProductUnit } from './raw-material-uom'
+import type { ProductBomItem, RawMaterial } from './supabase'
+import { baseUnitCost, bomBaseQtyToStockUnits, bomCostPerProductUnit } from './raw-material-uom'
+
+/** Same material fields as ProductBomModal — keeps order COGS aligned with UI “cost per unit”. */
+export const PRODUCT_BOM_COST_SELECT =
+  'id, product_id, material_id, quantity, quantity_mode, yield_per_batch, notes, material:raw_materials(id, material_name, sku, unit, uom_base_unit, uom_base_per_unit, current_stock, unit_cost, uom_stock_per_purchase, uom_purchase_unit, factory_bom_uom, factory_inventory_kind, factory_request_uom, brand_id, is_active, linked_product_id)'
 
 export type BomQuantityMode = 'unit' | 'batch'
 
@@ -17,13 +21,19 @@ export function parseProductBomSettings(row: {
   bom_quantity_mode?: string | null
   bom_yield_per_batch?: number | string | null
 }): ProductBomSettings {
-  const quantity_mode = isBomQuantityMode(row.bom_quantity_mode) ? row.bom_quantity_mode : 'unit'
   const rawYield = Number(row.bom_yield_per_batch)
-  return {
-    quantity_mode,
-    yield_per_batch:
-      quantity_mode === 'batch' && rawYield > 0 ? rawYield : null,
+  if (isBomQuantityMode(row.bom_quantity_mode)) {
+    const quantity_mode = row.bom_quantity_mode
+    return {
+      quantity_mode,
+      yield_per_batch:
+        quantity_mode === 'batch' && rawYield > 0 ? rawYield : null,
+    }
   }
+  if (rawYield > 0) {
+    return { quantity_mode: 'batch', yield_per_batch: rawYield }
+  }
+  return { quantity_mode: 'unit', yield_per_batch: null }
 }
 
 /** BOM line quantity (base unit) required per one finished product unit. */
@@ -115,8 +125,68 @@ export async function fetchProductIdsWithBomItems(
   return new Set((data || []).map((row) => row.product_id as string))
 }
 
-export async function fetchProductBomSettingsByProductId(
+/** Match ProductBomModal when product-level bom_* columns were never saved. */
+export function inferBomSettingsFromItems(items: ProductBomItem[]): ProductBomSettings {
+  const first = items[0]
+  if (!first) return { quantity_mode: 'unit', yield_per_batch: null }
+  const quantity_mode = isBomQuantityMode(first.quantity_mode) ? first.quantity_mode : 'unit'
+  return {
+    quantity_mode,
+    yield_per_batch:
+      quantity_mode === 'batch' ? Number(first.yield_per_batch) || null : null,
+  }
+}
+
+export function resolveProductBomSettings(
+  productRow: { bom_quantity_mode?: string | null; bom_yield_per_batch?: number | string | null } | null,
+  items: ProductBomItem[]
+): ProductBomSettings {
+  const fromProduct = productRow ? parseProductBomSettings(productRow) : null
+  const fromItems = items.length > 0 ? inferBomSettingsFromItems(items) : null
+  const candidates = [fromProduct, fromItems].filter(Boolean) as ProductBomSettings[]
+  const batchWithYield = candidates.find(
+    (s) => s.quantity_mode === 'batch' && (Number(s.yield_per_batch) || 0) > 0
+  )
+  if (batchWithYield) return batchWithYield
+  return fromProduct ?? fromItems ?? { quantity_mode: 'unit', yield_per_batch: null }
+}
+
+export function unitCostPerProductFromBomItems(
+  items: ProductBomItem[],
+  settings: ProductBomSettings
+): number {
+  return items.reduce((sum, item) => sum + lineCostPerProductUnit(item, settings), 0)
+}
+
+export async function fetchProductBomItemsByProductId(
   productIds: string[]
+): Promise<Record<string, ProductBomItem[]>> {
+  if (productIds.length === 0) return {}
+
+  const { data, error } = await supabase
+    .from('product_bom_items')
+    .select(PRODUCT_BOM_COST_SELECT)
+    .in('product_id', productIds)
+    .order('created_at', { ascending: true })
+
+  if (error) {
+    console.warn('product_bom_items:', error.message)
+    return {}
+  }
+
+  const map: Record<string, ProductBomItem[]> = {}
+  for (const row of data || []) {
+    const item = row as unknown as ProductBomItem
+    const pid = item.product_id
+    if (!map[pid]) map[pid] = []
+    map[pid].push(item)
+  }
+  return map
+}
+
+export async function fetchProductBomSettingsByProductId(
+  productIds: string[],
+  itemsByProduct?: Record<string, ProductBomItem[]>
 ): Promise<Record<string, ProductBomSettings>> {
   if (productIds.length === 0) return {}
 
@@ -130,9 +200,27 @@ export async function fetchProductBomSettingsByProductId(
     return {}
   }
 
+  const productRows = new Map((data || []).map((row) => [row.id as string, row]))
   const map: Record<string, ProductBomSettings> = {}
-  for (const row of data || []) {
-    map[row.id as string] = parseProductBomSettings(row)
+  for (const pid of productIds) {
+    const items = itemsByProduct?.[pid] || []
+    map[pid] = resolveProductBomSettings(productRows.get(pid) ?? null, items)
   }
   return map
+}
+
+/** One stock unit of linked material ≈ one sold product unit (consumables / supplies). */
+export function unitCostFromLinkedMaterial(material: RawMaterial | null | undefined): number {
+  if (!material) return 0
+  return baseUnitCost(material)
+}
+
+/** BOM-based unit cost for one finished product (cycle count / COGS). */
+export async function computeProductUnitCost(productId: string): Promise<number> {
+  const bomByProduct = await fetchProductBomItemsByProductId([productId])
+  const items = bomByProduct[productId] || []
+  if (items.length === 0) return 0
+  const settingsByProduct = await fetchProductBomSettingsByProductId([productId], bomByProduct)
+  const settings = settingsByProduct[productId] || { quantity_mode: 'unit' as const, yield_per_batch: null }
+  return unitCostPerProductFromBomItems(items, settings)
 }

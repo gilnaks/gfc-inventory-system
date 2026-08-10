@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { X, Building2, Key, Settings } from 'lucide-react'
+import { Modal } from './Modal'
 
 interface SavedBranch {
   id: string
@@ -54,19 +55,19 @@ export function BranchSwitcher({ currentLocation, onBranchSwitch, onClose, onOpe
 
   if (loading) {
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+      <Modal onClose={onClose} align="center">
         <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
           <div className="text-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
             <p className="mt-4 text-gray-600">Loading branches...</p>
           </div>
         </div>
-      </div>
+      </Modal>
     )
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+    <Modal onClose={onClose} align="center">
       <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[80vh] overflow-y-auto">
         <div className="p-6">
           {/* Header */}
@@ -158,6 +159,6 @@ export function BranchSwitcher({ currentLocation, onBranchSwitch, onClose, onOpe
           </div>
         </div>
       </div>
-    </div>
+    </Modal>
   )
 }

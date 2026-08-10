@@ -30,7 +30,7 @@ export function productAvailableAtCountStart(product: ProductStockFields): numbe
   return computeProductAvailableStock(product)
 }
 
-/** NULL = main count (all non index-0 categories); string = index-0 category display name. */
+/** NULL = main count (finished products); string = supplies or components category display name. */
 export type ProductCycleCountScope = string | null
 
 function applyCategoryScopeFilter<
@@ -43,7 +43,7 @@ function applyCategoryScopeFilter<
 }
 
 export function cycleCountScopeLabel(categoryScope: ProductCycleCountScope): string {
-  return categoryScope ?? 'Main inventory'
+  return categoryScope ?? 'Finished products'
 }
 
 export async function fetchInProgressProductCycleCount(
@@ -291,6 +291,13 @@ export async function postProductCycleCount(options: {
     .eq('status', 'in_progress')
 
   if (closeErr) throw new Error(closeErr.message)
+
+  try {
+    const { postProductCycleCountJournal } = await import('./accounting-procurement-posting')
+    await postProductCycleCountJournal(options.cycleCountId, header.brand_id, options.postedBy)
+  } catch {
+    /* logged to accounting_posting_errors */
+  }
 
   return { posted, skipped, zeroVariance }
 }

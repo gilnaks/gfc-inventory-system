@@ -996,7 +996,7 @@ export function ExpensesSection({
 
   const addItem = () => {
     const newItem = {
-      particulars: '',
+      description: '',
       amount: 0
     }
     onItemsChange([...items, newItem])
@@ -1014,7 +1014,7 @@ export function ExpensesSection({
   }
 
   const saveItem = async (item: any, index: number) => {
-    if (!item.particulars.trim()) return
+    if (!item.description.trim()) return
 
     setLoading(true)
     try {
@@ -1022,7 +1022,7 @@ export function ExpensesSection({
         const { error } = await supabase
           .from('dsir_expenses')
           .update({
-            particulars: item.particulars,
+            description: item.description,
             amount: item.amount
           })
           .eq('id', item.id)
@@ -1033,7 +1033,7 @@ export function ExpensesSection({
           .from('dsir_expenses')
           .insert({
             dsir_report_id: reportId,
-            particulars: item.particulars,
+            description: item.description,
             amount: item.amount
           })
           .select()
@@ -1071,8 +1071,8 @@ export function ExpensesSection({
                 <td className="px-3 py-2">
                   <input
                     type="text"
-                    value={item.particulars}
-                    onChange={(e) => updateItem(index, 'particulars', e.target.value)}
+                    value={item.description}
+                    onChange={(e) => updateItem(index, 'description', e.target.value)}
                     className="w-full px-2 py-1 border border-gray-300 rounded text-sm"
                     placeholder="Expense description"
                   />
@@ -1091,7 +1091,7 @@ export function ExpensesSection({
                   <div className="flex space-x-1">
                     <button
                       onClick={() => saveItem(item, index)}
-                      disabled={loading || !item.particulars.trim()}
+                      disabled={loading || !item.description.trim()}
                       className="text-green-600 hover:text-green-900 disabled:opacity-50"
                     >
                       <Calculator className="h-4 w-4" />

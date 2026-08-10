@@ -1,5 +1,18 @@
 import { supabase, type RawMaterial } from './supabase'
-import type { FactoryScheduleItem } from './factory-schedule'
+import { FACTORY_BRAND_SLUG } from './brand-roles'
+import { postProductionBatchJournalWithNotice } from './accounting-production-posting'
+import { resolveFactoryMaterialStockUnitCost, computeBatchActualMaterialCost } from './accounting-factory-wip-posting'
+import { computeBatchTheoreticalMaterialCost } from './accounting-production-posting'
+import {
+  postProductionBatchTransfer,
+  reversePostedIntercompanyTransferForBatchRevert,
+} from './intercompany-transfer-service'
+import { reverseJournalEntry } from './accounting-journal-service'
+import {
+  countProducedForScheduleItem,
+  isScheduleItemScanComplete,
+  type FactoryScheduleItem,
+} from './factory-schedule'
 import { isMaterialLinkedToFactoryFloor } from './factory-inventory'
 import {
   effectiveBomStockQtyPerProductUnit,
@@ -214,6 +227,27 @@ export async function countBatchUnitsForSchedule(
   return (data || []).reduce((sum, row) => sum + (Number(row.units) || 0), 0)
 }
 
+/** One production batch run per schedule line per day (cancelled runs can be replaced). */
+export async function countBatchRunsForSchedule(
+  scheduleId: string,
+  workDate: string
+): Promise<number> {
+  const { data, error } = await supabase
+    .from('factory_production_batches')
+    .select('id')
+    .eq('schedule_id', scheduleId)
+    .eq('work_date', workDate)
+    .in('status', ['in_progress', 'completed'])
+
+  if (error) {
+    if (error.message.includes('factory_production_batches')) return 0
+    console.warn('factory_production_batches:', error.message)
+    return 0
+  }
+
+  return (data || []).length
+}
+
 export async function fetchInProgressBatchForSchedule(
   scheduleId: string,
   workDate: string
@@ -244,13 +278,22 @@ export type FactoryBatchListItem = {
   started_at: string
   started_by: string | null
   completed_at?: string | null
+  journal_entry_id?: string | null
   product_name?: string
   sku?: string
   brand_name?: string
 }
 
+export type FactoryBatchCostSummary = {
+  batchId: string
+  actualCost: number
+  theoreticalCost: number
+  variance: number
+  journalEntryId: string | null
+}
+
 const FACTORY_BATCH_LIST_SELECT =
-  'id, schedule_id, product_id, work_date, batch_number, units, status, started_at, started_by, completed_at, product:products(name, sku, brands(name))'
+  'id, schedule_id, product_id, work_date, batch_number, units, status, started_at, started_by, completed_at, journal_entry_id, product:products(name, sku, brands(name))'
 
 function mapFactoryBatchListRow(row: Record<string, unknown>): FactoryBatchListItem {
   const product = row.product as { name?: string; sku?: string; brands?: { name?: string } } | null
@@ -265,10 +308,47 @@ function mapFactoryBatchListRow(row: Record<string, unknown>): FactoryBatchListI
     started_at: row.started_at as string,
     started_by: (row.started_by as string | null) ?? null,
     completed_at: (row.completed_at as string | null) ?? null,
+    journal_entry_id: (row.journal_entry_id as string | null) ?? null,
     product_name: product?.name,
     sku: product?.sku,
     brand_name: product?.brands?.name,
   }
+}
+
+export async function fetchBatchCostSummary(
+  batchId: string,
+  productId: string,
+  units: number
+): Promise<FactoryBatchCostSummary> {
+  const [actualCost, theoreticalCost, batchRow] = await Promise.all([
+    computeBatchActualMaterialCost(batchId),
+    computeBatchTheoreticalMaterialCost(productId, units),
+    supabase
+      .from('factory_production_batches')
+      .select('journal_entry_id')
+      .eq('id', batchId)
+      .maybeSingle(),
+  ])
+
+  return {
+    batchId,
+    actualCost,
+    theoreticalCost,
+    variance: Math.round((actualCost - theoreticalCost) * 100) / 100,
+    journalEntryId: (batchRow.data?.journal_entry_id as string | null) ?? null,
+  }
+}
+
+export async function fetchBatchCostSummaries(
+  batches: Pick<FactoryBatchListItem, 'id' | 'product_id' | 'units'>[]
+): Promise<Record<string, FactoryBatchCostSummary>> {
+  const out: Record<string, FactoryBatchCostSummary> = {}
+  await Promise.all(
+    batches.map(async (b) => {
+      out[b.id] = await fetchBatchCostSummary(b.id, b.product_id, b.units)
+    })
+  )
+  return out
 }
 
 export async function fetchActiveBatchesForDate(workDate: string): Promise<FactoryBatchListItem[]> {
@@ -285,6 +365,19 @@ export async function fetchActiveBatchesForDate(workDate: string): Promise<Facto
   }
 
   return (data || []).map((row) => mapFactoryBatchListRow(row as Record<string, unknown>))
+}
+
+/** Schedule line IDs with a batch currently in progress for the work date. */
+export async function fetchInProgressScheduleIds(workDate: string): Promise<Set<string>> {
+  const batches = await fetchActiveBatchesForDate(workDate)
+  return new Set(batches.map((b) => b.schedule_id))
+}
+
+export async function hasInProgressBatchForSchedule(
+  scheduleId: string,
+  workDate: string
+): Promise<boolean> {
+  return !!(await fetchInProgressBatchForSchedule(scheduleId, workDate))
 }
 
 export async function fetchCompletedBatchesForDate(
@@ -323,6 +416,109 @@ export async function fetchCompletedBatchesForSchedule(
   }
 
   return (data || []).map((row) => mapFactoryBatchListRow(row as Record<string, unknown>))
+}
+
+export async function fetchBatchesForSchedulesOnDate(
+  scheduleIds: string[],
+  workDate: string
+): Promise<FactoryBatchListItem[]> {
+  if (!scheduleIds.length) return []
+
+  const { data, error } = await supabase
+    .from('factory_production_batches')
+    .select(FACTORY_BATCH_LIST_SELECT)
+    .in('schedule_id', scheduleIds)
+    .eq('work_date', workDate)
+    .in('status', ['in_progress', 'completed'])
+    .order('started_at', { ascending: false })
+
+  if (error) {
+    if (error.message.includes('factory_production_batches')) return []
+    throw error
+  }
+
+  return (data || []).map((row) => mapFactoryBatchListRow(row as Record<string, unknown>))
+}
+
+export async function revertProductionBatchToInProgress(
+  batchId: string,
+  options?: { postedBy?: string }
+): Promise<{ ok: boolean; message?: string }> {
+  const { data: batchRow } = await supabase
+    .from('factory_production_batches')
+    .select('id, schedule_id, work_date, status, journal_entry_id, intercompany_transfer_id')
+    .eq('id', batchId)
+    .maybeSingle()
+
+  if (!batchRow || batchRow.status !== 'completed') {
+    return { ok: false, message: 'Only completed batches can be reverted to in progress.' }
+  }
+
+  const inProgress = await fetchInProgressBatchForSchedule(
+    batchRow.schedule_id as string,
+    batchRow.work_date as string
+  )
+  if (inProgress) {
+    return {
+      ok: false,
+      message: 'A batch is already in progress for this schedule line.',
+    }
+  }
+
+  const postedBy = options?.postedBy?.trim() || 'Factory'
+
+  if (batchRow.journal_entry_id) {
+    try {
+      await reverseJournalEntry(
+        batchRow.journal_entry_id as string,
+        postedBy,
+        'Production batch reverted to in progress'
+      )
+    } catch (e) {
+      return {
+        ok: false,
+        message: e instanceof Error ? e.message : 'Could not reverse the production journal entry.',
+      }
+    }
+  }
+
+  if (batchRow.intercompany_transfer_id) {
+    const transferResult = await reversePostedIntercompanyTransferForBatchRevert(
+      batchRow.intercompany_transfer_id as string,
+      postedBy
+    )
+    if (transferResult.ok === false) {
+      return { ok: false, message: transferResult.message }
+    }
+  }
+
+  // Components credit materials inventory on complete — undo that before allowing re-complete.
+  const { reverseComponentProductionReceipt } = await import('./factory-components')
+  const componentRevert = await reverseComponentProductionReceipt(batchId, postedBy)
+  if (componentRevert.ok === false) {
+    return { ok: false, message: componentRevert.message }
+  }
+
+  const { data, error } = await supabase
+    .from('factory_production_batches')
+    .update({
+      status: 'in_progress',
+      completed_at: null,
+      journal_entry_id: null,
+      intercompany_transfer_id: null,
+    })
+    .eq('id', batchId)
+    .eq('status', 'completed')
+    .select('id')
+
+  if (error) {
+    return { ok: false, message: error.message }
+  }
+  if (!data?.length) {
+    return { ok: false, message: 'Batch could not be reverted.' }
+  }
+
+  return { ok: true }
 }
 
 type DeductionLine = {
@@ -416,6 +612,44 @@ async function deductFromOpenedPackages(
   return { ok: true, usage }
 }
 
+type UsageLine = {
+  material_id: string
+  opened_material_id: string
+  quantity_used: number
+  unit: string
+}
+
+async function enrichUsageWithUnitCosts(
+  usage: UsageLine[]
+): Promise<Array<UsageLine & { unit_cost: number }>> {
+  if (!usage.length) return []
+
+  const openedIds = usage.map((u) => u.opened_material_id)
+  const materialIds = Array.from(new Set(usage.map((u) => u.material_id)))
+
+  const [{ data: openedRows }, { data: materials }] = await Promise.all([
+    supabase.from('factory_opened_materials').select('id, factory_request_id').in('id', openedIds),
+    supabase
+      .from('raw_materials')
+      .select('id, material_name, unit_cost, uom_stock_per_purchase')
+      .in('id', materialIds),
+  ])
+
+  const requestByOpened = new Map(
+    (openedRows || []).map((r) => [r.id as string, r.factory_request_id as string | null])
+  )
+  const matById = new Map((materials || []).map((m) => [m.id as string, m as RawMaterial]))
+
+  const enriched: Array<UsageLine & { unit_cost: number }> = []
+  for (const line of usage) {
+    const mat = matById.get(line.material_id)
+    const requestId = requestByOpened.get(line.opened_material_id)
+    const unit_cost = mat ? await resolveFactoryMaterialStockUnitCost(mat, requestId) : 0
+    enriched.push({ ...line, unit_cost })
+  }
+  return enriched
+}
+
 export async function checkBatchCanStart(
   item: Pick<FactoryScheduleItem, 'schedule_id' | 'product_id' | 'quantity_required'>,
   workDate: string,
@@ -436,8 +670,8 @@ export async function checkBatchCanStart(
       unit: r.unit,
       qty_per_unit: r.qty_per_unit,
     }))
-  const usedUnits = await countBatchUnitsForSchedule(item.schedule_id, workDate)
-  const unitsRemaining = Math.max(0, item.quantity_required - usedUnits)
+  const batchRunsUsed = await countBatchRunsForSchedule(item.schedule_id, workDate)
+  const unitsRemaining = Math.max(0, 1 - batchRunsUsed)
   const inProgress = !!(await fetchInProgressBatchForSchedule(item.schedule_id, workDate))
 
   if (inProgress) {
@@ -521,7 +755,7 @@ export async function startProductionBatch(options: {
   if (units > check.unitsRemaining) {
     return {
       ok: false,
-      message: `Only ${check.unitsRemaining} unit${check.unitsRemaining === 1 ? '' : 's'} remaining on the schedule.`,
+      message: 'A batch has already been run for this schedule line today.',
     }
   }
   if (check.shortages.length) {
@@ -587,13 +821,15 @@ export async function startProductionBatch(options: {
   const batchId = batchRow.id as string
 
   if (usage.length > 0) {
+    const enrichedUsage = await enrichUsageWithUnitCosts(usage)
     const { error: usageErr } = await supabase.from('factory_batch_material_usage').insert(
-      usage.map((u) => ({
+      enrichedUsage.map((u) => ({
         batch_id: batchId,
         opened_material_id: u.opened_material_id,
         material_id: u.material_id,
         quantity_used: u.quantity_used,
         unit: u.unit,
+        unit_cost: u.unit_cost > 0 ? u.unit_cost : null,
       }))
     )
     if (usageErr) {
@@ -605,12 +841,143 @@ export async function startProductionBatch(options: {
   return { ok: true, batchId }
 }
 
-export async function completeProductionBatch(batchId: string): Promise<{ ok: boolean; message?: string }> {
+async function deductMaterialsToCoverProducedUnits(
+  batchId: string,
+  productId: string,
+  targetUnits: number
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const units = Math.max(0, Math.floor(Number(targetUnits) || 0))
+  if (units <= 0) return { ok: true }
+
+  const bomLines = await fetchBatchBomForProduct(productId)
+  if (!bomLines.length) return { ok: true }
+
+  const { data: usageRows, error: usageLoadErr } = await supabase
+    .from('factory_batch_material_usage')
+    .select('material_id, quantity_used')
+    .eq('batch_id', batchId)
+
+  if (usageLoadErr) {
+    return { ok: false, message: usageLoadErr.message }
+  }
+
+  const usedByMaterial = new Map<string, number>()
+  for (const row of usageRows || []) {
+    const mid = row.material_id as string
+    if (!mid) continue
+    usedByMaterial.set(mid, (usedByMaterial.get(mid) || 0) + (Number(row.quantity_used) || 0))
+  }
+
+  const deductionLines: DeductionLine[] = []
+  for (const line of bomLines) {
+    const needed = line.qty_per_unit * units
+    const already = usedByMaterial.get(line.material_id) || 0
+    const shortfall = needed - already
+    if (shortfall > 1e-9) {
+      deductionLines.push({
+        material_id: line.material_id,
+        material_name: line.material_name,
+        quantity: shortfall,
+        unit: line.unit,
+      })
+    }
+  }
+
+  if (!deductionLines.length) return { ok: true }
+
+  const deduct = await deductFromOpenedPackages(deductionLines)
+  if (deduct.ok === false) {
+    const detail = formatBatchMaterialShortageMessage(deduct.shortages)
+    return {
+      ok: false,
+      message: `Not enough floor materials for ${units} unit${units === 1 ? '' : 's'}:\n\n${detail}`,
+    }
+  }
+
+  if (deduct.usage.length > 0) {
+    const enrichedUsage = await enrichUsageWithUnitCosts(deduct.usage)
+    const { error: usageErr } = await supabase.from('factory_batch_material_usage').insert(
+      enrichedUsage.map((u) => ({
+        batch_id: batchId,
+        opened_material_id: u.opened_material_id,
+        material_id: u.material_id,
+        quantity_used: u.quantity_used,
+        unit: u.unit,
+        unit_cost: u.unit_cost > 0 ? u.unit_cost : null,
+      }))
+    )
+    if (usageErr) {
+      return { ok: false, message: usageErr.message }
+    }
+  }
+
+  return { ok: true }
+}
+
+export async function completeProductionBatch(
+  batchId: string,
+  options?: { postedBy?: string }
+): Promise<{ ok: boolean; message?: string }> {
+  const { data: batchRow } = await supabase
+    .from('factory_production_batches')
+    .select('id, product_id, schedule_id, work_date, units, status, journal_entry_id, intercompany_transfer_id')
+    .eq('id', batchId)
+    .maybeSingle()
+
+  if (!batchRow || batchRow.status !== 'in_progress') {
+    return { ok: false, message: 'Batch is not in progress or was already finished.' }
+  }
+
+  const scheduleItem = {
+    schedule_id: batchRow.schedule_id as string,
+    product_id: batchRow.product_id as string,
+  }
+  const workDate = batchRow.work_date as string
+
+  const [{ data: scheduleRow }, producedUnits] = await Promise.all([
+    supabase
+      .from('production_schedules')
+      .select('quantity_required')
+      .eq('id', batchRow.schedule_id)
+      .maybeSingle(),
+    countProducedForScheduleItem(scheduleItem, workDate),
+  ])
+
+  const quantityRequired = Number(scheduleRow?.quantity_required) || 0
+  const batchUnits = Math.max(1, Number(batchRow.units) || 1)
+
+  if (
+    quantityRequired > 0
+      ? !isScheduleItemScanComplete({ produced: producedUnits, quantity_required: quantityRequired })
+      : producedUnits < batchUnits
+  ) {
+    const remaining =
+      quantityRequired > 0 ? Math.max(0, quantityRequired - producedUnits) : batchUnits - producedUnits
+    return {
+      ok: false,
+      message:
+        quantityRequired > 0
+          ? `Cannot complete batch — ${producedUnits} of ${quantityRequired} sticker(s) scanned (${remaining} remaining). Finish on the Factory Scan page first.`
+          : 'Scan at least one sticker on the Factory Scan page before completing this batch.',
+    }
+  }
+
+  const finalUnits = producedUnits
+  const deductCover = await deductMaterialsToCoverProducedUnits(
+    batchId,
+    batchRow.product_id as string,
+    finalUnits
+  )
+  if (deductCover.ok === false) {
+    return { ok: false, message: deductCover.message }
+  }
+
   const { data, error } = await supabase
     .from('factory_production_batches')
     .update({
       status: 'completed',
       completed_at: new Date().toISOString(),
+      units: finalUnits,
     })
     .eq('id', batchId)
     .eq('status', 'in_progress')
@@ -622,7 +989,111 @@ export async function completeProductionBatch(batchId: string): Promise<{ ok: bo
   if (!data?.length) {
     return { ok: false, message: 'Batch is not in progress or was already finished.' }
   }
+
+  await finalizeCompletedProductionBatch(
+    batchId,
+    { ...batchRow, units: finalUnits },
+    options
+  )
+
   return { ok: true }
+}
+
+async function finalizeCompletedProductionBatch(
+  batchId: string,
+  batchRow: {
+    journal_entry_id: string | null
+    intercompany_transfer_id: string | null
+    schedule_id: string
+    product_id: string
+    work_date: string
+    units: number
+  },
+  options?: { postedBy?: string }
+): Promise<void> {
+  try {
+    const { data: gfcBrand } = await supabase
+      .from('brands')
+      .select('id')
+      .eq('slug', FACTORY_BRAND_SLUG)
+      .maybeSingle()
+
+    if (gfcBrand?.id && !batchRow.journal_entry_id) {
+      const postedBy = options?.postedBy?.trim() || 'Factory'
+      await postProductionBatchJournalWithNotice(batchId, gfcBrand.id as string, postedBy, {
+        producedUnits: batchRow.units,
+      })
+    }
+
+    if (gfcBrand?.id && !batchRow.intercompany_transfer_id) {
+      const postedBy = options?.postedBy?.trim() || 'Factory'
+
+      const { data: scheduleRow } = await supabase
+        .from('production_schedules')
+        .select('id, for_brand_id')
+        .eq('id', batchRow.schedule_id)
+        .maybeSingle()
+
+      const { data: productRow } = await supabase
+        .from('products')
+        .select('id, brand_id, price, name')
+        .eq('id', batchRow.product_id)
+        .maybeSingle()
+
+      const { isFactoryComponentProduct, postComponentProductionReceipt } = await import(
+        './factory-components'
+      )
+      const isComponent = await isFactoryComponentProduct(batchRow.product_id)
+
+      if (isComponent && productRow?.id) {
+        // Components land directly in procurement materials inventory — no export step.
+        const { computeProductUnitCost } = await import('./product-bom')
+        const { syncComponentCostFromBom } = await import('./product-bom-component')
+        let unitCost = 0
+        try {
+          unitCost = await syncComponentCostFromBom(productRow.id as string)
+        } catch {
+          unitCost = Math.max(
+            0,
+            (await computeProductUnitCost(productRow.id as string)) ||
+              Number(productRow.price) ||
+              0
+          )
+        }
+        await postComponentProductionReceipt({
+          productId: productRow.id as string,
+          quantity: Number(batchRow.units) || 0,
+          unitCost,
+          batchId,
+          createdBy: postedBy,
+          brandId: gfcBrand.id as string,
+          productName: (productRow.name as string) || undefined,
+        })
+      } else {
+        const toBrandId =
+          (scheduleRow?.for_brand_id as string | null) || (productRow?.brand_id as string | null)
+        if (toBrandId && productRow?.id) {
+          const transfer = await postProductionBatchTransfer({
+            factoryBrandId: gfcBrand.id as string,
+            toBrandId,
+            destProductId: productRow.id as string,
+            quantity: Number(batchRow.units) || 0,
+            unitCost: Math.max(0, Number(productRow.price) || 0),
+            transferDate: batchRow.work_date as string,
+            createdBy: postedBy,
+            notes: `Auto transfer — ${batchRow.units} unit${batchRow.units === 1 ? '' : 's'} produced`,
+          })
+
+          await supabase
+            .from('factory_production_batches')
+            .update({ intercompany_transfer_id: transfer.id })
+            .eq('id', batchId)
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Production batch finalize failed:', e)
+  }
 }
 
 export async function cancelProductionBatch(batchId: string): Promise<{ ok: boolean; message?: string }> {

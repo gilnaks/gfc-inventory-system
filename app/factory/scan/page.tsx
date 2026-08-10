@@ -4,6 +4,7 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { supabase } from '../../../lib/supabase'
 import { resolveStickerIdFromCode, recordProductionScan } from '../../../lib/factory-scan'
+import { fetchInProgressScheduleIds } from '../../../lib/factory-batch-production'
 import {
   loadTodayFactorySchedule,
   loadScannedSerialsForScheduleItem,
@@ -28,15 +29,28 @@ import {
   CheckCircle2,
   ChevronRight,
   ClipboardList,
-  Package,
+  Lock,
+  Play,
   Tag,
   X,
   XCircle,
 } from 'lucide-react'
+import { Modal } from '../../components/Modal'
+import { FactoryNav } from '../FactoryNav'
 
 function getFactoryRequestedBy(): string {
   if (typeof window === 'undefined') return 'Factory'
   return (localStorage.getItem('dashboard_username') || '').trim() || 'Factory'
+}
+
+/** Don't yank focus back to the hidden scanner while typing in a modal or form field. */
+function isEditableFocusTarget(el: Element | null): boolean {
+  if (!el || !(el instanceof HTMLElement)) return false
+  if (el.closest('[role="dialog"]')) return true
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (el.isContentEditable) return true
+  return false
 }
 
 function RequestAdditionalStickers({
@@ -66,9 +80,7 @@ function RequestAdditionalStickers({
       return
     }
     if (
-      !confirm(
-        `Request ${n} additional sticker${n === 1 ? '' : 's'} for ${item.product_name}? It will appear in Production Schedule for printing.`
-      )
+      !confirm(`Request ${n} sticker${n === 1 ? '' : 's'} for ${item.product_name}?`)
     ) {
       return
     }
@@ -101,7 +113,7 @@ function RequestAdditionalStickers({
       >
         <div className="flex items-center gap-2 min-w-0">
           <Tag className="h-4 w-4 shrink-0 text-slate-600" />
-          <span className="text-sm font-medium text-gray-900">Request additional stickers</span>
+          <span className="text-sm font-medium text-gray-900">More stickers</span>
         </div>
         {pendingQty > 0 ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 tabular-nums">
@@ -113,21 +125,20 @@ function RequestAdditionalStickers({
       </button>
 
       {modalOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/50"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="sticker-request-title"
-          onClick={submitting ? undefined : closeModal}
+        <Modal
+          onClose={submitting ? undefined : closeModal}
+          positionClassName="items-end sm:items-center"
         >
           <div
             className="w-full max-w-md rounded-xl bg-white shadow-xl border border-slate-200 overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sticker-request-title"
           >
             <div className="flex items-start justify-between gap-3 px-4 py-4 border-b border-slate-100">
               <div className="min-w-0">
                 <h2 id="sticker-request-title" className="text-base font-semibold text-gray-900">
-                  Request additional stickers
+                  More stickers
                 </h2>
                 <p className="text-sm text-gray-600 mt-1 truncate">{item.product_name}</p>
               </div>
@@ -143,13 +154,9 @@ function RequestAdditionalStickers({
             </div>
 
             <div className="px-4 py-4 space-y-4">
-              <p className="text-sm text-gray-600 leading-relaxed">
-                For damaged, lost, or extra labels. Admin will see this on today&apos;s Production
-                Schedule to print.
-              </p>
               {pendingQty > 0 ? (
                 <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                  {pendingQty} sticker{pendingQty === 1 ? '' : 's'} already waiting to be printed.
+                  {pendingQty} pending print
                 </p>
               ) : null}
 
@@ -158,7 +165,7 @@ function RequestAdditionalStickers({
                   htmlFor="sticker-request-qty"
                   className="block text-xs font-medium text-gray-600 mb-1.5"
                 >
-                  Quantity
+                  Qty
                 </label>
                 <input
                   id="sticker-request-qty"
@@ -176,14 +183,14 @@ function RequestAdditionalStickers({
                   htmlFor="sticker-request-notes"
                   className="block text-xs font-medium text-gray-600 mb-1.5"
                 >
-                  Reason (optional)
+                  Reason
                 </label>
                 <input
                   id="sticker-request-notes"
                   type="text"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  placeholder="e.g. damaged label"
+                  placeholder="Damaged, lost…"
                   className="w-full min-h-[44px] px-3 py-2 border border-slate-200 rounded-lg text-base text-gray-900"
                 />
               </div>
@@ -204,11 +211,11 @@ function RequestAdditionalStickers({
                 disabled={submitting}
                 className="flex-1 min-h-[44px] px-4 py-2.5 rounded-lg bg-slate-700 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 touch-manipulation"
               >
-                {submitting ? 'Sending…' : 'Send request'}
+                {submitting ? '…' : 'Send'}
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       ) : null}
     </>
   )
@@ -245,7 +252,7 @@ function ScannerView({
   loadingScanned: boolean
   inputRef: RefObject<HTMLInputElement | null>
   onScanCodeChange: (v: string) => void
-  onSubmit: () => void
+  onSubmit: (code?: string) => void
   onFocusInput: () => void
   onChangeItem: () => void
   pendingStickerQty: number
@@ -296,7 +303,7 @@ function ScannerView({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-[10px] uppercase tracking-wide text-gray-500">
-              {isComplete ? 'Complete' : 'Producing'}
+              {isComplete ? 'Done' : 'Active'}
             </p>
             <h1 className="text-lg font-bold text-gray-900 leading-snug mt-0.5">{item.product_name}</h1>
             <div className="flex flex-wrap items-center gap-2 mt-2">
@@ -321,7 +328,7 @@ function ScannerView({
 
         <div className="mt-4">
           <div className="flex justify-between text-xs text-gray-500 mb-1.5">
-            <span>Today in production</span>
+            <span>Progress</span>
             <span className="tabular-nums text-gray-700 font-medium">
               {item.produced} / {item.quantity_required}
             </span>
@@ -341,7 +348,8 @@ function ScannerView({
         className="sr-only"
         onSubmit={(e) => {
           e.preventDefault()
-          onSubmit()
+          const raw = inputRef.current?.value ?? scanCode
+          onSubmit(raw)
         }}
         aria-hidden
       >
@@ -350,7 +358,18 @@ function ScannerView({
           type="text"
           value={scanCode}
           onChange={(e) => onScanCodeChange(e.target.value)}
-          onBlur={() => setTimeout(onFocusInput, 50)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return
+            e.preventDefault()
+            const raw = inputRef.current?.value ?? ''
+            if (raw.trim()) onSubmit(raw)
+          }}
+          onBlur={() => {
+            setTimeout(() => {
+              if (isEditableFocusTarget(document.activeElement)) return
+              onFocusInput()
+            }, 50)
+          }}
           autoFocus
           autoComplete="off"
           tabIndex={0}
@@ -401,32 +420,22 @@ function ScannerView({
                 : 'text-gray-700'
           }`}
         >
-          {status === 'processing' && 'Processing…'}
+          {status === 'processing' && '…'}
           {status === 'success' && feedback?.message}
-          {status === 'complete' && 'Complete'}
+          {status === 'complete' && 'Done'}
           {status === 'error' && feedback?.message}
-          {status === 'idle' && 'Scan sticker'}
+          {status === 'idle' && 'Scan'}
         </p>
-        {status === 'idle' && (
-          <p className="mt-1 text-center text-xs text-gray-500">Scanner is ready — no tap needed</p>
-        )}
-        {status === 'complete' && (
-          <p className="mt-1 text-center text-xs text-gray-500">
-            All {item.quantity_required} unit{item.quantity_required === 1 ? '' : 's'} scanned for today
-          </p>
-        )}
       </div>
 
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm px-4 py-3 text-center">
-        <p className="text-[10px] uppercase tracking-wide text-gray-500">
-          {isComplete ? 'Status' : 'Remaining'}
-        </p>
+        <p className="text-[10px] uppercase tracking-wide text-gray-500">Left</p>
         <p
           className={`text-2xl font-bold tabular-nums mt-0.5 ${
             isComplete ? 'text-emerald-700' : brandTheme.remainingText
           }`}
         >
-          {isComplete ? 'Complete' : Math.max(0, item.quantity_required - item.produced)}
+          {isComplete ? '0' : Math.max(0, item.quantity_required - item.produced)}
         </p>
       </div>
 
@@ -439,7 +448,7 @@ function ScannerView({
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-600">
-            Scanned serials
+            Scanned
           </h2>
           <span className="text-xs tabular-nums text-gray-500 shrink-0">
             {loadingScanned ? '…' : scannedSerials.length}
@@ -448,9 +457,7 @@ function ScannerView({
         {loadingScanned && scannedSerials.length === 0 ? (
           <p className="px-4 py-6 text-center text-sm text-gray-400">Loading…</p>
         ) : scannedSerials.length === 0 ? (
-          <p className="px-4 py-6 text-center text-sm text-gray-500">
-            No serials scanned yet for this item today.
-          </p>
+          <p className="px-4 py-6 text-center text-sm text-gray-500">None yet</p>
         ) : (
           <ul className="max-h-52 overflow-y-auto divide-y divide-slate-100">
             {scannedSerials.map((row, index) => (
@@ -476,33 +483,152 @@ function ScannerView({
   )
 }
 
-function SelectionIntro({
-  loading,
-  itemCount,
+function ScheduleItemCard({
+  item,
+  complete,
+  pendingStickers,
+  onSelect,
+  disabled,
+  disabledReason,
 }: {
-  loading: boolean
-  itemCount: number
+  item: FactoryScheduleItem
+  complete: boolean
+  pendingStickers: number
+  onSelect?: () => void
+  disabled?: boolean
+  disabledReason?: string
+}) {
+  const Wrapper = disabled ? 'div' : 'button'
+  return (
+    <Wrapper
+      type={disabled ? undefined : 'button'}
+      onClick={disabled ? undefined : onSelect}
+      className={`w-full text-left rounded-xl border shadow-sm p-4 touch-manipulation transition-colors ${
+        disabled
+          ? 'border-slate-200 bg-slate-50/80 opacity-90 cursor-not-allowed'
+          : complete
+            ? 'border-emerald-200 bg-emerald-50/60 hover:bg-emerald-50 active:bg-emerald-100/80'
+            : 'border-indigo-200 bg-white hover:bg-indigo-50/40 active:bg-indigo-100/30'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start gap-2 flex-wrap">
+            <p className="font-semibold text-gray-900 leading-snug">{item.product_name}</p>
+            {disabled ? (
+              <span className="inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-800 border border-amber-200">
+                <Lock className="h-3 w-3" aria-hidden />
+                Locked
+              </span>
+            ) : complete ? (
+              <span className="inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-emerald-100 text-emerald-800 border border-emerald-200">
+                <CheckCircle2 className="h-3 w-3" aria-hidden />
+                Done
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-indigo-100 text-indigo-800 border border-indigo-200">
+                <Barcode className="h-3 w-3" aria-hidden />
+                Ready
+              </span>
+            )}
+            {pendingStickers > 0 ? (
+              <span className="inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-800 border border-amber-200 tabular-nums">
+                <Tag className="h-3 w-3" aria-hidden />
+                +{pendingStickers}
+              </span>
+            ) : null}
+          </div>
+          <p className="text-gray-500 text-xs mt-1">
+            {item.sku ? <span className="font-mono">{item.sku}</span> : null}
+            {item.sku ? ' · ' : null}
+            <span className="font-mono">{item.batch_number}</span>
+          </p>
+          {disabled && disabledReason ? (
+            <p className="text-xs text-amber-800 mt-2 leading-snug">{disabledReason}</p>
+          ) : null}
+          <dl className="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-md bg-slate-50 border border-slate-100 py-2 px-1">
+              <dt className="text-[10px] uppercase tracking-wide text-gray-500">Req</dt>
+              <dd className="text-sm font-semibold text-gray-900 tabular-nums">
+                {item.quantity_required}
+              </dd>
+            </div>
+            <div className="rounded-md bg-slate-50 border border-slate-100 py-2 px-1">
+              <dt className="text-[10px] uppercase tracking-wide text-gray-500">Print</dt>
+              <dd className="text-sm font-semibold text-gray-900 tabular-nums">{item.printed}</dd>
+            </div>
+            <div className="rounded-md bg-slate-50 border border-slate-100 py-2 px-1">
+              <dt className="text-[10px] uppercase tracking-wide text-gray-500">Scan</dt>
+              <dd className="text-sm font-semibold text-emerald-700 tabular-nums">{item.produced}</dd>
+            </div>
+          </dl>
+        </div>
+        <ProgressFractionCircle
+          current={item.produced}
+          total={item.quantity_required}
+          size="sm"
+          strokeClass={complete ? 'text-emerald-600' : disabled ? 'text-slate-400' : 'text-indigo-600'}
+        />
+      </div>
+      <ScheduleNotesBlock notes={item.notes} />
+    </Wrapper>
+  )
+}
+
+function BatchNotStartedGate({
+  item,
+  onBack,
+  onChooseOther,
+}: {
+  item: FactoryScheduleItem
+  onBack: () => void
+  onChooseOther: () => void
 }) {
   return (
-    <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-5">
-      <div className="min-w-0">
-        <h2 className="text-base sm:text-lg font-semibold text-gray-900 leading-snug flex items-center gap-2.5">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100">
-            <Package className="h-5 w-5 shrink-0 text-slate-600" strokeWidth={2} aria-hidden />
+    <div className="space-y-4">
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 sm:p-5">
+        <div className="flex items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-100">
+            <Lock className="h-5 w-5 text-amber-800" aria-hidden />
           </span>
-          Choose a product
-        </h2>
-        <p className="text-sm text-gray-600 mt-3 leading-relaxed">
-          Tap the item you&apos;re producing on the floor. Sticker scanning starts on the next
-          screen.
-        </p>
-        {loading ? (
-          <p className="text-xs text-gray-400 mt-2">Loading schedule…</p>
-        ) : itemCount > 0 ? (
-          <p className="text-xs text-gray-500 mt-2 tabular-nums">
-            {itemCount} {itemCount === 1 ? 'item' : 'items'} on today&apos;s schedule
-          </p>
-        ) : null}
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-amber-950">Start batch first</h2>
+            <p className="text-sm text-amber-900/90 mt-1 leading-relaxed">
+              {item.product_name}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <ScheduleItemCard
+        item={item}
+        complete={isScheduleItemScanComplete(item)}
+        pendingStickers={0}
+        disabled
+      />
+
+      <div className="flex flex-col gap-2">
+        <Link
+          href="/factory"
+          className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-lg bg-slate-800 text-white text-sm font-medium hover:bg-slate-900 touch-manipulation px-4"
+        >
+          <Play className="h-4 w-4" />
+          Factory
+        </Link>
+        <button
+          type="button"
+          onClick={onChooseOther}
+          className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 bg-white text-sm font-medium text-gray-700 hover:bg-slate-50 touch-manipulation"
+        >
+          Other item
+        </button>
+        <button
+          type="button"
+          onClick={onBack}
+          className="min-h-[44px] px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-800 touch-manipulation"
+        >
+          Back
+        </button>
       </div>
     </div>
   )
@@ -513,11 +639,13 @@ function SchedulePicker({
   loading,
   onSelect,
   pendingByScheduleId,
+  inProgressScheduleIds,
 }: {
   items: FactoryScheduleItem[]
   loading: boolean
   onSelect: (scheduleId: string) => void
   pendingByScheduleId: Record<string, number>
+  inProgressScheduleIds: Set<string>
 }) {
   if (loading) {
     return null
@@ -527,102 +655,75 @@ function SchedulePicker({
     return (
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm text-center py-10 px-4">
         <ClipboardList className="h-10 w-10 text-slate-500 mx-auto mb-3" />
-        <p className="text-gray-600 text-sm">
-          No production scheduled for today. Ask admin to set it in Dashboard → Production Schedule.
-        </p>
+        <p className="text-gray-600 text-sm">No schedule</p>
         <Link
           href="/factory"
           className="inline-flex mt-6 min-h-[44px] items-center text-slate-700 hover:text-gray-900 text-sm font-medium"
         >
-          Back to factory
+          Factory
         </Link>
       </div>
     )
   }
 
-  const brandGroups = groupScheduleByBrand(items)
+  const readyItems = items.filter((item) => inProgressScheduleIds.has(item.schedule_id))
+  const lockedItems = items.filter((item) => !inProgressScheduleIds.has(item.schedule_id))
+
+  const renderGroup = (groupItems: FactoryScheduleItem[], sectionTitle: string, locked: boolean) => {
+    if (groupItems.length === 0) return null
+    const brandGroups = groupScheduleByBrand(groupItems)
+    return (
+      <section className="space-y-3">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">{sectionTitle}</h3>
+        <div className="space-y-5">
+          {brandGroups.map(({ brandName, items: brandItems }) => (
+            <div key={brandName} className="space-y-2">
+              <span
+                className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border ${getBrandTagClasses(brandName)}`}
+              >
+                {brandName}
+              </span>
+              <div className="space-y-2">
+                {brandItems.map((item) => {
+                  const complete = isScheduleItemScanComplete(item)
+                  const pendingStickers = pendingByScheduleId[item.schedule_id] ?? 0
+                  return (
+                    <ScheduleItemCard
+                      key={item.schedule_id}
+                      item={item}
+                      complete={complete}
+                      pendingStickers={pendingStickers}
+                      disabled={locked}
+                      onSelect={locked ? undefined : () => onSelect(item.schedule_id)}
+                    />
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    )
+  }
 
   return (
-    <div className="space-y-5">
-      {brandGroups.map(({ brandName, items: groupItems }) => (
-        <section key={brandName} className="space-y-2">
-          <span
-            className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold border ${getBrandTagClasses(brandName)}`}
+    <div className="space-y-6">
+      {readyItems.length === 0 ? (
+        <div className="bg-white rounded-xl border border-amber-200 bg-amber-50/60 text-center py-8 px-4">
+          <Lock className="h-8 w-8 text-amber-700 mx-auto mb-2" />
+          <p className="text-sm text-amber-950 font-medium">No batch running</p>
+          <Link
+            href="/factory"
+            className="inline-flex mt-4 min-h-[44px] items-center gap-2 rounded-lg bg-slate-800 text-white text-sm font-medium px-4 hover:bg-slate-900 touch-manipulation"
           >
-            {brandName}
-          </span>
-          <div className="space-y-2">
-            {groupItems.map((item) => {
-              const complete = isScheduleItemScanComplete(item)
-              const pendingStickers = pendingByScheduleId[item.schedule_id] ?? 0
-              return (
-              <button
-                key={item.schedule_id}
-                type="button"
-                onClick={() => onSelect(item.schedule_id)}
-                className={`w-full text-left rounded-xl border shadow-sm p-4 touch-manipulation transition-colors ${
-                  complete
-                    ? 'border-emerald-200 bg-emerald-50/60 hover:bg-emerald-50 active:bg-emerald-100/80'
-                    : 'border-slate-200 bg-white hover:bg-slate-50 active:bg-slate-100'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-start gap-2 flex-wrap">
-                      <p className="font-semibold text-gray-900 leading-snug">{item.product_name}</p>
-                      {complete ? (
-                        <span className="inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-emerald-100 text-emerald-800 border border-emerald-200">
-                          <CheckCircle2 className="h-3 w-3" aria-hidden />
-                          Complete
-                        </span>
-                      ) : null}
-                      {pendingStickers > 0 ? (
-                        <span className="inline-flex items-center gap-1 shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-800 border border-amber-200 tabular-nums">
-                          <Tag className="h-3 w-3" aria-hidden />
-                          +{pendingStickers} print
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="text-gray-500 text-xs mt-1">
-                      {item.sku ? <span className="font-mono">{item.sku}</span> : null}
-                      {item.sku ? ' · ' : null}
-                      <span className="font-mono">{item.batch_number}</span>
-                    </p>
-                    <dl className="mt-3 grid grid-cols-3 gap-2 text-center">
-                      <div className="rounded-md bg-slate-50 border border-slate-100 py-2 px-1">
-                        <dt className="text-[10px] uppercase tracking-wide text-gray-500">Req</dt>
-                        <dd className="text-sm font-semibold text-gray-900 tabular-nums">
-                          {item.quantity_required}
-                        </dd>
-                      </div>
-                      <div className="rounded-md bg-slate-50 border border-slate-100 py-2 px-1">
-                        <dt className="text-[10px] uppercase tracking-wide text-gray-500">Printed</dt>
-                        <dd className="text-sm font-semibold text-gray-900 tabular-nums">
-                          {item.printed}
-                        </dd>
-                      </div>
-                      <div className="rounded-md bg-slate-50 border border-slate-100 py-2 px-1">
-                        <dt className="text-[10px] uppercase tracking-wide text-gray-500">In prod</dt>
-                        <dd className="text-sm font-semibold text-emerald-700 tabular-nums">
-                          {item.produced}
-                        </dd>
-                      </div>
-                    </dl>
-                  </div>
-                  <ProgressFractionCircle
-                    current={item.produced}
-                    total={item.quantity_required}
-                    size="sm"
-                    strokeClass={complete ? 'text-emerald-600' : 'text-slate-600'}
-                  />
-                </div>
-                <ScheduleNotesBlock notes={item.notes} />
-              </button>
-              )
-            })}
-          </div>
-        </section>
-      ))}
+            <Play className="h-4 w-4" />
+            Factory
+          </Link>
+        </div>
+      ) : (
+        renderGroup(readyItems, 'Ready', false)
+      )}
+      {renderGroup(lockedItems, 'Locked', true)}
     </div>
   )
 }
@@ -635,7 +736,9 @@ export default function FactoryScanPage() {
   const today = getPhilippinesDate()
 
   const [scheduleItems, setScheduleItems] = useState<FactoryScheduleItem[]>([])
-  const [loadingSchedule, setLoadingSchedule] = useState(true)
+  const [inProgressScheduleIds, setInProgressScheduleIds] = useState<Set<string>>(new Set())
+  const [loadingSchedule, setLoadingSchedule] = useState(false)
+  const [hasLoadedSchedule, setHasLoadedSchedule] = useState(false)
   const [scanCode, setScanCode] = useState('')
   const [processing, setProcessing] = useState(false)
   const [feedback, setFeedback] = useState<{
@@ -656,11 +759,18 @@ export default function FactoryScanPage() {
     ? scheduleItems.find((i) => i.schedule_id === scheduleParam)
     : undefined
 
-  const showScanner = Boolean(scheduleParam && activeItem)
+  const batchReady = Boolean(
+    activeItem && inProgressScheduleIds.has(activeItem.schedule_id)
+  )
+  const scheduleReady = hasLoadedSchedule || !loadingSchedule
+  const showScanner = Boolean(scheduleParam && activeItem && batchReady && scheduleReady)
+  const showBatchGate = Boolean(scheduleParam && activeItem && !batchReady && scheduleReady)
 
   const focusInput = useCallback(() => {
     if (!showScanner) return
+    if (isEditableFocusTarget(document.activeElement)) return
     requestAnimationFrame(() => {
+      if (isEditableFocusTarget(document.activeElement)) return
       inputRef.current?.focus()
       inputRef.current?.select()
     })
@@ -676,14 +786,19 @@ export default function FactoryScanPage() {
     }
   }, [today])
 
-  const refreshSchedule = useCallback(async () => {
-    setLoadingSchedule(true)
+  const refreshSchedule = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoadingSchedule(true)
     try {
-      const items = await loadTodayFactorySchedule(today)
+      const [items, inProgress] = await Promise.all([
+        loadTodayFactorySchedule(today),
+        fetchInProgressScheduleIds(today),
+      ])
       setScheduleItems(items)
+      setInProgressScheduleIds(inProgress)
       return items
     } finally {
-      setLoadingSchedule(false)
+      if (!options?.silent) setLoadingSchedule(false)
+      setHasLoadedSchedule(true)
     }
   }, [today])
 
@@ -713,16 +828,17 @@ export default function FactoryScanPage() {
   }, [activeItem, refreshScannedSerials])
 
   useEffect(() => {
-    refreshSchedule()
+    void refreshSchedule({ silent: true })
   }, [refreshSchedule])
 
   const selectSchedule = useCallback(
     (scheduleId: string) => {
+      if (!inProgressScheduleIds.has(scheduleId)) return
       const params = new URLSearchParams()
       params.set('schedule', scheduleId)
       router.push(`/factory/scan?${params.toString()}`)
     },
-    [router]
+    [router, inProgressScheduleIds]
   )
 
   const clearSchedule = useCallback(() => {
@@ -730,9 +846,10 @@ export default function FactoryScanPage() {
   }, [router])
 
   const submitCode = useCallback(
-    async (raw: string) => {
+    async (raw: string, itemOverride?: FactoryScheduleItem) => {
       const code = raw.trim()
-      if (!code || processingRef.current || !activeItem) return
+      const item = itemOverride ?? activeItem
+      if (!code || processingRef.current || !item) return
 
       processingRef.current = true
       setProcessing(true)
@@ -746,24 +863,27 @@ export default function FactoryScanPage() {
         }
 
         const result = await recordProductionScan(stickerId, {
-          expectedProductId: activeItem.product_id,
-          expectedProductName: activeItem.product_name,
+          expectedProductId: item.product_id,
+          expectedProductName: item.product_name,
+          scheduleId: item.schedule_id,
+          workDate: today,
         })
         setFeedback({ type: result.ok ? 'success' : 'error', message: result.message })
         if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current)
         if (result.ok) {
-          await refreshSchedule()
-          await refreshScannedSerials(activeItem)
+          await refreshSchedule({ silent: true })
+          await refreshScannedSerials(item)
           feedbackTimerRef.current = setTimeout(() => setFeedback(null), 2200)
         }
       } finally {
         processingRef.current = false
         setProcessing(false)
         setScanCode('')
+        if (inputRef.current) inputRef.current.value = ''
         focusInput()
       }
     },
-    [activeItem, focusInput, refreshSchedule, refreshScannedSerials]
+    [activeItem, focusInput, refreshSchedule, refreshScannedSerials, today]
   )
 
   useEffect(() => {
@@ -775,7 +895,7 @@ export default function FactoryScanPage() {
   }, [showScanner, focusInput])
 
   useEffect(() => {
-    if (!initialCode || initialProcessed.current || loadingSchedule) return
+    if (!initialCode || initialProcessed.current || !hasLoadedSchedule) return
 
     const run = async () => {
       let targetScheduleId = scheduleParam
@@ -804,6 +924,14 @@ export default function FactoryScanPage() {
           return
         }
 
+        if (!inProgressScheduleIds.has(match.schedule_id)) {
+          initialProcessed.current = true
+          router.replace(`/factory/scan?schedule=${match.schedule_id}`)
+          return
+        }
+
+        initialProcessed.current = true
+        await submitCode(initialCode, match)
         router.replace(`/factory/scan?schedule=${match.schedule_id}`)
         return
       }
@@ -811,13 +939,27 @@ export default function FactoryScanPage() {
       const item = scheduleItems.find((i) => i.schedule_id === targetScheduleId)
       if (!item) return
 
+      if (!inProgressScheduleIds.has(item.schedule_id)) {
+        initialProcessed.current = true
+        router.replace(`/factory/scan?schedule=${item.schedule_id}`)
+        return
+      }
+
       initialProcessed.current = true
-      await submitCode(initialCode)
+      await submitCode(initialCode, item)
       router.replace(`/factory/scan?schedule=${item.schedule_id}`)
     }
 
     void run()
-  }, [initialCode, loadingSchedule, scheduleParam, scheduleItems, router, submitCode])
+  }, [
+    initialCode,
+    hasLoadedSchedule,
+    scheduleParam,
+    scheduleItems,
+    inProgressScheduleIds,
+    router,
+    submitCode,
+  ])
 
   return (
     <div className="min-h-[100dvh] min-h-screen bg-slate-100 flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))]">
@@ -831,39 +973,33 @@ export default function FactoryScanPage() {
             Factory
           </Link>
           <div className="text-right min-w-0">
-            <h1 className="text-lg font-bold leading-tight">Record production</h1>
+            <h1 className="text-lg font-bold leading-tight">Scan</h1>
             <p className="text-slate-300 text-xs tabular-nums">{today}</p>
           </div>
         </div>
       </header>
 
+      <FactoryNav />
+
       <main className="flex-1 flex flex-col max-w-lg mx-auto w-full px-3 sm:px-4 py-4 sm:py-6">
-        {scheduleParam && !loadingSchedule && scheduleItems.length > 0 && !activeItem ? (
+        {scheduleParam && hasLoadedSchedule && scheduleItems.length > 0 && !activeItem ? (
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm text-center py-10 px-4">
-            <p className="text-gray-600 text-sm mb-4">That schedule item is no longer on today&apos;s list.</p>
+            <p className="text-gray-600 text-sm mb-4">Schedule item not found.</p>
             <button
               type="button"
               onClick={clearSchedule}
               className="min-h-[44px] px-4 py-2 rounded-lg bg-slate-700 text-white text-sm hover:bg-slate-800"
             >
-              Choose another item
+              Other item
             </button>
           </div>
-        ) : !showScanner ? (
-          <div className="space-y-4 sm:space-y-5">
-            <SelectionIntro loading={loadingSchedule} itemCount={scheduleItems.length} />
-            {loadingSchedule ? (
-              <p className="text-gray-500 text-center py-8 text-sm">Loading today&apos;s schedule…</p>
-            ) : (
-              <SchedulePicker
-                items={scheduleItems}
-                loading={loadingSchedule}
-                onSelect={selectSchedule}
-                pendingByScheduleId={pendingStickerQtyByScheduleId}
-              />
-            )}
-          </div>
-        ) : (
+        ) : showBatchGate && activeItem ? (
+          <BatchNotStartedGate
+            item={activeItem}
+            onBack={clearSchedule}
+            onChooseOther={clearSchedule}
+          />
+        ) : showScanner ? (
           <ScannerView
             item={activeItem!}
             processing={processing}
@@ -873,11 +1009,19 @@ export default function FactoryScanPage() {
             loadingScanned={loadingScanned}
             inputRef={inputRef}
             onScanCodeChange={setScanCode}
-            onSubmit={() => submitCode(scanCode)}
+            onSubmit={(code) => submitCode(code ?? scanCode)}
             onFocusInput={focusInput}
             onChangeItem={clearSchedule}
             pendingStickerQty={pendingStickerQtyByScheduleId[activeItem!.schedule_id] ?? 0}
             onStickerRequestRefresh={refreshStickerRequests}
+          />
+        ) : scheduleParam && !hasLoadedSchedule ? null : (
+          <SchedulePicker
+            items={scheduleItems}
+            loading={!hasLoadedSchedule}
+            onSelect={selectSchedule}
+            pendingByScheduleId={pendingStickerQtyByScheduleId}
+            inProgressScheduleIds={inProgressScheduleIds}
           />
         )}
       </main>
