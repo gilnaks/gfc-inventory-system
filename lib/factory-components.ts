@@ -27,6 +27,8 @@ export async function ensureFactoryComponentCategory(brandId: string): Promise<s
       sort_index: BOM_COMPONENT_CATEGORY_SORT_INDEX,
       show_on_order_portal: false,
       remote_store: false,
+      available_to_company_owned: true,
+      available_to_franchise: true,
       yield_per_batch: 1,
       updated_at: new Date().toISOString(),
     },

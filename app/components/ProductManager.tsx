@@ -461,7 +461,9 @@ export function ProductManager({
     initial_stock: 0,
     production: 0,
     released: 0,
-    reserved: 0
+    reserved: 0,
+    available_to_company_owned: true,
+    available_to_franchise: true,
   })
   const [categories, setCategories] = useState<string[]>([])
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false)
@@ -490,6 +492,8 @@ export function ProductManager({
   >({})
   const [editingCategoryShowOnOrder, setEditingCategoryShowOnOrder] = useState(true)
   const [editingCategoryRemoteStore, setEditingCategoryRemoteStore] = useState(false)
+  const [editingCategoryCompanyOwnedOnly, setEditingCategoryCompanyOwnedOnly] = useState(false)
+  const [editingCategoryFranchiseOnly, setEditingCategoryFranchiseOnly] = useState(false)
   const [categoryMinStockEdits, setCategoryMinStockEdits] = useState<Record<string, number>>({})
   const [savingCategory, setSavingCategory] = useState(false)
   const [exportComponentProduct, setExportComponentProduct] = useState<Product | null>(null)
@@ -512,6 +516,8 @@ export function ProductManager({
   const [newCategorySortIndex, setNewCategorySortIndex] = useState('')
   const [newCategoryShowOnOrder, setNewCategoryShowOnOrder] = useState(true)
   const [newCategoryRemoteStore, setNewCategoryRemoteStore] = useState(false)
+  const [newCategoryCompanyOwnedOnly, setNewCategoryCompanyOwnedOnly] = useState(false)
+  const [newCategoryFranchiseOnly, setNewCategoryFranchiseOnly] = useState(false)
   const [addProductPrice, setAddProductPrice] = useState('')
   const [addProductInitialStock, setAddProductInitialStock] = useState('')
   const isGfcInventory = isFactoryBrand(selectedBrand)
@@ -527,12 +533,16 @@ export function ProductManager({
       production: 0,
       released: 0,
       reserved: 0,
+      available_to_company_owned: true,
+      available_to_franchise: true,
     })
     setAddProductPrice('')
     setAddProductInitialStock('')
     setNewCategorySortIndex('')
     setNewCategoryShowOnOrder(true)
     setNewCategoryRemoteStore(false)
+    setNewCategoryCompanyOwnedOnly(false)
+    setNewCategoryFranchiseOnly(false)
     setShowCategoryDropdown(false)
   }, [])
 
@@ -553,6 +563,8 @@ export function ProductManager({
       setCategoryMinStockEdits({})
       setEditingCategoryShowOnOrder(true)
       setEditingCategoryRemoteStore(false)
+      setEditingCategoryCompanyOwnedOnly(false)
+      setEditingCategoryFranchiseOnly(false)
     }
   }, [guestMode])
 
@@ -664,7 +676,7 @@ export function ProductManager({
     try {
       const { data, error } = await supabase
         .from('product_category_sort')
-        .select('category_name, sort_index, show_on_order_portal, remote_store, yield_per_batch')
+        .select('category_name, sort_index, show_on_order_portal, remote_store, available_to_company_owned, available_to_franchise, yield_per_batch')
         .eq('brand_id', brandId)
 
       if (error) {
@@ -704,6 +716,12 @@ export function ProductManager({
     const portal = categoryPortalSettings[category] ?? DEFAULT_CATEGORY_PORTAL_SETTINGS
     setEditingCategoryShowOnOrder(portal.show_on_order_portal)
     setEditingCategoryRemoteStore(portal.remote_store)
+    setEditingCategoryCompanyOwnedOnly(
+      portal.available_to_company_owned && !portal.available_to_franchise
+    )
+    setEditingCategoryFranchiseOnly(
+      portal.available_to_franchise && !portal.available_to_company_owned
+    )
   }
 
   const cancelEditingCategory = () => {
@@ -713,6 +731,8 @@ export function ProductManager({
     setCategoryMinStockEdits({})
     setEditingCategoryShowOnOrder(true)
     setEditingCategoryRemoteStore(false)
+    setEditingCategoryCompanyOwnedOnly(false)
+    setEditingCategoryFranchiseOnly(false)
   }
 
   const handleSaveCategory = async (
@@ -749,9 +769,16 @@ export function ProductManager({
     const storedPortal =
       categoryPortalSettings[oldCategory] ?? DEFAULT_CATEGORY_PORTAL_SETTINGS
 
+    const editingAvailableToCompany =
+      !editingCategoryFranchiseOnly
+    const editingAvailableToFranchise =
+      !editingCategoryCompanyOwnedOnly
+
     const portalChanged =
       editingCategoryShowOnOrder !== storedPortal.show_on_order_portal ||
-      editingCategoryRemoteStore !== storedPortal.remote_store
+      editingCategoryRemoteStore !== storedPortal.remote_store ||
+      editingAvailableToCompany !== storedPortal.available_to_company_owned ||
+      editingAvailableToFranchise !== storedPortal.available_to_franchise
 
     if (!nameChanged && !indexChanged && !minStockChanged && !portalChanged) {
       cancelEditingCategory()
@@ -806,6 +833,8 @@ export function ProductManager({
               sort_index: sortIndexToSave,
               show_on_order_portal: editingCategoryShowOnOrder,
               remote_store: editingCategoryRemoteStore,
+              available_to_company_owned: editingAvailableToCompany,
+              available_to_franchise: editingAvailableToFranchise,
               yield_per_batch: storedPortal.yield_per_batch,
               updated_at: new Date().toISOString(),
             },
@@ -844,6 +873,8 @@ export function ProductManager({
           next[newDisplay] = {
             show_on_order_portal: editingCategoryShowOnOrder,
             remote_store: editingCategoryRemoteStore,
+            available_to_company_owned: editingAvailableToCompany,
+            available_to_franchise: editingAvailableToFranchise,
             yield_per_batch: storedPortal.yield_per_batch,
           }
         }
@@ -982,6 +1013,8 @@ export function ProductManager({
           reserved,
           linked_material_id,
           material_inventory_uom,
+          available_to_company_owned,
+          available_to_franchise,
           created_at,
           updated_at
         `)
@@ -1146,7 +1179,9 @@ export function ProductManager({
             initial_stock: initialStock,
             production: newProduct.production,
             released: newProduct.released,
-            reserved: newProduct.reserved
+            reserved: newProduct.reserved,
+            available_to_company_owned: newProduct.available_to_company_owned,
+            available_to_franchise: newProduct.available_to_franchise,
           }
         ])
         .select()
@@ -1187,6 +1222,8 @@ export function ProductManager({
               sort_index: newCategorySortIndexValue,
               show_on_order_portal: newCategoryShowOnOrder,
               remote_store: newCategoryRemoteStore,
+              available_to_company_owned: !newCategoryFranchiseOnly,
+              available_to_franchise: !newCategoryCompanyOwnedOnly,
               yield_per_batch: DEFAULT_CATEGORY_PORTAL_SETTINGS.yield_per_batch,
               updated_at: new Date().toISOString(),
             },
@@ -1207,6 +1244,8 @@ export function ProductManager({
               [newCategoryDisplay]: {
                 show_on_order_portal: newCategoryShowOnOrder,
                 remote_store: newCategoryRemoteStore,
+                available_to_company_owned: !newCategoryFranchiseOnly,
+                available_to_franchise: !newCategoryCompanyOwnedOnly,
                 yield_per_batch: DEFAULT_CATEGORY_PORTAL_SETTINGS.yield_per_batch,
               },
             }))
@@ -1301,10 +1340,14 @@ export function ProductManager({
               production: product.production,
               released: product.released,
               reserved: product.reserved,
+              available_to_company_owned: product.available_to_company_owned ?? true,
+              available_to_franchise: product.available_to_franchise ?? true,
             }
           : {
               name: product.name,
               price: product.price,
+              available_to_company_owned: product.available_to_company_owned ?? true,
+              available_to_franchise: product.available_to_franchise ?? true,
             }
 
         const { data, error } = await supabase
@@ -1325,9 +1368,21 @@ export function ProductManager({
             p.id === product.id 
               ? {
                   ...p,
-                  ...(fullProductEdit ? product : { name: product.name, price: product.price }),
+                  ...(fullProductEdit
+                    ? product
+                    : {
+                        name: product.name,
+                        price: product.price,
+                        available_to_company_owned: product.available_to_company_owned ?? true,
+                        available_to_franchise: product.available_to_franchise ?? true,
+                      }),
                   ...(!fullProductEdit && saved
-                    ? { name: saved.name, price: saved.price }
+                    ? {
+                        name: saved.name,
+                        price: saved.price,
+                        available_to_company_owned: saved.available_to_company_owned ?? true,
+                        available_to_franchise: saved.available_to_franchise ?? true,
+                      }
                     : {}),
                   product_name: fullProductEdit ? product.name : (saved?.name ?? product.name),
                   final_stock: fullProductEdit
@@ -1949,6 +2004,30 @@ export function ProductManager({
                         />
                         <span>Remote store only</span>
                       </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={newCategoryCompanyOwnedOnly}
+                          onChange={(e) => {
+                            setNewCategoryCompanyOwnedOnly(e.target.checked)
+                            if (e.target.checked) setNewCategoryFranchiseOnly(false)
+                          }}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Company owned only</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={newCategoryFranchiseOnly}
+                          onChange={(e) => {
+                            setNewCategoryFranchiseOnly(e.target.checked)
+                            if (e.target.checked) setNewCategoryCompanyOwnedOnly(false)
+                          }}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Franchise only</span>
+                      </label>
                     </div>
                   </div>
                 )}
@@ -2002,6 +2081,65 @@ export function ProductManager({
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
                       placeholder=""
                     />
+                  </div>
+                </div>
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+                  <p className="text-xs text-gray-600">
+                    Order portal visibility by branch ownership. Leave both unchecked to show for all branches.
+                  </p>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-x-5">
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={
+                          newProduct.available_to_company_owned &&
+                          !newProduct.available_to_franchise
+                        }
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setNewProduct({
+                              ...newProduct,
+                              available_to_company_owned: true,
+                              available_to_franchise: false,
+                            })
+                          } else {
+                            setNewProduct({
+                              ...newProduct,
+                              available_to_company_owned: true,
+                              available_to_franchise: true,
+                            })
+                          }
+                        }}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span>Company owned only</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={
+                          newProduct.available_to_franchise &&
+                          !newProduct.available_to_company_owned
+                        }
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setNewProduct({
+                              ...newProduct,
+                              available_to_company_owned: false,
+                              available_to_franchise: true,
+                            })
+                          } else {
+                            setNewProduct({
+                              ...newProduct,
+                              available_to_company_owned: true,
+                              available_to_franchise: true,
+                            })
+                          }
+                        }}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span>Franchise only</span>
+                    </label>
                   </div>
                 </div>
               </div>
@@ -2189,6 +2327,32 @@ export function ProductManager({
                         />
                         <span>Remote store only</span>
                       </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={editingCategoryCompanyOwnedOnly}
+                          onChange={(e) => {
+                            setEditingCategoryCompanyOwnedOnly(e.target.checked)
+                            if (e.target.checked) setEditingCategoryFranchiseOnly(false)
+                          }}
+                          disabled={savingCategory}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Company owned only</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={editingCategoryFranchiseOnly}
+                          onChange={(e) => {
+                            setEditingCategoryFranchiseOnly(e.target.checked)
+                            if (e.target.checked) setEditingCategoryCompanyOwnedOnly(false)
+                          }}
+                          disabled={savingCategory}
+                          className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                        <span>Franchise only</span>
+                      </label>
                     </div>
                   </div>
                 ) : (
@@ -2198,7 +2362,11 @@ export function ProductManager({
                         {category} ({categoryProducts.length} {categoryProducts.length === 1 ? 'product' : 'products'})
                       </span>
                       {(categoryPortalSettings[category]?.show_on_order_portal === false ||
-                        categoryPortalSettings[category]?.remote_store) && (
+                        categoryPortalSettings[category]?.remote_store ||
+                        (categoryPortalSettings[category]?.available_to_company_owned &&
+                          !categoryPortalSettings[category]?.available_to_franchise) ||
+                        (categoryPortalSettings[category]?.available_to_franchise &&
+                          !categoryPortalSettings[category]?.available_to_company_owned)) && (
                         <span className="flex flex-wrap gap-1.5">
                           {categoryPortalSettings[category]?.show_on_order_portal === false ? (
                             <span
@@ -2211,6 +2379,18 @@ export function ProductManager({
                           {categoryPortalSettings[category]?.remote_store ? (
                             <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-purple-100 text-purple-800">
                               Remote store only
+                            </span>
+                          ) : null}
+                          {categoryPortalSettings[category]?.available_to_company_owned &&
+                          !categoryPortalSettings[category]?.available_to_franchise ? (
+                            <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">
+                              Company owned only
+                            </span>
+                          ) : null}
+                          {categoryPortalSettings[category]?.available_to_franchise &&
+                          !categoryPortalSettings[category]?.available_to_company_owned ? (
+                            <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                              Franchise only
                             </span>
                           ) : null}
                         </span>
@@ -2336,12 +2516,68 @@ export function ProductManager({
                   <tr key={productKey} className="hover:bg-blue-100">
                     <td className="px-6 py-2 h-10 whitespace-nowrap text-sm font-medium text-gray-900">
                       {editingProduct?.id === (product.product_id || product.id) ? (
-                        <input
-                          type="text"
-                          value={editingProduct.name}
-                          onChange={(e) => setEditingProduct({...editingProduct, name: e.target.value})}
-                          className="w-full max-w-44 px-2 h-6 border border-gray-300 rounded text-sm"
-                        />
+                        <div className="space-y-1.5 min-w-[12rem]">
+                          <input
+                            type="text"
+                            value={editingProduct.name}
+                            onChange={(e) => setEditingProduct({...editingProduct, name: e.target.value})}
+                            className="w-full max-w-44 px-2 h-6 border border-gray-300 rounded text-sm"
+                          />
+                          <div className="flex flex-col gap-1">
+                            <label className="flex items-center gap-1.5 text-[11px] font-normal text-gray-600 whitespace-normal">
+                              <input
+                                type="checkbox"
+                                checked={
+                                  (editingProduct.available_to_company_owned ?? true) &&
+                                  !(editingProduct.available_to_franchise ?? true)
+                                }
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setEditingProduct({
+                                      ...editingProduct,
+                                      available_to_company_owned: true,
+                                      available_to_franchise: false,
+                                    })
+                                  } else {
+                                    setEditingProduct({
+                                      ...editingProduct,
+                                      available_to_company_owned: true,
+                                      available_to_franchise: true,
+                                    })
+                                  }
+                                }}
+                                className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              Company owned only
+                            </label>
+                            <label className="flex items-center gap-1.5 text-[11px] font-normal text-gray-600 whitespace-normal">
+                              <input
+                                type="checkbox"
+                                checked={
+                                  (editingProduct.available_to_franchise ?? true) &&
+                                  !(editingProduct.available_to_company_owned ?? true)
+                                }
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setEditingProduct({
+                                      ...editingProduct,
+                                      available_to_company_owned: false,
+                                      available_to_franchise: true,
+                                    })
+                                  } else {
+                                    setEditingProduct({
+                                      ...editingProduct,
+                                      available_to_company_owned: true,
+                                      available_to_franchise: true,
+                                    })
+                                  }
+                                }}
+                                className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              Franchise only
+                            </label>
+                          </div>
+                        </div>
                       ) : (
                         <button
                           type="button"
@@ -2361,6 +2597,18 @@ export function ProductManager({
                           {isConsumable && product.linked_material_id ? (
                             <span className="ml-1 text-[10px] font-medium text-emerald-700">
                               linked
+                            </span>
+                          ) : null}
+                          {(product.available_to_company_owned ?? true) &&
+                          !(product.available_to_franchise ?? true) ? (
+                            <span className="ml-1 inline-flex items-center rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800">
+                              Company owned only
+                            </span>
+                          ) : null}
+                          {(product.available_to_franchise ?? true) &&
+                          !(product.available_to_company_owned ?? true) ? (
+                            <span className="ml-1 inline-flex items-center rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                              Franchise only
                             </span>
                           ) : null}
                         </button>
@@ -2601,7 +2849,7 @@ export function ProductManager({
                                 theme === 'yellow' ? 'text-yellow-600 hover:text-yellow-900 hover:bg-yellow-100' :
                                 'text-blue-600 hover:text-blue-900 hover:bg-blue-100'
                               }`}
-                              title={fullProductEdit ? 'Edit all fields' : 'Edit name & price'}
+                              title={fullProductEdit ? 'Edit all fields' : 'Edit name, price & portal visibility'}
                             >
                               <Edit className="h-4 w-4" />
                             </button>

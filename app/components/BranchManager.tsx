@@ -557,19 +557,12 @@ export function BranchManager({ selectedBrand, theme = 'blue', guestMode = false
       { showPrices: true }
     )
 
-    const nonIndexZeroItems = sortedDetails
-      .filter((_, index) => index !== 0)
-      .map((detail) => ({
+    const dsirPayloadText = buildTransferSheetDsirPayload(
+      sortedDetails.map((detail) => ({
         name: detail.product.name,
         quantity: detail.quantity,
       }))
-    const fallbackAllItems = sortedDetails.map((detail) => ({
-      name: detail.product.name,
-      quantity: detail.quantity,
-    }))
-    const dsirPayloadText =
-      buildTransferSheetDsirPayload(nonIndexZeroItems) ||
-      buildTransferSheetDsirPayload(fallbackAllItems)
+    )
     let dsirQrDataUrl = ''
     if (dsirPayloadText) {
       const QRCode = (await import('qrcode')).default

@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, Fragment } from 'react'
 import {
   getBalancesAsOfReportDate,
   getBalancesForLocation,
@@ -8,13 +8,14 @@ import {
   listMovementsForReportDay,
   ensureDsirPullOutsFromReport,
   applyCycleCount,
+  seedStoreInventoryFromDsirBegArrival,
   normalizeDsirFlavor,
   type DsirStoreBalance,
   type DsirStoreMovement,
 } from '../../lib/dsir-store-inventory'
 import { supabase } from '../../lib/supabase'
 import { Modal } from './Modal'
-import { ClipboardList, Package, RefreshCw, X } from 'lucide-react'
+import { ClipboardList, Package, RefreshCw, Sprout, X } from 'lucide-react'
 
 type LocationOption = {
   id: string
@@ -40,7 +41,11 @@ type Props = {
    * Guests should pass false.
    */
   allowCycleCount?: boolean
-  /** Shown on cycle-count movements (e.g. dashboard role label) */
+  /**
+   * Dashboard admin only (DSIR report inventory modal): seed on-hand from beg+arrival.
+   */
+  allowSeedFromDsir?: boolean
+  /** Shown on cycle-count / seed movements (e.g. dashboard role label) */
   adjustedByName?: string | null
 }
 
@@ -73,9 +78,18 @@ function normalizeCategoryKey(category: string | null | undefined): string {
   return (category || '').trim().toLowerCase().replace(/[\s_-]+/g, '')
 }
 
+type FlavorCategoryMeta = {
+  flavor: string
+  category: string
+  sortIndex: number
+}
+
 /** Same source as DSIR Section B ice cream rows (active inventory products for the brand). */
-async function loadDsirActiveIceCreamFlavors(brandId: string): Promise<string[]> {
-  if (!brandId) return []
+async function loadDsirIceCreamFlavorMeta(brandId: string): Promise<{
+  flavors: string[]
+  byFlavor: Map<string, FlavorCategoryMeta>
+}> {
+  if (!brandId) return { flavors: [], byFlavor: new Map() }
 
   const [{ data: inventoryProducts, error: inventoryError }, { data: categorySortRows, error: categorySortError }] =
     await Promise.all([
@@ -94,18 +108,30 @@ async function loadDsirActiveIceCreamFlavors(brandId: string): Promise<string[]>
     categorySortMap.set(normalizeCategoryKey(row.category_name), Number(row.sort_index) || 0)
   }
 
-  const groupedUnique = new Map<string, string>()
+  const byFlavor = new Map<string, FlavorCategoryMeta>()
   for (const product of inventoryProducts || []) {
-    const key = normalizeCategoryKey(product.category as string)
+    const categoryRaw = String(product.category || '').trim()
+    const key = normalizeCategoryKey(categoryRaw)
     const categoryIndex = key ? categorySortMap.get(key) : undefined
     // Match DSIRViewer: exclude categories with sort_index 0
     if (categoryIndex === 0) continue
     const name = normalizeDsirFlavor(String(product.name || ''))
     if (!name) continue
-    if (!groupedUnique.has(name)) groupedUnique.set(name, name)
+    if (byFlavor.has(name)) continue
+    byFlavor.set(name, {
+      flavor: name,
+      category: categoryRaw ? categoryRaw.toUpperCase() : 'UNCATEGORIZED',
+      sortIndex: categoryIndex ?? 999,
+    })
   }
 
-  return Array.from(groupedUnique.keys()).sort((a, b) => a.localeCompare(b))
+  const flavors = Array.from(byFlavor.keys()).sort((a, b) => a.localeCompare(b))
+  return { flavors, byFlavor }
+}
+
+async function loadDsirActiveIceCreamFlavors(brandId: string): Promise<string[]> {
+  const { flavors } = await loadDsirIceCreamFlavorMeta(brandId)
+  return flavors
 }
 
 export function DSIRStoreInventoryPanel({
@@ -119,15 +145,21 @@ export function DSIRStoreInventoryPanel({
   reportStatus,
   embedded = false,
   allowCycleCount = false,
+  allowSeedFromDsir = false,
   adjustedByName = null,
 }: Props) {
   const [balances, setBalances] = useState<Array<{ flavor: string; quantity: number; id?: string }>>([])
   const [movements, setMovements] = useState<DsirStoreMovement[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [flavorMetaByName, setFlavorMetaByName] = useState<Map<string, FlavorCategoryMeta>>(
+    () => new Map()
+  )
   const dateScoped = Boolean(reportDate)
 
   const canCycleCount = mode === 'admin' && allowCycleCount && !dateScoped
+  const canSeedFromDsir =
+    mode === 'admin' && allowSeedFromDsir && Boolean(dsirReportId)
 
   const [showCycleCount, setShowCycleCount] = useState(false)
   const [cycleRows, setCycleRows] = useState<CycleCountRow[]>([])
@@ -136,41 +168,64 @@ export function DSIRStoreInventoryPanel({
   const [cycleError, setCycleError] = useState<string | null>(null)
   const [newFlavor, setNewFlavor] = useState('')
   const [dsirActiveFlavors, setDsirActiveFlavors] = useState<string[]>([])
+  const [seedSaving, setSeedSaving] = useState(false)
 
   const refresh = useCallback(async () => {
     if (!locationId) return
     setLoading(true)
     setError(null)
     try {
+      const { data: loc } = await supabase
+        .from('locations')
+        .select('brand_id')
+        .eq('id', locationId)
+        .maybeSingle()
+      const brandId = (loc?.brand_id as string) || ''
+
       // Backfill pull-outs for submitted reports that posted receive but missed ledger outs
       if (
         dsirReportId &&
-        (reportStatus === 'submitted' || reportStatus === 'reviewed')
+        (reportStatus === 'submitted' || reportStatus === 'reviewed') &&
+        brandId
       ) {
-        const { data: loc } = await supabase
-          .from('locations')
-          .select('brand_id')
-          .eq('id', locationId)
-          .maybeSingle()
-        if (loc?.brand_id) {
-          try {
-            await ensureDsirPullOutsFromReport({
-              locationId,
-              brandId: loc.brand_id as string,
-              dsirReportId,
-            })
-          } catch (backfillErr) {
-            console.warn('DSIR pull-out backfill skipped:', backfillErr)
-          }
+        try {
+          await ensureDsirPullOutsFromReport({
+            locationId,
+            brandId,
+            dsirReportId,
+          })
+        } catch (backfillErr) {
+          console.warn('DSIR pull-out backfill skipped:', backfillErr)
         }
       }
 
-      if (reportDate) {
+      if (brandId) {
+        try {
+          const { byFlavor } = await loadDsirIceCreamFlavorMeta(brandId)
+          setFlavorMetaByName(byFlavor)
+        } catch (metaErr) {
+          console.warn('Flavor category meta skipped:', metaErr)
+          setFlavorMetaByName(new Map())
+        }
+      } else {
+        setFlavorMetaByName(new Map())
+      }
+
+      if (reportDate && !allowSeedFromDsir) {
         const [asOf, dayMoves] = await Promise.all([
           getBalancesAsOfReportDate(locationId, reportDate),
           listMovementsForReportDay(locationId, reportDate, dsirReportId),
         ])
         setBalances(asOf)
+        setMovements(dayMoves)
+      } else if (reportDate && allowSeedFromDsir) {
+        // Report inventory modal with Seed: show live on-hand so seed results are visible,
+        // while still listing that day's movements.
+        const [bal, dayMoves] = await Promise.all([
+          getBalancesForLocation(locationId),
+          listMovementsForReportDay(locationId, reportDate, dsirReportId),
+        ])
+        setBalances(bal as DsirStoreBalance[])
         setMovements(dayMoves)
       } else {
         const bal = await getBalancesForLocation(locationId)
@@ -187,11 +242,52 @@ export function DSIRStoreInventoryPanel({
     } finally {
       setLoading(false)
     }
-  }, [locationId, mode, reportDate, dsirReportId, reportStatus])
+  }, [locationId, mode, reportDate, dsirReportId, reportStatus, allowSeedFromDsir])
 
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  const balancesGroupedByType = useMemo(() => {
+    type Group = {
+      category: string
+      sortIndex: number
+      rows: Array<{ flavor: string; quantity: number; id?: string }>
+      total: number
+    }
+    const groups = new Map<string, Group>()
+
+    for (const row of balances) {
+      const flavor = normalizeDsirFlavor(row.flavor)
+      const meta = flavorMetaByName.get(flavor)
+      const category = meta?.category || 'OTHER'
+      const sortIndex = meta?.sortIndex ?? 9999
+      const existing = groups.get(category)
+      if (existing) {
+        existing.rows.push(row)
+        existing.total += Number(row.quantity) || 0
+      } else {
+        groups.set(category, {
+          category,
+          sortIndex,
+          rows: [row],
+          total: Number(row.quantity) || 0,
+        })
+      }
+    }
+
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        rows: [...group.rows].sort((a, b) =>
+          normalizeDsirFlavor(a.flavor).localeCompare(normalizeDsirFlavor(b.flavor))
+        ),
+      }))
+      .sort((a, b) => {
+        if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex
+        return a.category.localeCompare(b.category)
+      })
+  }, [balances, flavorMetaByName])
 
   const openCycleCount = useCallback(async () => {
     if (!canCycleCount || !locationId) return
@@ -321,6 +417,51 @@ export function DSIRStoreInventoryPanel({
     }
   }
 
+  const handleSeedFromDsir = async () => {
+    if (!canSeedFromDsir || !locationId || !dsirReportId) return
+    const confirmed = window.confirm(
+      'Seed store on-hand from this DSIR?\n\nEach flavor will be set to beginning + arrival from the report. This posts cycle-count adjustments for any differences.'
+    )
+    if (!confirmed) return
+
+    setSeedSaving(true)
+    setError(null)
+    try {
+      const { data: loc, error: locErr } = await supabase
+        .from('locations')
+        .select('brand_id')
+        .eq('id', locationId)
+        .maybeSingle()
+      if (locErr) throw locErr
+      const brandId = (loc?.brand_id as string) || ''
+      if (!brandId) throw new Error('Store brand is missing for this location.')
+
+      const result = await seedStoreInventoryFromDsirBegArrival({
+        locationId,
+        brandId,
+        dsirReportId,
+        adjustedByName: adjustedByName || 'Dashboard admin',
+      })
+
+      await refresh()
+
+      if (result.status === 'empty') {
+        alert('No ice cream rows on this DSIR to seed from, or on-hand already matches beginning + arrival.')
+        return
+      }
+      if (result.status === 'applied') {
+        alert(
+          `Seeded ${result.flavors} flavor(s) to beginning + arrival (total adjustment ${result.totalAbsDelta} pan(s)).`
+        )
+      }
+    } catch (e) {
+      console.error(e)
+      setError(e instanceof Error ? e.message : 'Failed to seed store inventory')
+    } finally {
+      setSeedSaving(false)
+    }
+  }
+
   const addFlavorRow = () => {
     const flavor = normalizeDsirFlavor(newFlavor)
     if (!flavor) return
@@ -418,7 +559,19 @@ export function DSIRStoreInventoryPanel({
           </div>
         </div>
       ) : (
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {canSeedFromDsir ? (
+            <button
+              type="button"
+              onClick={() => void handleSeedFromDsir()}
+              disabled={seedSaving || loading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm border border-emerald-300 text-emerald-800 rounded-md hover:bg-emerald-50 bg-white disabled:opacity-50"
+              title="Set store on-hand to beginning + arrival from this DSIR"
+            >
+              <Sprout className="h-4 w-4" />
+              {seedSaving ? 'Seeding…' : 'Seed'}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => void refresh()}
@@ -438,7 +591,8 @@ export function DSIRStoreInventoryPanel({
 
       <div className="flex flex-wrap gap-3 text-sm">
         <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 font-medium text-gray-800">
-          {dateScoped ? 'On hand (end of day)' : 'On hand'}: {totalOnHand.toLocaleString()} pans
+          {dateScoped && !allowSeedFromDsir ? 'On hand (end of day)' : 'On hand'}:{' '}
+          {totalOnHand.toLocaleString()} pans
         </span>
         {(mode === 'staff' || dateScoped || mode === 'admin') && (
           <>
@@ -479,18 +633,30 @@ export function DSIRStoreInventoryPanel({
               <tr>
                 <th className="text-left px-4 py-2.5 font-medium">Flavor</th>
                 <th className="text-right px-4 py-2.5 font-medium">
-                  {dateScoped ? 'On hand (EOD)' : 'On hand'}
+                  {dateScoped && !allowSeedFromDsir ? 'On hand (EOD)' : 'On hand'}
                 </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {balances.map((row) => (
-                <tr key={row.id || row.flavor} className="hover:bg-gray-50/80">
-                  <td className="px-4 py-2.5 font-medium text-gray-900">{row.flavor}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums text-gray-800">
-                    {Number(row.quantity).toLocaleString()}
-                  </td>
-                </tr>
+              {balancesGroupedByType.map((group) => (
+                <Fragment key={group.category}>
+                  <tr className="bg-gray-100">
+                    <td className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-700">
+                      {group.category}
+                    </td>
+                    <td className="px-4 py-2 text-right text-xs font-semibold tabular-nums text-gray-700">
+                      {group.total.toLocaleString()}
+                    </td>
+                  </tr>
+                  {group.rows.map((row) => (
+                    <tr key={row.id || row.flavor} className="hover:bg-gray-50/80">
+                      <td className="px-4 py-2.5 font-medium text-gray-900 pl-6">{row.flavor}</td>
+                      <td className="px-4 py-2.5 text-right tabular-nums text-gray-800">
+                        {Number(row.quantity).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </Fragment>
               ))}
             </tbody>
           </table>

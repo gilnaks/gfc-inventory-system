@@ -393,6 +393,7 @@ export async function applyCycleCount(params: {
   counts: CycleCountLine[]
   notes: string
   adjustedByName?: string | null
+  dsirReportId?: string | null
 }): Promise<ApplyCycleCountResult> {
   const notes = String(params.notes || '').trim()
   if (!notes) return { status: 'invalid_notes' }
@@ -431,7 +432,7 @@ export async function applyCycleCount(params: {
       movement_type: 'cycle_count',
       staff_registration_id: null,
       staff_name: params.adjustedByName || 'Dashboard admin',
-      dsir_report_id: null,
+      dsir_report_id: params.dsirReportId || null,
       source_key: `cycle:${params.locationId}:${batchId}:${flavor}`,
       notes,
     })
@@ -449,6 +450,46 @@ export async function applyCycleCount(params: {
 
   if (flavors === 0) return { status: 'empty' }
   return { status: 'applied', flavors, totalAbsDelta }
+}
+
+/**
+ * Seed store on-hand from a DSIR report's ice cream rows:
+ * on_hand = beginning + arrival for each flavor on the report.
+ */
+export async function seedStoreInventoryFromDsirBegArrival(params: {
+  locationId: string
+  brandId: string
+  dsirReportId: string
+  adjustedByName?: string | null
+}): Promise<ApplyCycleCountResult> {
+  const { data: iceRows, error } = await supabase
+    .from('dsir_ice_cream_inventory')
+    .select('flavor, beginning, arrival')
+    .eq('dsir_report_id', params.dsirReportId)
+  if (error) throw error
+
+  const counts: CycleCountLine[] = (iceRows || [])
+    .map((row) => {
+      const flavor = String(row.flavor || '')
+      const beginning = Math.max(0, Math.floor(Number(row.beginning) || 0))
+      const arrival = Math.max(0, Math.floor(Number(row.arrival) || 0))
+      return {
+        flavor,
+        countedQty: beginning + arrival,
+      }
+    })
+    .filter((row) => row.flavor)
+
+  if (counts.length === 0) return { status: 'empty' }
+
+  return applyCycleCount({
+    locationId: params.locationId,
+    brandId: params.brandId,
+    counts,
+    notes: 'Seed from DSIR beginning + arrival',
+    adjustedByName: params.adjustedByName || 'Dashboard admin',
+    dsirReportId: params.dsirReportId,
+  })
 }
 
 export async function sumOnHandForLocation(locationId: string): Promise<number> {

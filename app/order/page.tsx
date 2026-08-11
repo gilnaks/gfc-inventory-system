@@ -462,16 +462,28 @@ export default function OrderPage() {
     }
   }
 
-  const loadProductsForLocation = (loc: { brand_id: string; is_remote?: boolean }) =>
-    fetchProducts(loc.brand_id, !!loc.is_remote)
+  const loadProductsForLocation = (loc: {
+    brand_id: string
+    is_remote?: boolean
+    company_owned?: boolean
+  }) => fetchProducts(loc.brand_id, !!loc.is_remote, !!loc.company_owned)
 
   const applyOrderPortalProductFilter = (
     list: Product[],
     portalByKey: Record<string, CategoryPortalSettings>,
-    isRemoteBranch: boolean
-  ) => filterProductsForOrderPortal(list, portalByKey, isRemoteBranch)
+    isRemoteBranch: boolean,
+    isCompanyOwned = false
+  ) =>
+    filterProductsForOrderPortal(list, portalByKey, {
+      isRemoteBranch,
+      isCompanyOwned,
+    })
 
-  const fetchProducts = async (brandId: string, isRemoteBranch = false) => {
+  const fetchProducts = async (
+    brandId: string,
+    isRemoteBranch = false,
+    isCompanyOwned = false
+  ) => {
     try {
       const [productsRes, portalRes] = await Promise.all([
         supabase
@@ -481,7 +493,7 @@ export default function OrderPage() {
           .order('category, product_name'),
         supabase
           .from('product_category_sort')
-          .select('category_name, show_on_order_portal, remote_store')
+          .select('category_name, show_on_order_portal, remote_store, available_to_company_owned, available_to_franchise')
           .eq('brand_id', brandId),
       ])
 
@@ -499,7 +511,8 @@ export default function OrderPage() {
       const visible = applyOrderPortalProductFilter(
         productsRes.data || [],
         portalByKey,
-        isRemoteBranch
+        isRemoteBranch,
+        isCompanyOwned
       )
       setProducts(visible)
     } catch (error) {
@@ -681,7 +694,8 @@ export default function OrderPage() {
         const visibleProducts = applyOrderPortalProductFilter(
           freshProducts || [],
           categoryPortalByKey,
-          !!location.is_remote
+          !!location.is_remote,
+          !!location.company_owned
         )
         setProducts(visibleProducts)
         

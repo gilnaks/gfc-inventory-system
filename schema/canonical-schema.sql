@@ -100,6 +100,8 @@ CREATE TABLE IF NOT EXISTS products (
   bom_yield_per_batch DECIMAL(12,4),
   linked_material_id UUID,   -- FK -> raw_materials(id) added in Section 11
   material_inventory_uom VARCHAR(20) CHECK (material_inventory_uom IS NULL OR material_inventory_uom IN ('purchase', 'stock')),
+  available_to_company_owned BOOLEAN NOT NULL DEFAULT TRUE,
+  available_to_franchise BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (brand_id, name),
@@ -246,6 +248,8 @@ CREATE TABLE IF NOT EXISTS product_category_sort (
   sort_index INTEGER NOT NULL DEFAULT 0,
   show_on_order_portal BOOLEAN NOT NULL DEFAULT TRUE,
   remote_store BOOLEAN NOT NULL DEFAULT FALSE,
+  available_to_company_owned BOOLEAN NOT NULL DEFAULT TRUE,
+  available_to_franchise BOOLEAN NOT NULL DEFAULT TRUE,
   yield_per_batch NUMERIC(12,2) NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -1712,7 +1716,9 @@ SELECT
   (COALESCE(p.initial_stock, 0) + COALESCE(p.production, 0) - COALESCE(p.released, 0)) AS final_stock,
   (COALESCE(p.initial_stock, 0) + COALESCE(p.production, 0) - COALESCE(p.released, 0) - COALESCE(p.reserved, 0)) AS available_stock,
   p.created_at,
-  p.updated_at
+  p.updated_at,
+  COALESCE(p.available_to_company_owned, TRUE) AS available_to_company_owned,
+  COALESCE(p.available_to_franchise, TRUE) AS available_to_franchise
 FROM products p
 JOIN brands b ON p.brand_id = b.id;
 

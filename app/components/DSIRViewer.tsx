@@ -180,7 +180,6 @@ export function DSIRViewer({
   const [saving, setSaving] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [showQrScanner, setShowQrScanner] = useState(false)
-  const [qrPasteText, setQrPasteText] = useState('')
   const [clientReady, setClientReady] = useState(false)
   
   // Legacy editing state (keeping for compatibility with existing UI)
@@ -3085,40 +3084,6 @@ export function DSIRViewer({
                 </button>
               )}
             </div>
-            {!isReadOnly && (
-              <div className="px-2 py-1.5 border-b border-black bg-amber-50 flex flex-col sm:flex-row gap-1.5 sm:items-center">
-                <label className="text-[10px] font-semibold text-amber-900 uppercase shrink-0 whitespace-nowrap">
-                  Temp QR paste
-                </label>
-                <input
-                  type="text"
-                  value={qrPasteText}
-                  onChange={(e) => setQrPasteText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      const raw = qrPasteText.trim()
-                      if (!raw) return
-                      void applyTransferSheetScan(raw).then(() => setQrPasteText(''))
-                    }
-                  }}
-                  placeholder="Paste DSIR_TRANSFER_V1|… payload"
-                  className="flex-1 min-w-0 border border-amber-300 rounded px-2 py-1 text-xs bg-white"
-                />
-                <button
-                  type="button"
-                  disabled={!qrPasteText.trim()}
-                  onClick={() => {
-                    const raw = qrPasteText.trim()
-                    if (!raw) return
-                    void applyTransferSheetScan(raw).then(() => setQrPasteText(''))
-                  }}
-                  className="px-2 py-1 text-xs font-medium bg-amber-800 text-white rounded disabled:opacity-50 shrink-0"
-                >
-                  Apply
-                </button>
-              </div>
-            )}
             <div className="overflow-x-auto">
               <table className="w-full text-xs" style={{tableLayout: 'fixed'}}>
                 <thead>

@@ -126,6 +126,7 @@ export default function DSIRPage() {
   const [staffSchedules, setStaffSchedules] = useState<StaffSchedule[]>([])
   const [scheduledLocations, setScheduledLocations] = useState<Location[]>([])
   const [todayDSIR, setTodayDSIR] = useState<DSIRReport | null>(null)
+  const [checkingTodayDSIR, setCheckingTodayDSIR] = useState(true)
   const [hasSubmittedDSIR, setHasSubmittedDSIR] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -257,10 +258,10 @@ export default function DSIRPage() {
               
               if (reportDate === today) {
                 // This is today's DSIR for this location, update the state
-                if (payload.eventType === 'UPDATE') {
+                if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
                   setTodayDSIR(payload.new as DSIRReport)
                   // If the report was reverted to draft, also update currentReport if it's the same
-                  if (currentReport && currentReport.id === payload.new.id) {
+                  if (currentReport && currentReport.id === (payload.new as DSIRReport).id) {
                     setCurrentReport(payload.new as DSIRReport)
                   }
                 } else if (payload.eventType === 'DELETE') {
@@ -625,12 +626,17 @@ export default function DSIRPage() {
   }
 
   const checkTodayDSIR = async (location: Location) => {
-    if (!staffInfo) return
+    if (!staffInfo) {
+      setCheckingTodayDSIR(false)
+      return
+    }
 
     const today = formatDateLocal(new Date())
-    
+    setCheckingTodayDSIR(true)
+
     try {
-      // Check for today's DSIR (shared by all staff at this location)
+      // One DSIR per location/day (shared by all staff). Use limit(1) — .single()
+      // errors when 0 or >1 rows and was incorrectly treated as "no report".
       const { data, error } = await supabase
         .from('dsir_reports')
         .select(`
@@ -643,21 +649,15 @@ export default function DSIRPage() {
         `)
         .eq('location_id', location.id)
         .eq('report_date', today)
-        .single()
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
 
       if (error) {
-        // Handle specific error cases
-        if (error.code === 'PGRST116' || error.message?.includes('No rows found')) {
-          // No DSIR found for today - this is normal
-          setTodayDSIR(null)
-        } else {
-          console.error('Error checking today\'s DSIR:', error)
-          setTodayDSIR(null)
-        }
-      } else if (data) {
-        setTodayDSIR(data)
-      } else {
+        console.error('Error checking today\'s DSIR:', error)
         setTodayDSIR(null)
+      } else {
+        setTodayDSIR(data ?? null)
       }
 
       // Check for any submitted DSIRs at this location (excluding today's DSIR)
@@ -689,8 +689,17 @@ export default function DSIRPage() {
       // No DSIR for today
       setTodayDSIR(null)
       setHasSubmittedDSIR(false)
+    } finally {
+      setCheckingTodayDSIR(false)
     }
   }
+
+  // /staff → /dsir remounts this page and clears todayDSIR; re-fetch on choice screen
+  useEffect(() => {
+    if (viewMode !== 'dsir_choice' || !staffInfo || !selectedLocation) return
+    setCheckingTodayDSIR(true)
+    void checkTodayDSIR(selectedLocation)
+  }, [viewMode, staffInfo?.id, selectedLocation?.id])
 
   const getWeekDates = () => {
     const today = new Date()
@@ -856,30 +865,27 @@ export default function DSIRPage() {
         `)
         .eq('location_id', selectedLocation.id)
         .eq('report_date', today)
-        .single()
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
 
       if (error) {
-        // Handle specific error cases
-        if (error.code === 'PGRST116' || error.message?.includes('No rows found')) {
-          // No existing report for today, create new one
-          await createNewReport()
-        } else {
-          console.error('Error checking existing report:', error)
-          // Still try to create new one on error
-          await createNewReport()
-        }
-      } else if (data) {
+        console.error('Error checking existing report:', error)
+        setError('Failed to check for an existing DSIR')
+        return
+      }
+
+      if (data) {
         setCurrentReport(data)
+        setTodayDSIR(data)
         saveCurrentReport(data)
         setViewMode('viewer')
       } else {
-        // No existing report for today, create new one
         await createNewReport()
       }
     } catch (error) {
       console.error('Exception checking existing report:', error)
-      // No existing report, create new one
-      await createNewReport()
+      setError('Failed to check for an existing DSIR')
     }
   }
 
@@ -2438,7 +2444,11 @@ export default function DSIRPage() {
           </div>
 
           <div className="space-y-4">
-            {todayDSIR ? (
+            {checkingTodayDSIR ? (
+              <div className={`w-full flex items-center justify-center p-6 bg-white border rounded-lg ${brandColors.border}`}>
+                <div className="text-sm text-gray-500">Checking today's DSIR…</div>
+              </div>
+            ) : todayDSIR ? (
               // Show existing DSIR for today
               <button
                 onClick={() => {

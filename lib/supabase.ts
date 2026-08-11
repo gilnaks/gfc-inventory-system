@@ -44,6 +44,10 @@ export type Product = {
   linked_material_id?: string | null
   /** UOM when receiving from materials inventory: purchase or stock. */
   material_inventory_uom?: 'purchase' | 'stock' | null
+  /** Order portal: visible to company-owned branches (default true). */
+  available_to_company_owned?: boolean
+  /** Order portal: visible to franchise branches (default true). */
+  available_to_franchise?: boolean
   final_stock?: number
   available_stock?: number
   brand_name?: string

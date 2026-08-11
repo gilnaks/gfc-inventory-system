@@ -453,6 +453,7 @@ export function DSIRReportsViewer({
         .from('locations')
         .select('id, name, brand_id, company_owned')
         .eq('brand_id', selectedBrand.id)
+        .eq('company_owned', true)
         .order('name')
       if (cancelled) return
       const locs = (data || []) as Location[]
@@ -473,13 +474,14 @@ export function DSIRReportsViewer({
     }
   }, [selectedBrand.id, selectedLocation?.id, lastReportLocationId])
 
-  // Keep inventory tab on the same store as the report being viewed
+  // Keep inventory tab on the same store as the report being viewed (company-owned only)
   useEffect(() => {
-    if (selectedReport?.location_id) {
+    if (!selectedReport?.location_id) return
+    setLastReportLocationId(selectedReport.location_id)
+    if (selectedReport.location?.company_owned) {
       setInventoryLocationId(selectedReport.location_id)
-      setLastReportLocationId(selectedReport.location_id)
     }
-  }, [selectedReport?.location_id])
+  }, [selectedReport?.location_id, selectedReport?.location?.company_owned])
 
   const loadReports = async (page = 1, append = false) => {
     if (page === 1) {
@@ -1356,6 +1358,8 @@ export function DSIRReportsViewer({
                   reportDate={selectedReport.report_date}
                   dsirReportId={selectedReport.id}
                   reportStatus={selectedReport.status}
+                  allowSeedFromDsir={!dsirViewerReadOnly}
+                  adjustedByName="Dashboard admin"
                 />
               </div>
             </div>

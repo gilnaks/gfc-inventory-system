@@ -13,7 +13,6 @@ import { buildTransferSheetDsirPayload } from '../../lib/transferSheetDsirQr'
 import {
   buildCategoryPortalMap,
   filterProductsForOrderPortal,
-  getCategoryPortalSettings,
   type CategoryPortalSettings,
 } from '../../lib/product-category-settings'
 import { Modal } from './Modal'
@@ -1724,19 +1723,12 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', cur
       { showPrices: true }
     )
 
-    const nonIndexZeroItems = sortedDetails
-      .filter((_, index) => index !== 0)
-      .map((detail) => ({
+    const dsirPayloadText = buildTransferSheetDsirPayload(
+      sortedDetails.map((detail) => ({
         name: detail.products.name,
         quantity: detail.quantity,
       }))
-    const fallbackAllItems = sortedDetails.map((detail) => ({
-      name: detail.products.name,
-      quantity: detail.quantity,
-    }))
-    const dsirPayloadText =
-      buildTransferSheetDsirPayload(nonIndexZeroItems) ||
-      buildTransferSheetDsirPayload(fallbackAllItems)
+    )
     let dsirQrDataUrl = ''
     if (dsirPayloadText) {
       const QRCode = (await import('qrcode')).default
@@ -1916,7 +1908,7 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', cur
           .order('category, product_name'),
         supabase
           .from('product_category_sort')
-          .select('category_name, show_on_order_portal, remote_store')
+          .select('category_name, show_on_order_portal, remote_store, available_to_company_owned, available_to_franchise')
           .eq('brand_id', selectedBrand.id),
       ])
 
@@ -1937,16 +1929,11 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', cur
   const overrideModalAddProducts = useMemo(() => {
     if (!editingOrder) return []
     const isRemote = isRemoteStoreLocation(editingOrder.location)
-    if (isRemote) {
-      return availableProducts.filter((product) =>
-        getCategoryPortalSettings(product.category, overrideCategoryPortalByKey).remote_store
-      )
-    }
-    return filterProductsForOrderPortal(
-      availableProducts,
-      overrideCategoryPortalByKey,
-      false
-    )
+    const isCompanyOwned = !!editingOrder.location?.company_owned
+    return filterProductsForOrderPortal(availableProducts, overrideCategoryPortalByKey, {
+      isRemoteBranch: isRemote,
+      isCompanyOwned,
+    })
   }, [availableProducts, overrideCategoryPortalByKey, editingOrder])
 
   const handleSaveOverride = async () => {

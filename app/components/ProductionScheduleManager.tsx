@@ -1205,7 +1205,7 @@ export function ProductionScheduleManager({
     setAllProducts([])
     try {
       const categorySortSelect =
-        'category_name, sort_index, show_on_order_portal, remote_store, yield_per_batch'
+        'category_name, sort_index, show_on_order_portal, remote_store, available_to_company_owned, available_to_franchise, yield_per_batch'
       const shouldLoadGfcComponents = !isAggregateBrandView && brandId !== forBrandId
       const [pickerProducts, sortRes, catalogProducts, retailBrands, gfcComponentsLoad] =
         await Promise.all([

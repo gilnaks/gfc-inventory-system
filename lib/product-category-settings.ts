@@ -1,6 +1,10 @@
 export type CategoryPortalSettings = {
   show_on_order_portal: boolean
   remote_store: boolean
+  /** Order portal: visible to company-owned branches (default true). */
+  available_to_company_owned: boolean
+  /** Order portal: visible to franchise branches (default true). */
+  available_to_franchise: boolean
   /** Units of quantity_required per 1 production batch (default 1). */
   yield_per_batch: number
 }
@@ -8,6 +12,8 @@ export type CategoryPortalSettings = {
 export const DEFAULT_CATEGORY_PORTAL_SETTINGS: CategoryPortalSettings = {
   show_on_order_portal: true,
   remote_store: false,
+  available_to_company_owned: true,
+  available_to_franchise: true,
   yield_per_batch: 1,
 }
 
@@ -70,12 +76,16 @@ export function parseCategoryPortalRow(row: {
   category_name?: string | null
   show_on_order_portal?: boolean | null
   remote_store?: boolean | null
+  available_to_company_owned?: boolean | null
+  available_to_franchise?: boolean | null
   yield_per_batch?: number | string | null
 }): CategoryPortalSettings {
   const rawYield = Number(row.yield_per_batch)
   return {
     show_on_order_portal: row.show_on_order_portal ?? true,
     remote_store: row.remote_store ?? false,
+    available_to_company_owned: row.available_to_company_owned ?? true,
+    available_to_franchise: row.available_to_franchise ?? true,
     yield_per_batch: rawYield > 0 ? rawYield : 1,
   }
 }
@@ -107,6 +117,8 @@ export function buildCategoryPortalMap(
     category_name?: string | null
     show_on_order_portal?: boolean | null
     remote_store?: boolean | null
+    available_to_company_owned?: boolean | null
+    available_to_franchise?: boolean | null
     yield_per_batch?: number | string | null
   }> | null
 ): Record<string, CategoryPortalSettings> {
@@ -127,27 +139,60 @@ export function getCategoryPortalSettings(
   )
 }
 
+export type OrderPortalVisibilityOpts = {
+  isRemoteBranch: boolean
+  /** From locations.company_owned. Franchise when false/undefined. */
+  isCompanyOwned?: boolean
+}
+
+export function isProductAvailableForOwnership(
+  product: {
+    available_to_company_owned?: boolean | null
+    available_to_franchise?: boolean | null
+  },
+  isCompanyOwned: boolean
+): boolean {
+  const forCompany = product.available_to_company_owned ?? true
+  const forFranchise = product.available_to_franchise ?? true
+  return isCompanyOwned ? forCompany : forFranchise
+}
+
 /**
  * Order portal visibility:
  * - Hidden when show_on_order_portal is false.
  * - Remote branches only see categories marked remote_store.
  * - Non-remote branches see all portal-visible categories (including remote-only).
+ * - Category- and product-level company-owned / franchise flags restrict by location ownership.
  */
 export function isProductVisibleOnOrderPortal(
-  productCategory: string | null | undefined,
+  product: {
+    category?: string | null
+    available_to_company_owned?: boolean | null
+    available_to_franchise?: boolean | null
+  },
   settingsByKey: Record<string, CategoryPortalSettings>,
-  isRemoteBranch: boolean
+  opts: OrderPortalVisibilityOpts
 ): boolean {
-  const settings = getCategoryPortalSettings(productCategory, settingsByKey)
+  const settings = getCategoryPortalSettings(product.category, settingsByKey)
   if (!settings.show_on_order_portal) return false
-  if (isRemoteBranch) return settings.remote_store
+  if (opts.isRemoteBranch && !settings.remote_store) return false
+  if (!isProductAvailableForOwnership(settings, !!opts.isCompanyOwned)) return false
+  if (!isProductAvailableForOwnership(product, !!opts.isCompanyOwned)) return false
   return true
 }
 
 export function filterProductsForOrderPortal<
-  T extends { category?: string | null },
->(products: T[], settingsByKey: Record<string, CategoryPortalSettings>, isRemoteBranch: boolean): T[] {
-  return products.filter((p) =>
-    isProductVisibleOnOrderPortal(p.category, settingsByKey, isRemoteBranch)
-  )
+  T extends {
+    category?: string | null
+    available_to_company_owned?: boolean | null
+    available_to_franchise?: boolean | null
+  },
+>(
+  products: T[],
+  settingsByKey: Record<string, CategoryPortalSettings>,
+  opts: OrderPortalVisibilityOpts | boolean
+): T[] {
+  const normalized: OrderPortalVisibilityOpts =
+    typeof opts === 'boolean' ? { isRemoteBranch: opts } : opts
+  return products.filter((p) => isProductVisibleOnOrderPortal(p, settingsByKey, normalized))
 }
