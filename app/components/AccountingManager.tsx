@@ -29,7 +29,6 @@ import {
   isSubTabLocked,
   type ModuleAccessLock,
 } from '../../lib/module-access'
-import { TransferReceivablesPanel } from './TransferReceivablesPanel'
 import { AccountingPayables, type PayableRow } from './AccountingPayables'
 import { isFactoryBrand } from '../../lib/brand-roles'
 import {
@@ -1843,7 +1842,9 @@ export function AccountingManager({
       <div className="space-y-6">
         <div>
           <h1 className="text-xl font-semibold text-gray-900">Accounting</h1>
-          <p className="text-sm text-gray-600">Money in, money out, books, and reports</p>
+          <p className="text-sm text-gray-600">
+            Financial transactions and reporting. Filter by franchise to review performance.
+          </p>
         </div>
         <div className="bg-white rounded-lg shadow-sm border p-6">
           <p className="text-gray-500 text-center py-8">Please select a brand to use Accounting.</p>
@@ -1859,7 +1860,7 @@ export function AccountingManager({
         <div>
           <h1 className="text-xl font-semibold text-gray-900">Accounting</h1>
           <p className="text-sm text-gray-600">
-            Money in, money out, books, and reports — filter by franchise for performance.
+            Financial transactions and reporting. Filter by franchise to review performance.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3 shrink-0">
@@ -2023,40 +2024,22 @@ export function AccountingManager({
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Receivables</h2>
                 <p className="text-sm text-gray-600 mt-0.5">
-                  Customer order AR and franchise transfer receivables.
+                  Customer order accounts receivable.
                 </p>
               </div>
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold text-gray-800">Customer orders</h3>
-                <BillingManager
-                  selectedBrand={selectedBrand}
-                  theme={theme}
-                  embeddedInAccounting
-                  timeFilter={periodFilter}
-                  onTimeFilterChange={setPeriodFilter}
-                  currentUsername={currentUsername}
-                  readOnlyMode={readOnlyMode}
-                  companyWideOrders={franchiseFilter === 'all' || franchiseFilter === 'hq'}
-                  franchiseBrandId={
-                    franchiseFilter !== 'all' && franchiseFilter !== 'hq' ? franchiseFilter : null
-                  }
-                />
-              </div>
-              {isGfcMain && selectedBrand ? (
-                <div className="space-y-2 border-t border-gray-200 pt-6">
-                  <h3 className="text-sm font-semibold text-gray-800">Franchise transfer receivables</h3>
-                  <TransferReceivablesPanel
-                    selectedBrand={selectedBrand}
-                    theme={theme}
-                    timeFilter={periodFilter}
-                    currentUsername={currentUsername}
-                    readOnlyMode={readOnlyMode}
-                    franchiseBrandId={
-                      franchiseFilter !== 'all' && franchiseFilter !== 'hq' ? franchiseFilter : null
-                    }
-                  />
-                </div>
-              ) : null}
+              <BillingManager
+                selectedBrand={selectedBrand}
+                theme={theme}
+                embeddedInAccounting
+                timeFilter={periodFilter}
+                onTimeFilterChange={setPeriodFilter}
+                currentUsername={currentUsername}
+                readOnlyMode={readOnlyMode}
+                companyWideOrders={franchiseFilter === 'all' || franchiseFilter === 'hq'}
+                franchiseBrandId={
+                  franchiseFilter !== 'all' && franchiseFilter !== 'hq' ? franchiseFilter : null
+                }
+              />
             </div>
           )}
 

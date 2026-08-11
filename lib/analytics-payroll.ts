@@ -33,12 +33,12 @@ async function fetchAll<T>(
 
 type DeductionRow = {
   staff_id: string
-  utilities: unknown
-  shortages: unknown
-  cash_advances: unknown
-  penalties: unknown
-  others: unknown
-  refunds: unknown
+  utilities: number | null
+  shortages: number | null
+  cash_advances: number | null
+  penalties: number | null
+  others: number | null
+  refunds: number | null
 }
 
 /**

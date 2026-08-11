@@ -244,11 +244,11 @@ export type AnalyticsData = {
     netSales: KpiValue
     grossSales: KpiValue
     orderRevenue: KpiValue
-    ordersCount: KpiValue
+    pansDelivered: KpiValue
     cashCollected: KpiValue
     netPayroll: KpiValue
     activeFranchises: KpiValue
-    productionUnits: KpiValue
+    pansProduced: KpiValue
   }
   salesTrend: SalesTrendPoint[]
   revenueByBrand: BrandRevenueSlice[]
@@ -375,6 +375,19 @@ function isBigCupItem(itemName: string): boolean {
 function isSmallCupItem(itemName: string): boolean {
   const name = normalizeItemName(itemName)
   return (name.includes('SMALL') && name.includes('CUP')) || name === 'SMALLCUP' || name === 'SMALL CUP'
+}
+
+/** Portal order product categories that count as pans. */
+function isPanProductCategory(category: string | null | undefined): boolean {
+  const key = (category || '').toLowerCase().trim()
+  return key === 'ice cream' || key === 'gelato' || key === 'sorbetes'
+}
+
+function orderPanQuantity(order: CustomerOrderRow): number {
+  return (order.order_details || []).reduce((total, line) => {
+    if (!isPanProductCategory(line.products?.category)) return total
+    return total + Math.max(0, num(line.quantity))
+  }, 0)
 }
 
 /** Portal order product category that counts as delivered pans for a brand. */
@@ -606,22 +619,30 @@ export async function loadAnalytics(
   const sum = <T,>(rows: T[], pick: (row: T) => unknown) =>
     rows.reduce((total, row) => total + num(pick(row)), 0)
 
-  const activeFranchiseCountWithOrders = (
+  const isFranchiseBranch = (locationId: string | null | undefined): boolean => {
+    if (!locationId) return false
+    const location = locationById.get(locationId)
+    if (!location || !location.brand_id) return false
+    if (location.is_factory_floor || location.company_owned) return false
+    if (factoryBrandIds.has(location.brand_id)) return false
+    if (franchiseBrandId && location.brand_id !== franchiseBrandId) return false
+    return true
+  }
+
+  const activeFranchiseBranchCount = (
     dsirRows: DsirReportRow[],
     orderRows: CustomerOrderRow[]
   ) => {
-    const brandIds = new Set<string>()
+    const locationIds = new Set<string>()
     dsirRows.forEach((r) => {
-      const brandId = locationById.get(r.location_id)?.brand_id
-      if (!brandId || factoryBrandIds.has(brandId)) return
-      brandIds.add(brandId)
+      if (!isFranchiseBranch(r.location_id)) return
+      locationIds.add(r.location_id)
     })
     orderRows.forEach((o) => {
-      if (!o.brand_id || factoryBrandIds.has(o.brand_id)) return
-      if (franchiseBrandId && o.brand_id !== franchiseBrandId) return
-      brandIds.add(o.brand_id)
+      if (!isFranchiseBranch(o.location_id)) return
+      locationIds.add(o.location_id!)
     })
-    return brandIds.size
+    return locationIds.size
   }
 
   const kpis: AnalyticsData['kpis'] = {
@@ -637,7 +658,10 @@ export async function loadAnalytics(
       current: sum(ordersCurrent, (o) => o.total_amount),
       previous: sum(ordersPrevious, (o) => o.total_amount),
     },
-    ordersCount: { current: ordersCurrent.length, previous: ordersPrevious.length },
+    pansDelivered: {
+      current: sum(ordersCurrent, orderPanQuantity),
+      previous: sum(ordersPrevious, orderPanQuantity),
+    },
     cashCollected: {
       current: sum(dsirCurrent, (r) => r.total_cash),
       previous: sum(dsirPrevious, (r) => r.total_cash),
@@ -647,10 +671,10 @@ export async function loadAnalytics(
       previous: netPayrollPrevious,
     },
     activeFranchises: {
-      current: activeFranchiseCountWithOrders(dsirCurrent, ordersCurrent),
-      previous: activeFranchiseCountWithOrders(dsirPrevious, ordersPrevious),
+      current: activeFranchiseBranchCount(dsirCurrent, ordersCurrent),
+      previous: activeFranchiseBranchCount(dsirPrevious, ordersPrevious),
     },
-    productionUnits: {
+    pansProduced: {
       current: sum(summariesCurrent, (s) => s.total_production),
       previous: sum(summariesPrevious, (s) => s.total_production),
     },

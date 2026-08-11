@@ -15,7 +15,6 @@ import {
   LineChart as LineChartIcon,
   Package,
   PieChart as PieChartIcon,
-  Receipt,
   RefreshCw,
   ShoppingCart,
   Trophy,
@@ -179,6 +178,39 @@ function ChartCard({
           </div>
         </div>
         {right}
+      </div>
+      <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  )
+}
+
+function RankingPanel({
+  title,
+  subtitle,
+  accentColor,
+  children,
+  className = '',
+}: {
+  title: string
+  subtitle?: string
+  accentColor?: string
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <div className={`flex flex-col rounded-lg border border-gray-200 bg-gray-50/40 p-3 ${className}`}>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-gray-900">{title}</p>
+          {subtitle ? <p className="mt-0.5 truncate text-xs text-gray-500">{subtitle}</p> : null}
+        </div>
+        {accentColor ? (
+          <span
+            className="mt-1 h-3 w-3 shrink-0 rounded-full ring-1 ring-black/10"
+            style={{ backgroundColor: accentColor }}
+            aria-hidden
+          />
+        ) : null}
       </div>
       <div className="min-h-0 flex-1">{children}</div>
     </div>
@@ -624,9 +656,9 @@ export function AnalyticsManager() {
               format={(v) => peso(v)}
             />
             <KpiCard
-              label="Orders"
-              kpi={data.kpis.ordersCount}
-              icon={Receipt}
+              label="Pans Delivered"
+              kpi={data.kpis.pansDelivered}
+              icon={Package}
               iconClass="bg-fuchsia-50 text-fuchsia-600"
               format={fmtInt}
             />
@@ -653,8 +685,8 @@ export function AnalyticsManager() {
               format={fmtInt}
             />
             <KpiCard
-              label="Production Units"
-              kpi={data.kpis.productionUnits}
+              label="Pans Produced"
+              kpi={data.kpis.pansProduced}
               icon={Factory}
               iconClass="bg-orange-50 text-orange-600"
               format={fmtInt}
@@ -1022,22 +1054,16 @@ export function AnalyticsManager() {
           </ChartCard>
 
           {/* Location rankings by franchise (portal orders) */}
-          <div>
-            <div className="mb-3 flex items-end justify-between gap-3">
-              <div>
-                <h3 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-                  <Building2 className="h-4 w-4 text-gray-500" aria-hidden />
-                  Location Rankings by Franchise
-                </h3>
-                <p className="mt-0.5 text-xs text-gray-500">
-                  Every branch ranked within its franchise by portal order revenue
-                </p>
-              </div>
+          <ChartCard
+            title="Location Rankings by Franchise"
+            subtitle="Every branch ranked within its franchise by portal order revenue"
+            icon={Building2}
+            right={
               <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-600">
                 {data.locationRankings.length} locations · {locationsByFranchise.length} franchises
               </span>
-            </div>
-
+            }
+          >
             {locationsByFranchise.length === 0 ? (
               <EmptyState
                 icon={Building2}
@@ -1051,24 +1077,18 @@ export function AnalyticsManager() {
                     { slug: franchise.brandSlug, name: franchise.brandName }
                   )
                   return (
-                    <ChartCard
+                    <RankingPanel
                       key={franchise.brandId}
                       title={franchise.brandName}
                       subtitle={`${franchise.locations.length} locations · ${peso(franchise.totalOrderRevenue)} orders`}
-                      className="h-[420px]"
-                      right={
-                        <span
-                          className="h-3 w-3 shrink-0 rounded-full ring-1 ring-black/10"
-                          style={{ backgroundColor: franchiseColor }}
-                          aria-hidden
-                        />
-                      }
+                      accentColor={franchiseColor}
+                      className="h-[400px]"
                     >
                       <div className="h-full space-y-1 overflow-y-auto pr-1">
                         {franchise.locations.map((location, index) => (
                           <div
                             key={location.locationId}
-                            className="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-gray-50"
+                            className="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-white"
                           >
                             <RankBadge rank={index + 1} />
                             <div className="min-w-0 flex-1">
@@ -1113,30 +1133,24 @@ export function AnalyticsManager() {
                           </div>
                         ))}
                       </div>
-                    </ChartCard>
+                    </RankingPanel>
                   )
                 })}
               </div>
             )}
-          </div>
+          </ChartCard>
 
           {/* Company-owned locations via DSIR, per brand */}
-          <div>
-            <div className="mb-3 flex items-end justify-between gap-3">
-              <div>
-                <h3 className="flex items-center gap-2 text-sm font-semibold text-gray-900">
-                  <Building2 className="h-4 w-4 text-gray-500" aria-hidden />
-                  Company-Owned Location Rankings
-                </h3>
-                <p className="mt-0.5 text-xs text-gray-500">
-                  Company-owned branches ranked by DSIR net sales, separated by brand
-                </p>
-              </div>
+          <ChartCard
+            title="Company-Owned Location Rankings"
+            subtitle="Company-owned branches ranked by DSIR net sales, separated by brand"
+            icon={Building2}
+            right={
               <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-600">
                 {data.companyOwnedDsirRankings.length} locations · {companyOwnedByBrand.length} brands
               </span>
-            </div>
-
+            }
+          >
             {companyOwnedByBrand.length === 0 ? (
               <EmptyState
                 icon={Building2}
@@ -1156,24 +1170,18 @@ export function AnalyticsManager() {
                 {companyOwnedByBrand.map((brand) => {
                   const brandColor = brandColorFor({ slug: brand.brandSlug, name: brand.brandName })
                   return (
-                    <ChartCard
+                    <RankingPanel
                       key={brand.brandId}
                       title={brand.brandName}
                       subtitle={`${brand.locations.length} company-owned · ${peso(brand.totalNetSales)} net`}
-                      className="h-[420px]"
-                      right={
-                        <span
-                          className="h-3 w-3 shrink-0 rounded-full ring-1 ring-black/10"
-                          style={{ backgroundColor: brandColor }}
-                          aria-hidden
-                        />
-                      }
+                      accentColor={brandColor}
+                      className="h-[400px]"
                     >
                       <div className="h-full space-y-1 overflow-y-auto pr-1">
                         {brand.locations.map((location, index) => (
                           <div
                             key={location.locationId}
-                            className="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-gray-50"
+                            className="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-white"
                           >
                             <RankBadge rank={index + 1} />
                             <div className="min-w-0 flex-1">
@@ -1240,18 +1248,18 @@ export function AnalyticsManager() {
                                 <span className="font-medium">
                                   Actual Big/pan{' '}
                                   {location.avgBigCupsPerPan > 0
-                                    ? location.avgBigCupsPerPan.toLocaleString(undefined, {
+                                    ? `${location.avgBigCupsPerPan.toLocaleString(undefined, {
                                         maximumFractionDigits: 1,
-                                      })
+                                      })} units`
                                     : '—'}
                                 </span>
                                 <span className="text-gray-300">·</span>
                                 <span className="font-medium">
                                   Actual Small/pan{' '}
                                   {location.avgSmallCupsPerPan > 0
-                                    ? location.avgSmallCupsPerPan.toLocaleString(undefined, {
+                                    ? `${location.avgSmallCupsPerPan.toLocaleString(undefined, {
                                         maximumFractionDigits: 1,
-                                      })
+                                      })} units`
                                     : '—'}
                                 </span>
                               </div>
@@ -1259,18 +1267,18 @@ export function AnalyticsManager() {
                                 <span className="font-medium" title="If all cup sales were sold as big cups only">
                                   All-big/pan{' '}
                                   {location.allBigOnlyPerPan > 0
-                                    ? location.allBigOnlyPerPan.toLocaleString(undefined, {
+                                    ? `${location.allBigOnlyPerPan.toLocaleString(undefined, {
                                         maximumFractionDigits: 1,
-                                      })
+                                      })} units`
                                     : '—'}
                                 </span>
                                 <span className="text-gray-300">·</span>
                                 <span className="font-medium" title="If all cup sales were sold as small cups only">
                                   All-small/pan{' '}
                                   {location.allSmallOnlyPerPan > 0
-                                    ? location.allSmallOnlyPerPan.toLocaleString(undefined, {
+                                    ? `${location.allSmallOnlyPerPan.toLocaleString(undefined, {
                                         maximumFractionDigits: 1,
-                                      })
+                                      })} units`
                                     : '—'}
                                 </span>
                               </div>
@@ -1301,12 +1309,12 @@ export function AnalyticsManager() {
                           </div>
                         ))}
                       </div>
-                    </ChartCard>
+                    </RankingPanel>
                   )
                 })}
               </div>
             )}
-          </div>
+          </ChartCard>
 
           {/* Staff rankings: overall + by store */}
           <div className="grid items-stretch gap-3 lg:grid-cols-2">
