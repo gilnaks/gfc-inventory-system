@@ -6,7 +6,8 @@ import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, Refres
 import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
 import { Modal } from './Modal'
 import { DSIRStoreInventoryPanel } from './DSIRStoreInventoryPanel'
-import { sumOnHandForLocation } from '../../lib/dsir-store-inventory'
+import { sumOnHandForLocation, isDsirStorePulloutsEnabled, setDsirStorePulloutsEnabled } from '../../lib/dsir-store-inventory'
+import { dayBefore, todayIsoDate, type DsirItemPriceRange } from '../../lib/dsir-item-prices'
 
 interface Brand {
   id: string
@@ -74,6 +75,9 @@ export function DSIRReportsViewer({
   const [mainTab, setMainTab] = useState<'reports' | 'inventory'>('reports')
   const [inventoryLocationId, setInventoryLocationId] = useState('')
   const [inventoryLocations, setInventoryLocations] = useState<Location[]>([])
+  const [pulloutsEnabled, setPulloutsEnabled] = useState(false)
+  const [pulloutsSettingLoading, setPulloutsSettingLoading] = useState(false)
+  const [pulloutsSettingSaving, setPulloutsSettingSaving] = useState(false)
   const [lastReportLocationId, setLastReportLocationId] = useState('')
   const [showReportInventoryModal, setShowReportInventoryModal] = useState(false)
   const [reports, setReports] = useState<DSIRReport[]>([])
@@ -111,6 +115,7 @@ export function DSIRReportsViewer({
   const [loadingItems, setLoadingItems] = useState(false)
   const [savingItems, setSavingItems] = useState(false)
   const [newItem, setNewItem] = useState({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
+  const [itemPriceHistory, setItemPriceHistory] = useState<Record<string, DsirItemPriceRange[]>>({})
   const [editingItemId, setEditingItemId] = useState<string | null>(null)
   
   // Create Report Modal State
@@ -482,6 +487,51 @@ export function DSIRReportsViewer({
       setInventoryLocationId(selectedReport.location_id)
     }
   }, [selectedReport?.location_id, selectedReport?.location?.company_owned])
+
+  useEffect(() => {
+    if (mainTab !== 'inventory') return
+    let cancelled = false
+    setPulloutsSettingLoading(true)
+    void (async () => {
+      try {
+        const enabled = await isDsirStorePulloutsEnabled()
+        if (!cancelled) setPulloutsEnabled(enabled)
+      } catch (e) {
+        console.error(e)
+        if (!cancelled) setPulloutsEnabled(false)
+      } finally {
+        if (!cancelled) setPulloutsSettingLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [mainTab])
+
+  const toggleStorePullouts = async () => {
+    if (dsirViewerReadOnly || pulloutsSettingSaving) return
+    const next = !pulloutsEnabled
+    const confirmed = await requestAdminPassword({
+      title: next ? 'Enable store pull-outs' : 'Disable store pull-outs',
+      message: next
+        ? 'Enable posting ice cream pull-outs to store inventory when a DSIR is submitted?'
+        : 'Disable store inventory pull-outs on DSIR submit? Reports can still be submitted; the ledger will not be updated.',
+      confirmLabel: next ? 'Enable' : 'Disable',
+    })
+    if (!confirmed) return
+    setPulloutsSettingSaving(true)
+    try {
+      await setDsirStorePulloutsEnabled(next)
+      setPulloutsEnabled(next)
+      setSuccess(next ? 'Store pull-outs enabled.' : 'Store pull-outs disabled.')
+      setTimeout(() => setSuccess(''), 3000)
+    } catch (e) {
+      console.error(e)
+      setError('Failed to update store pull-out setting.')
+    } finally {
+      setPulloutsSettingSaving(false)
+    }
+  }
 
   const loadReports = async (page = 1, append = false) => {
     if (page === 1) {
@@ -951,13 +1001,64 @@ export function DSIRReportsViewer({
         .order('category, name')
 
       if (error) throw error
-      setPredefinedItems((data || []).filter((item) => item.category !== 'ice_cream'))
+      const items = (data || []).filter((item) => item.category !== 'ice_cream')
+      setPredefinedItems(items)
+
+      const salesIds = items.filter((i) => i.category === 'sales').map((i) => i.id)
+      if (salesIds.length > 0) {
+        const { data: prices, error: pricesError } = await supabase
+          .from('dsir_predefined_item_prices')
+          .select('predefined_item_id, price, effective_from, effective_to')
+          .in('predefined_item_id', salesIds)
+          .order('effective_from', { ascending: true })
+        if (pricesError) throw pricesError
+        const byItem: Record<string, DsirItemPriceRange[]> = {}
+        for (const row of prices || []) {
+          const id = row.predefined_item_id as string
+          if (!byItem[id]) byItem[id] = []
+          byItem[id].push({
+            predefined_item_id: id,
+            price: Number(row.price) || 0,
+            effective_from: String(row.effective_from),
+            effective_to: row.effective_to != null ? String(row.effective_to) : null,
+          })
+        }
+        setItemPriceHistory(byItem)
+      } else {
+        setItemPriceHistory({})
+      }
     } catch (error) {
       console.error('Error loading predefined items:', error)
       setError('Failed to load predefined items')
     } finally {
       setLoadingItems(false)
     }
+  }
+
+  const getBrandEarliestDsirDate = async (): Promise<string> => {
+    const { data: locs, error: locErr } = await supabase
+      .from('locations')
+      .select('id')
+      .eq('brand_id', selectedBrand.id)
+    if (locErr) {
+      console.warn('Could not load locations for earliest DSIR date:', locErr)
+      return todayIsoDate()
+    }
+    const locationIds = (locs || []).map((l) => l.id)
+    if (locationIds.length === 0) return todayIsoDate()
+
+    const { data, error } = await supabase
+      .from('dsir_reports')
+      .select('report_date')
+      .in('location_id', locationIds)
+      .order('report_date', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+    if (error) {
+      console.warn('Could not load earliest DSIR date:', error)
+      return todayIsoDate()
+    }
+    return data?.report_date ? String(data.report_date) : todayIsoDate()
   }
 
   const addPredefinedItem = async () => {
@@ -982,7 +1083,6 @@ export function DSIRReportsViewer({
         show_in_remote: newItem.show_in_remote
       }
       
-      // Only include price for sales inventory
       if (newItem.category === 'sales') {
         insertData.price = newItem.price
       }
@@ -994,7 +1094,20 @@ export function DSIRReportsViewer({
 
       if (error) throw error
 
-      setPredefinedItems(prev => [...prev, ...data])
+      if (newItem.category === 'sales' && data?.[0]?.id) {
+        const effectiveFrom = await getBrandEarliestDsirDate()
+        const { error: priceError } = await supabase
+          .from('dsir_predefined_item_prices')
+          .insert({
+            predefined_item_id: data[0].id,
+            price: newItem.price,
+            effective_from: effectiveFrom,
+            effective_to: null,
+          })
+        if (priceError) throw priceError
+      }
+
+      await loadPredefinedItems()
       setNewItem({ name: '', price: 0, category: '', show_in_local: true, show_in_remote: true })
       setSuccess('Item added successfully!')
     } catch (error) {
@@ -1005,7 +1118,60 @@ export function DSIRReportsViewer({
     }
   }
 
-  const updatePredefinedItem = async (id: string, name: string, price: number, category: string, show_in_local: boolean, show_in_remote: boolean) => {
+  const mergeAdjacentSamePriceRanges = async (itemId: string) => {
+    const { data: rows, error } = await supabase
+      .from('dsir_predefined_item_prices')
+      .select('id, price, effective_from, effective_to')
+      .eq('predefined_item_id', itemId)
+      .order('effective_from', { ascending: true })
+    if (error) throw error
+    if (!rows?.length) return
+
+    const sorted = rows.map((r) => ({
+      id: r.id as string,
+      price: Number(r.price) || 0,
+      effective_from: String(r.effective_from).slice(0, 10),
+      effective_to: r.effective_to != null ? String(r.effective_to).slice(0, 10) : null,
+    }))
+
+    let i = 0
+    while (i < sorted.length - 1) {
+      const a = sorted[i]
+      const b = sorted[i + 1]
+      const samePrice = Math.abs(a.price - b.price) < 0.0001
+      const adjacent =
+        a.effective_to != null && a.effective_to === dayBefore(b.effective_from)
+
+      if (samePrice && adjacent) {
+        const { error: updErr } = await supabase
+          .from('dsir_predefined_item_prices')
+          .update({ effective_to: b.effective_to })
+          .eq('id', a.id)
+        if (updErr) throw updErr
+
+        const { error: delErr } = await supabase
+          .from('dsir_predefined_item_prices')
+          .delete()
+          .eq('id', b.id)
+        if (delErr) throw delErr
+
+        a.effective_to = b.effective_to
+        sorted.splice(i + 1, 1)
+      } else {
+        i += 1
+      }
+    }
+  }
+
+  const updatePredefinedItem = async (
+    id: string,
+    name: string,
+    price: number,
+    category: string,
+    show_in_local: boolean,
+    show_in_remote: boolean,
+    effectiveFrom?: string
+  ) => {
     const confirmed = await requestAdminPassword({
       title: 'Save item changes',
       message: 'Enter admin password to save changes to this predefined item.',
@@ -1015,6 +1181,69 @@ export function DSIRReportsViewer({
 
     setSavingItems(true)
     try {
+      const existing = predefinedItems.find((i) => i.id === id)
+      const previousPrice = Number(existing?.price) || 0
+      const priceChanged = category === 'sales' && Math.abs(previousPrice - price) > 0.0001
+
+      if (priceChanged) {
+        const from = (effectiveFrom || todayIsoDate()).slice(0, 10)
+        const { data: openRows, error: openErr } = await supabase
+          .from('dsir_predefined_item_prices')
+          .select('id, effective_from')
+          .eq('predefined_item_id', id)
+          .is('effective_to', null)
+          .order('effective_from', { ascending: false })
+          .limit(1)
+        if (openErr) throw openErr
+
+        const openRow = openRows?.[0]
+        if (openRow) {
+          const openFrom = String(openRow.effective_from).slice(0, 10)
+          if (from < openFrom) {
+            setError(
+              `Effective from (${from}) must be on or after the current range start (${openFrom}).`
+            )
+            return
+          }
+
+          if (from === openFrom) {
+            // Same-day correction: update open range; merge step discards net-no-change
+            const { error: updatePriceErr } = await supabase
+              .from('dsir_predefined_item_prices')
+              .update({ price })
+              .eq('id', openRow.id)
+            if (updatePriceErr) throw updatePriceErr
+          } else {
+            const closeTo = dayBefore(from)
+            const { error: closeErr } = await supabase
+              .from('dsir_predefined_item_prices')
+              .update({ effective_to: closeTo })
+              .eq('id', openRow.id)
+            if (closeErr) throw closeErr
+
+            const { error: insertPriceErr } = await supabase
+              .from('dsir_predefined_item_prices')
+              .insert({
+                predefined_item_id: id,
+                price,
+                effective_from: from,
+                effective_to: null,
+              })
+            if (insertPriceErr) throw insertPriceErr
+          }
+        } else {
+          const { error: insertPriceErr } = await supabase
+            .from('dsir_predefined_item_prices')
+            .insert({
+              predefined_item_id: id,
+              price,
+              effective_from: from,
+              effective_to: null,
+            })
+          if (insertPriceErr) throw insertPriceErr
+        }
+      }
+
       const updateData: any = { 
         name: name.trim(), 
         category,
@@ -1022,7 +1251,6 @@ export function DSIRReportsViewer({
         show_in_remote
       }
       
-      // Only include price for sales inventory
       if (category === 'sales') {
         updateData.price = price
       }
@@ -1034,9 +1262,13 @@ export function DSIRReportsViewer({
 
       if (error) throw error
 
-      setPredefinedItems(prev => prev.map(item => 
-        item.id === id ? { ...item, name: name.trim(), price: category === 'sales' ? price : item.price, category, show_in_local, show_in_remote } : item
-      ))
+      // Collapse adjacent ranges with the same price (e.g. revert left a duplicate ₱75 span)
+      if (category === 'sales') {
+        await mergeAdjacentSamePriceRanges(id)
+      }
+
+      await loadPredefinedItems()
+      setError('')
       setSuccess('Item updated successfully!')
     } catch (error) {
       console.error('Error updating predefined item:', error)
@@ -1554,7 +1786,34 @@ export function DSIRReportsViewer({
       </div>
 
       {mainTab === 'inventory' ? (
-        <div className="bg-white rounded-lg shadow-sm border p-4 sm:p-5">
+        <div className="bg-white rounded-lg shadow-sm border p-4 sm:p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+            <div>
+              <p className="text-sm font-medium text-amber-900">Store inventory pull-outs on DSIR submit</p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                When disabled, submitting a DSIR will not post or validate ice cream pull-outs against store on hand.
+                {pulloutsSettingLoading ? ' Loading…' : pulloutsEnabled ? ' Currently enabled.' : ' Currently disabled.'}
+              </p>
+            </div>
+            {!dsirViewerReadOnly && (
+              <button
+                type="button"
+                onClick={() => void toggleStorePullouts()}
+                disabled={pulloutsSettingLoading || pulloutsSettingSaving}
+                className={`shrink-0 px-4 py-2 text-sm font-medium rounded-md disabled:opacity-50 ${
+                  pulloutsEnabled
+                    ? 'bg-red-600 text-white hover:bg-red-700'
+                    : 'bg-green-600 text-white hover:bg-green-700'
+                }`}
+              >
+                {pulloutsSettingSaving
+                  ? 'Saving…'
+                  : pulloutsEnabled
+                    ? 'Disable pull-outs'
+                    : 'Enable pull-outs'}
+              </button>
+            )}
+          </div>
           {inventoryLocationId ? (
             <DSIRStoreInventoryPanel
               key={`inv-${inventoryLocationId}-${mainTab}`}
@@ -2134,6 +2393,7 @@ export function DSIRReportsViewer({
                             <EditableItemRow
                               key={item.id}
                               item={item}
+                              priceHistory={itemPriceHistory[item.id] || []}
                               onUpdate={updatePredefinedItem}
                               onDelete={deletePredefinedItem}
                               saving={savingItems}
@@ -2301,27 +2561,56 @@ export function DSIRReportsViewer({
 }
 
 // Editable Item Row Component
-function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setEditingItemId }: { 
-  item: any, 
-  onUpdate: (id: string, name: string, price: number, category: string, show_in_local: boolean, show_in_remote: boolean) => void, 
-  onDelete: (id: string) => void,
-  saving: boolean,
-  editingItemId: string | null,
+function EditableItemRow({
+  item,
+  priceHistory,
+  onUpdate,
+  onDelete,
+  saving,
+  editingItemId,
+  setEditingItemId,
+}: {
+  item: any
+  priceHistory: DsirItemPriceRange[]
+  onUpdate: (
+    id: string,
+    name: string,
+    price: number,
+    category: string,
+    show_in_local: boolean,
+    show_in_remote: boolean,
+    effectiveFrom?: string
+  ) => void
+  onDelete: (id: string) => void
+  saving: boolean
+  editingItemId: string | null
   setEditingItemId: (id: string | null) => void
 }) {
   const isEditing = editingItemId === item.id
   const [editName, setEditName] = useState(item.name)
   const [editPrice, setEditPrice] = useState(item.price)
+  const [editEffectiveFrom, setEditEffectiveFrom] = useState(todayIsoDate())
   const [editCategory, setEditCategory] = useState(item.category)
   const [editShowInLocal, setEditShowInLocal] = useState(item.show_in_local ?? true)
   const [editShowInRemote, setEditShowInRemote] = useState(item.show_in_remote ?? true)
 
+  const priceChanged =
+    editCategory === 'sales' && Math.abs((Number(item.price) || 0) - (Number(editPrice) || 0)) > 0.0001
+
   const handleSave = () => {
     if (editName.trim() && editCategory) {
       if (editCategory === 'sales' && editPrice <= 0) {
-        return // Don't save if sales category but no valid price
+        return
       }
-      onUpdate(item.id, editName, editPrice, editCategory, editShowInLocal, editShowInRemote)
+      onUpdate(
+        item.id,
+        editName,
+        editPrice,
+        editCategory,
+        editShowInLocal,
+        editShowInRemote,
+        priceChanged ? editEffectiveFrom : undefined
+      )
       setEditingItemId(null)
     }
   }
@@ -2329,6 +2618,7 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
   const handleCancel = () => {
     setEditName(item.name)
     setEditPrice(item.price)
+    setEditEffectiveFrom(todayIsoDate())
     setEditCategory(item.category)
     setEditShowInLocal(item.show_in_local ?? true)
     setEditShowInRemote(item.show_in_remote ?? true)
@@ -2336,16 +2626,14 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
   }
 
   const handleEdit = () => {
+    setEditPrice(item.price)
+    setEditEffectiveFrom(todayIsoDate())
     setEditingItemId(item.id)
   }
 
-  const getCategoryDisplayName = (category: string) => {
-    const categoryNames: { [key: string]: string } = {
-      'sales': 'Sales Inventory',
-      'materials': 'Materials Inventory',
-      'denominations': 'Sales Reconciliation'
-    }
-    return categoryNames[category] || category.charAt(0).toUpperCase() + category.slice(1)
+  const formatRange = (r: DsirItemPriceRange) => {
+    const to = r.effective_to ? r.effective_to : 'present'
+    return `${r.effective_from} → ${to}: ₱${(Number(r.price) || 0).toFixed(2)}`
   }
 
   return (
@@ -2387,6 +2675,17 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
                 />
               </div>
             )}
+            {editCategory === 'sales' && priceChanged && (
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Effective from</label>
+                <input
+                  type="date"
+                  value={editEffectiveFrom}
+                  onChange={(e) => setEditEffectiveFrom(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
+                />
+              </div>
+            )}
             <div className="flex items-end space-x-2">
               <button
                 onClick={handleSave}
@@ -2404,8 +2703,7 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
               </button>
             </div>
           </div>
-          
-          {/* Visibility Checkboxes */}
+
           <div className="flex items-center space-x-6">
             <label className="flex items-center space-x-2">
               <input
@@ -2438,7 +2736,16 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
               {item.category === 'sales' && (
                 <div>
                   <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Price</span>
-                  <p className="text-sm font-medium text-gray-900">₱{item.price.toFixed(2)}</p>
+                  <p className="text-sm font-medium text-gray-900">₱{(Number(item.price) || 0).toFixed(2)}</p>
+                  {priceHistory.length > 0 && (
+                    <ul className="mt-1 space-y-0.5">
+                      {priceHistory.map((r, idx) => (
+                        <li key={`${r.effective_from}-${idx}`} className="text-xs text-gray-500">
+                          {formatRange(r)}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
             </div>
@@ -2459,8 +2766,7 @@ function EditableItemRow({ item, onUpdate, onDelete, saving, editingItemId, setE
               </button>
             </div>
           </div>
-          
-          {/* Visibility Status */}
+
           <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2">
               <div className={`w-2 h-2 rounded-full ${item.show_in_local ? 'bg-blue-500' : 'bg-gray-300'}`}></div>

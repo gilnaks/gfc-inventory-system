@@ -6,6 +6,7 @@ import {
   resolveLocationIncentiveSettings,
 } from './payroll-incentive'
 import { computeLiveNetPayrollTotal } from './analytics-payroll'
+import { priceForReportDate, type DsirItemPriceRange } from './dsir-item-prices'
 
 /**
  * GFC Main Analytics: business-wide KPIs, trends and rankings.
@@ -460,6 +461,7 @@ export async function loadAnalytics(
     vouchers,
     schedules,
     predefinedSalesItems,
+    predefinedItemPrices,
   ] = await Promise.all([
     fetchAll<LocationRow>((from, to) =>
       supabase
@@ -561,12 +563,23 @@ export async function loadAnalytics(
         .lte('schedule_date', range.end)
         .range(from, to)
     ),
-    fetchAll<{ brand_id: string; name: string; price: unknown }>((from, to) =>
+    fetchAll<{ id: string; brand_id: string; name: string; price: unknown }>((from, to) =>
       supabase
         .from('dsir_predefined_items')
-        .select('brand_id, name, price')
+        .select('id, brand_id, name, price')
         .eq('category', 'sales')
         .eq('is_active', true)
+        .range(from, to)
+    ),
+    fetchAll<{
+      predefined_item_id: string
+      price: unknown
+      effective_from: string
+      effective_to: string | null
+    }>((from, to) =>
+      supabase
+        .from('dsir_predefined_item_prices')
+        .select('predefined_item_id, price, effective_from, effective_to')
         .range(from, to)
     ),
   ])
@@ -747,16 +760,36 @@ export async function loadAnalytics(
     .slice(0, 8)
 
   // ---- Top store items (DSIR cup SKUs by revenue) ----
-  // Rows rarely carry a price, so price quantities from the brand's
-  // predefined sales items (falling back to any brand with that item name).
+  // Prefer sales/price snapshotted on the report line; else effective-dated
+  // catalog for report_date; else current predefined price.
   const priceByBrandItem = new Map<string, number>()
   const priceByItem = new Map<string, number>()
+  const itemIdToKey = new Map<string, { brandId: string; normalized: string }>()
   predefinedSalesItems.forEach((item) => {
-    const price = num(item.price)
-    if (price <= 0) return
     const normalized = normalizeItemName(item.name)
-    priceByBrandItem.set(`${item.brand_id}|${normalized}`, price)
-    if (!priceByItem.has(normalized)) priceByItem.set(normalized, price)
+    itemIdToKey.set(item.id, { brandId: item.brand_id, normalized })
+    const price = num(item.price)
+    if (price > 0) {
+      priceByBrandItem.set(`${item.brand_id}|${normalized}`, price)
+      if (!priceByItem.has(normalized)) priceByItem.set(normalized, price)
+    }
+  })
+  const rangesByBrandItem = new Map<string, DsirItemPriceRange[]>()
+  const rangesByItem = new Map<string, DsirItemPriceRange[]>()
+  predefinedItemPrices.forEach((row) => {
+    const meta = itemIdToKey.get(row.predefined_item_id)
+    if (!meta) return
+    const range: DsirItemPriceRange = {
+      predefined_item_id: row.predefined_item_id,
+      price: num(row.price),
+      effective_from: String(row.effective_from),
+      effective_to: row.effective_to != null ? String(row.effective_to) : null,
+    }
+    const brandKey = `${meta.brandId}|${meta.normalized}`
+    if (!rangesByBrandItem.has(brandKey)) rangesByBrandItem.set(brandKey, [])
+    rangesByBrandItem.get(brandKey)!.push(range)
+    if (!rangesByItem.has(meta.normalized)) rangesByItem.set(meta.normalized, [])
+    rangesByItem.get(meta.normalized)!.push(range)
   })
   const storeItemMap = new Map<string, ItemSalesStat>()
   storeItemRows.forEach((row) => {
@@ -767,14 +800,30 @@ export async function loadAnalytics(
     const quantity = storeItemSoldQuantity(row)
     if (quantity <= 0) return
     const normalized = normalizeItemName(name)
-    const brandId = locationId ? locationById.get(locationId)?.brand_id : null
-    const price =
-      num(row.price) ||
-      (brandId ? priceByBrandItem.get(`${brandId}|${normalized}`) : undefined) ||
-      priceByItem.get(normalized) ||
-      0
     const storedSales = num(row.sales)
-    const amount = storedSales > 0 ? storedSales : quantity * price
+    const storedPrice = num(row.price)
+    const reportDate = row.dsir_reports?.report_date
+    let amount: number
+    let price: number
+    if (storedSales > 0) {
+      amount = storedSales
+      price = storedPrice > 0 ? storedPrice : quantity > 0 ? storedSales / quantity : 0
+    } else if (storedPrice > 0) {
+      price = storedPrice
+      amount = quantity * price
+    } else {
+      const brandId = locationId ? locationById.get(locationId)?.brand_id : null
+      const brandKey = brandId ? `${brandId}|${normalized}` : null
+      const dated =
+        (brandKey ? priceForReportDate(rangesByBrandItem.get(brandKey), reportDate) : null) ||
+        priceForReportDate(rangesByItem.get(normalized), reportDate)
+      price =
+        (dated != null && dated > 0 ? dated : undefined) ||
+        (brandId ? priceByBrandItem.get(`${brandId}|${normalized}`) : undefined) ||
+        priceByItem.get(normalized) ||
+        0
+      amount = quantity * price
+    }
     const entry = storeItemMap.get(normalized) || { name, quantity: 0, amount: 0 }
     entry.quantity += quantity
     entry.amount += amount

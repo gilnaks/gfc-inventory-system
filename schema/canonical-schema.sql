@@ -454,6 +454,20 @@ CREATE TABLE IF NOT EXISTS dsir_predefined_items (
   UNIQUE (brand_id, category, name)
 );
 
+CREATE TABLE IF NOT EXISTS dsir_predefined_item_prices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  predefined_item_id UUID NOT NULL REFERENCES dsir_predefined_items(id) ON DELETE CASCADE,
+  price DECIMAL(10,2) NOT NULL DEFAULT 0,
+  effective_from DATE NOT NULL,
+  effective_to DATE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CHECK (effective_to IS NULL OR effective_to >= effective_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dsir_predefined_item_prices_item_from
+  ON dsir_predefined_item_prices (predefined_item_id, effective_from);
+
 CREATE TABLE IF NOT EXISTS dsir_store_inventory (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   location_id UUID NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
@@ -480,6 +494,13 @@ CREATE TABLE IF NOT EXISTS dsir_store_inventory_movements (
   source_key TEXT,
   notes TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Singleton: when pullouts_enabled is false, DSIR submit skips store ledger pull-outs.
+CREATE TABLE IF NOT EXISTS dsir_store_inventory_settings (
+  id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  pullouts_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS leave_requests (
@@ -1546,6 +1567,7 @@ ALTER TABLE customer_orders ADD COLUMN IF NOT EXISTS collection_bank_account_id 
 
 ALTER TABLE staff_registrations ADD COLUMN IF NOT EXISTS total_warnings INTEGER DEFAULT 0;
 ALTER TABLE staff_registrations ADD COLUMN IF NOT EXISTS leave_balance INTEGER DEFAULT 10;
+
 ALTER TABLE staff_registrations ADD COLUMN IF NOT EXISTS hourly_rate DECIMAL(10,2) DEFAULT 0;
 ALTER TABLE staff_registrations ADD COLUMN IF NOT EXISTS employment_date DATE;
 
@@ -1786,12 +1808,12 @@ BEGIN
     'purchase_requisitions','quotations','purchase_orders','po_payments','delivery_receipts',
     'staff_registrations','staff_schedules','dsir_reports','dsir_sales_inventory',
     'dsir_ice_cream_inventory','dsir_materials_inventory','dsir_discounts','dsir_expenses',
-    'dsir_sales_recon','dsir_predefined_items','supplier_invoices','payroll_runs',
+    'dsir_sales_recon','dsir_predefined_items','dsir_predefined_item_prices','supplier_invoices','payroll_runs',
     'payroll_deductions_refunds','staff_advance_disbursements',
     'accounting_accounts','accounting_periods','accounting_journal_entries','accounting_vouchers',
     'accounting_voucher_settings','accounting_bank_accounts','accounting_bank_reconciliations',
     'production_schedules','fleet_vehicles','fleet_zones','dsir_store_inventory',
-    'module_access_locks'
+    'dsir_store_inventory_settings','module_access_locks'
   ] LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS update_%1$s_updated_at ON %1$s', t);
     EXECUTE format('CREATE TRIGGER update_%1$s_updated_at BEFORE UPDATE ON %1$s FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()', t);
@@ -2511,8 +2533,8 @@ BEGIN
     'daily_stock_summaries','product_bom_items','product_category_sort','product_cycle_counts',
     'product_cycle_count_lines','staff_registrations','staff_assignments','staff_schedules',
     'announcements','dsir_reports','dsir_sales_inventory','dsir_ice_cream_inventory','dsir_materials_inventory',
-    'dsir_discounts','dsir_expenses','dsir_sales_recon','dsir_predefined_items',
-    'dsir_store_inventory','dsir_store_inventory_movements','product_stock_adjustments',
+    'dsir_discounts','dsir_expenses','dsir_sales_recon','dsir_predefined_items','dsir_predefined_item_prices',
+    'dsir_store_inventory','dsir_store_inventory_movements','dsir_store_inventory_settings','product_stock_adjustments',
     'suppliers','purchase_requisitions','purchase_requisition_items','quotations','quotation_items',
     'purchase_orders','purchase_order_items','po_payments','delivery_receipts','delivery_receipt_items',
     'po_status_history','po_purchaser_templates','raw_materials','material_stock_movements','material_stock_alerts',

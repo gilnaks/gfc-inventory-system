@@ -496,3 +496,25 @@ export async function sumOnHandForLocation(locationId: string): Promise<number> 
   const balances = await getBalancesForLocation(locationId)
   return balances.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0)
 }
+
+/** Whether DSIR submit should post ice cream pull-outs to the store ledger. Default off. */
+export async function isDsirStorePulloutsEnabled(): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('dsir_store_inventory_settings')
+    .select('pullouts_enabled')
+    .eq('id', 1)
+    .maybeSingle()
+  if (error) {
+    console.warn('dsir_store_inventory_settings read failed; treating pullouts as disabled', error)
+    return false
+  }
+  return data?.pullouts_enabled === true
+}
+
+export async function setDsirStorePulloutsEnabled(enabled: boolean): Promise<void> {
+  const { error } = await supabase.from('dsir_store_inventory_settings').upsert(
+    { id: 1, pullouts_enabled: enabled },
+    { onConflict: 'id' }
+  )
+  if (error) throw error
+}

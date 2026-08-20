@@ -3,7 +3,8 @@ import { Fragment, useState, useEffect, useCallback, useRef } from 'react'
 import dynamic from 'next/dynamic'
 import { supabase } from '../../lib/supabase'
 import { TRANSFER_SHEET_DSIR_QR_PREFIX } from '../../lib/transferSheetDsirQr'
-import { applyTransferReceive, applyDsirPullOutsOnSubmit } from '../../lib/dsir-store-inventory'
+import { applyTransferReceive, applyDsirPullOutsOnSubmit, isDsirStorePulloutsEnabled } from '../../lib/dsir-store-inventory'
+import { priceForReportDate, type DsirItemPriceRange } from '../../lib/dsir-item-prices'
 
 const TransferSheetQrScannerModal = dynamic(
   () =>
@@ -161,7 +162,10 @@ export function DSIRViewer({
   const [salesRecon, setSalesRecon] = useState<SalesReconItem[]>([])
 
   // Predefined items - loaded from database
-  const [predefinedSalesItems, setPredefinedSalesItems] = useState<Array<{name: string, price: number | null}>>([])
+  const [predefinedSalesItems, setPredefinedSalesItems] = useState<
+    Array<{ id?: string; name: string; price: number | null; priceRanges?: DsirItemPriceRange[] }>
+  >([])
+  const [salesPriceByName, setSalesPriceByName] = useState<Record<string, DsirItemPriceRange[]>>({})
   const [predefinedIceCreamFlavors, setPredefinedIceCreamFlavors] = useState<
     Array<{name: string; category: string; price: number | null}>
   >([])
@@ -718,7 +722,7 @@ export function DSIRViewer({
 
       const { data, error } = await supabase
         .from('dsir_predefined_items')
-        .select('category, name, price, show_in_local, show_in_remote')
+        .select('id, category, name, price, show_in_local, show_in_remote')
         .eq('brand_id', (report?.location as any)?.brand_id)
         .eq('is_active', true)
 
@@ -743,6 +747,31 @@ export function DSIRViewer({
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
       const denominations = (data?.filter(item => item.category === 'denominations' && filterByLocation(item)) || [])
         .sort((a, b) => sortAlphanumeric(a.name, b.name))
+
+      const salesIds = sales.map((s: any) => s.id).filter(Boolean)
+      const priceByName: Record<string, DsirItemPriceRange[]> = {}
+      if (salesIds.length > 0) {
+        const { data: priceRows, error: priceErr } = await supabase
+          .from('dsir_predefined_item_prices')
+          .select('predefined_item_id, price, effective_from, effective_to')
+          .in('predefined_item_id', salesIds)
+        if (priceErr) throw priceErr
+        const byId: Record<string, DsirItemPriceRange[]> = {}
+        for (const row of priceRows || []) {
+          const id = String(row.predefined_item_id)
+          if (!byId[id]) byId[id] = []
+          byId[id].push({
+            predefined_item_id: id,
+            price: Number(row.price) || 0,
+            effective_from: String(row.effective_from),
+            effective_to: row.effective_to != null ? String(row.effective_to) : null,
+          })
+        }
+        for (const s of sales as any[]) {
+          priceByName[s.name] = byId[s.id] || []
+        }
+      }
+      setSalesPriceByName(priceByName)
 
       // Section B uses Inventory tab products (category: ice cream), not dsir_predefined_items.
       const { data: inventoryProducts, error: inventoryError } = await supabase
@@ -798,6 +827,7 @@ export function DSIRViewer({
     } catch (error) {
       console.error('Error loading predefined items:', error)
       setPredefinedSalesItems([])
+      setSalesPriceByName({})
       setPredefinedIceCreamFlavors([])
       setPredefinedMaterials([])
       setPredefinedDenominations([])
@@ -901,20 +931,36 @@ export function DSIRViewer({
     return newInv - endInv
   }
 
-  const getSales = (item: any, itemId: string, predefinedPrice?: number | null) => {
+  // Prefer snapshotted line price; else effective-dated catalog for report_date; else current price.
+  const catalogPriceForItem = (itemName: string, fallbackPrice?: number | null): number => {
+    const dated = priceForReportDate(salesPriceByName[itemName], report?.report_date)
+    if (dated != null && dated > 0) return dated
+    return fallbackPrice ?? 0
+  }
+
+  const resolveSalesUnitPrice = (lineItem: any, itemName: string, predefinedPrice?: number | null): number => {
+    const stored = parseFloat(lineItem?.price?.toString() || '0') || 0
+    if (stored > 0) return stored
+    return catalogPriceForItem(itemName, predefinedPrice)
+  }
+
+  const getSales = (item: any, itemId: string, itemName: string, predefinedPrice?: number | null) => {
     const sold = getSold(item, itemId)
     
-    // Return empty string if SOLD is 0
     if (sold === 0) {
       return ''
     }
-    
-    // If predefined price is null or undefined, return empty string
-    if (predefinedPrice === null || predefinedPrice === undefined) {
+
+    const stored = parseFloat(item?.price?.toString() || '0') || 0
+    if (stored > 0) {
+      return sold * stored
+    }
+
+    const price = catalogPriceForItem(itemName, predefinedPrice)
+    if (!price) {
       return ''
     }
     
-    const price = predefinedPrice || parseFloat(item?.price?.toString() || '0') || 0
     return sold * price
   }
 
@@ -940,7 +986,7 @@ export function DSIRViewer({
       
       // Get sold quantity from formData or database
       const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-      const price = itemObj.price || 0
+      const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
       const sales = sold * price
       
       return sum + sales
@@ -958,7 +1004,7 @@ export function DSIRViewer({
       
       if (itemName.includes(searchName)) {
         const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-        const price = itemObj.price || 0
+        const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
         const sales = sold * price
         return sum + sales
       }
@@ -975,7 +1021,7 @@ export function DSIRViewer({
       
       if ((itemName.includes('BIG') && itemName.includes('CUP')) || itemName === 'BIGCUP' || itemName === 'BIG CUP') {
         const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-        const price = itemObj.price || 0
+        const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
         return sum + (sold * price)
       }
       return sum
@@ -990,7 +1036,7 @@ export function DSIRViewer({
       
       if ((itemName.includes('SMALL') && itemName.includes('CUP')) || itemName === 'SMALLCUP' || itemName === 'SMALL CUP') {
         const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-        const price = itemObj.price || 0
+        const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
         return sum + (sold * price)
       }
       return sum
@@ -1005,7 +1051,7 @@ export function DSIRViewer({
       
       if (itemName.includes('WATER') || itemName === 'WATER') {
         const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-        const price = itemObj.price || 0
+        const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
         return sum + (sold * price)
       }
       return sum
@@ -1020,7 +1066,7 @@ export function DSIRViewer({
       
       if (itemName.includes('500') || itemName.includes('500ML') || itemName.includes('500 ML')) {
         const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-        const price = itemObj.price || 0
+        const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
         return sum + (sold * price)
       }
       return sum
@@ -1035,7 +1081,7 @@ export function DSIRViewer({
       
       if (itemName.includes('CHOCO') || itemName.includes('CHOCOLATE') || itemName.includes('COATED')) {
         const sold = parseInt(getDisplayValue(`sales-${itemId}-sold`, getSold(item, itemId)) || '0') || 0
-        const price = itemObj.price || 0
+        const price = resolveSalesUnitPrice(item, itemObj.name, itemObj.price)
         return sum + (sold * price)
       }
       return sum
@@ -2111,6 +2157,46 @@ export function DSIRViewer({
         }
       }
       
+      // Snapshot unit price and sales onto every sales-inventory row for this report.
+      // Keep an existing non-zero price; otherwise use the live predefined price at save time.
+      {
+        const { data: salesRows, error: salesRowsError } = await supabase
+          .from('dsir_sales_inventory')
+          .select('id, item_name, beginning_inventory, arrival, pull_out, ending_inventory, price, sales')
+          .eq('dsir_report_id', report.id)
+        if (salesRowsError) throw salesRowsError
+
+        for (const row of salesRows || []) {
+          const storedPrice = parseFloat(row.price?.toString() || '0') || 0
+          const predefined = predefinedSalesItems.find((p) => p.name === row.item_name)
+          const catalogPrice = catalogPriceForItem(row.item_name, predefined?.price)
+          const price = storedPrice > 0 ? storedPrice : (catalogPrice || 0)
+
+          const beg = parseInt(row.beginning_inventory?.toString() || '0') || 0
+          const arrival = parseInt(row.arrival?.toString() || '0') || 0
+          const pullOut = parseInt(row.pull_out?.toString() || '0') || 0
+          const endRaw = row.ending_inventory
+          let sold = 0
+          if (endRaw !== null && endRaw !== undefined && endRaw !== '') {
+            const endInv = parseInt(endRaw.toString() || '0') || 0
+            const newInv = beg + arrival - pullOut
+            sold = endInv === 0 ? newInv : newInv - endInv
+          }
+          const sales = sold * price
+          const existingSales = parseFloat(row.sales?.toString() || '0') || 0
+
+          if (storedPrice === price && existingSales === sales) {
+            continue
+          }
+
+          const { error: snapshotError } = await supabase
+            .from('dsir_sales_inventory')
+            .update({ price, sales })
+            .eq('id', row.id)
+          if (snapshotError) throw snapshotError
+        }
+      }
+      
       // Save ice cream inventory updates
       for (const item of iceCreamUpdates) {
         // For existing records (UUID itemIds), skip hasData validation
@@ -2594,7 +2680,8 @@ export function DSIRViewer({
       }
 
       let pullOutPosted = 0
-      if (pullOuts.length > 0) {
+      const pulloutsEnabled = await isDsirStorePulloutsEnabled()
+      if (pulloutsEnabled && pullOuts.length > 0) {
         if (!brandId) {
           throw new Error('Cannot post pull-outs: store brand is missing on this report.')
         }
@@ -2615,6 +2702,8 @@ export function DSIRViewer({
         if (pullResult.status === 'applied') {
           pullOutPosted = pullResult.flavors
         }
+      } else if (!pulloutsEnabled) {
+        console.warn('DSIR submit: store inventory pull-outs disabled; skipping ledger post')
       } else {
         console.warn('DSIR submit: no ice cream pull-outs to post to store inventory')
       }
@@ -3020,15 +3109,15 @@ export function DSIRViewer({
                         </td>
                         <td className="border-r border-black px-1 py-1 text-center w-14 bg-gray-50">
                           <div className="text-center">
-                            {formatCurrency(itemObj.price || 0)}
+                            {formatCurrency(resolveSalesUnitPrice(item, itemObj.name, itemObj.price))}
                           </div>
                         </td>
                         <td className="px-1 py-1 text-center w-14 bg-gray-200">
                           <div className={`text-center font-medium ${(() => {
-                            const salesValue = getSales(item, itemId, itemObj.price);
+                            const salesValue = getSales(item, itemId, itemObj.name, itemObj.price);
                             return salesValue !== '' && typeof salesValue === 'number' && salesValue < 0 ? 'text-red-600' : '';
                           })()}`}>
-                            {getSales(item, itemId, itemObj.price) === '' ? '' : formatCurrency(getSales(item, itemId, itemObj.price))}
+                            {getSales(item, itemId, itemObj.name, itemObj.price) === '' ? '' : formatCurrency(getSales(item, itemId, itemObj.name, itemObj.price))}
                           </div>
                         </td>
                     </tr>
