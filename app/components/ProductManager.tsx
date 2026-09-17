@@ -30,7 +30,9 @@ import {
   isAvailableCritical,
 } from '../../lib/product-stock-level'
 import {
+  liveRelResForProduct,
   loadProductStockByBranch,
+  syncProductRelResFromOpenOrders,
   type BranchQty,
   type ProductStockByBranch,
 } from '../../lib/product-stock-by-branch'
@@ -1047,12 +1049,30 @@ export function ProductManager({
         )
       }
 
+      let branchStock = EMPTY_STOCK_BY_BRANCH
+      try {
+        branchStock = isFactoryBrand(selectedBrand)
+          ? await loadProductStockByBranch(selectedBrand.id)
+          : await syncProductRelResFromOpenOrders(selectedBrand.id)
+      } catch (branchErr) {
+        console.warn('Failed to load Rel/Res by branch:', branchErr)
+      }
+      setStockByBranch(branchStock)
+
+      const factoryFallback = isFactoryBrand(selectedBrand)
       const productsWithCalculations = rows.map((product) => {
         const dest = destinationByProductId.get(product.id)
         const displayName = gfcInventoryDisplayName(
           product.name,
           dest?.brandName,
           dest?.retailProductName
+        )
+        const live = liveRelResForProduct(
+          branchStock,
+          product.id,
+          product.released || 0,
+          product.reserved || 0,
+          factoryFallback
         )
         return {
           ...product,
@@ -1061,23 +1081,19 @@ export function ProductManager({
           brand_slug: selectedBrand.slug,
           destination_brand_id: dest?.id,
           destination_brand_name: dest?.brandName,
-          final_stock: (product.initial_stock || 0) + (product.production || 0) - (product.released || 0),
+          released: live.released,
+          reserved: live.reserved,
+          final_stock: (product.initial_stock || 0) + (product.production || 0) - live.released,
           available_stock:
             (product.initial_stock || 0) +
             (product.production || 0) -
-            (product.released || 0) -
-            (product.reserved || 0),
+            live.released -
+            live.reserved,
         }
       })
 
       setProducts(productsWithCalculations)
       await fetchCategorySortOrders(selectedBrand.id)
-      try {
-        setStockByBranch(await loadProductStockByBranch(selectedBrand.id))
-      } catch (branchErr) {
-        console.warn('Failed to load Rel/Res by branch:', branchErr)
-        setStockByBranch(EMPTY_STOCK_BY_BRANCH)
-      }
     } catch (error) {
       console.error('Error fetching products:', error)
       alert('Failed to load products. Please check your internet connection and try again.')

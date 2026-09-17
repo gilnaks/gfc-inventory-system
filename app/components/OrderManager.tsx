@@ -17,6 +17,7 @@ import {
 } from '../../lib/product-category-settings'
 import { Modal } from './Modal'
 import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
+import { syncProductRelResFromOpenOrders } from '../../lib/product-stock-by-branch'
 
 interface Location {
   id: string
@@ -345,6 +346,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', cur
           return
         }
 
+        if (orderData.brand_id) {
+          try {
+            await syncProductRelResFromOpenOrders(orderData.brand_id)
+          } catch (syncErr) {
+            console.warn('Rel/Res sync before fulfill failed:', syncErr)
+          }
+        }
+
         // Batch fetch all product data with fresh values
         const productIds = orderDetails.map(d => d.product_id).filter(Boolean)
         if (productIds.length === 0) {
@@ -479,6 +488,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', cur
           alert('Order has no items to dispatch')
           fetchOrders() // Revert optimistic update
           return
+        }
+
+        if (orderData.brand_id) {
+          try {
+            await syncProductRelResFromOpenOrders(orderData.brand_id)
+          } catch (syncErr) {
+            console.warn('Rel/Res sync before dispatch failed:', syncErr)
+          }
         }
 
         // Batch fetch all product data with fresh reserved/released values
@@ -902,6 +919,14 @@ export function OrderManager({ selectedBrand, onOrderUpdate, theme = 'blue', cur
         alert('Failed to delete order')
         fetchOrders() // Revert optimistic update
         return
+      }
+
+      if (orderData.brand_id) {
+        try {
+          await syncProductRelResFromOpenOrders(orderData.brand_id)
+        } catch (syncErr) {
+          console.warn('Rel/Res sync after order delete failed:', syncErr)
+        }
       }
 
       // Trigger product refresh (no need to refetch orders - already removed optimistically)

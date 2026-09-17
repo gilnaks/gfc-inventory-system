@@ -1,3 +1,4 @@
+import { isFactoryBrand } from './brand-roles'
 import { supabase } from './supabase'
 
 export type BranchQty = {
@@ -9,6 +10,8 @@ export type BranchQty = {
 export type ProductBranchStock = {
   released: BranchQty[]
   reserved: BranchQty[]
+  releasedQty: number
+  reservedQty: number
 }
 
 export type ProductStockByBranch = {
@@ -33,6 +36,29 @@ function toSortedBranchList(map: Map<string, { locationName: string; quantity: n
     }))
     .filter((row) => row.quantity > 0)
     .sort((a, b) => b.quantity - a.quantity || a.locationName.localeCompare(b.locationName))
+}
+
+export function sumBranchQty(rows: BranchQty[] | undefined): number {
+  if (!rows?.length) return 0
+  return rows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0)
+}
+
+/** Rel/Res for display: live open-order totals, with stored counter only as factory fallback. */
+export function liveRelResForProduct(
+  stock: ProductStockByBranch,
+  productId: string,
+  storedReleased: number,
+  storedReserved: number,
+  useStoredFallback: boolean
+): { released: number; reserved: number } {
+  const branch = stock.byProduct[productId]
+  if (branch) {
+    return { released: branch.releasedQty, reserved: branch.reservedQty }
+  }
+  if (useStoredFallback) {
+    return { released: storedReleased || 0, reserved: storedReserved || 0 }
+  }
+  return { released: 0, reserved: 0 }
 }
 
 /**
@@ -118,9 +144,13 @@ export async function loadProductStockByBranch(brandId: string): Promise<Product
 
   const byProduct: Record<string, ProductBranchStock> = {}
   for (const [productId, maps] of byProductMaps) {
+    const released = toSortedBranchList(maps.released)
+    const reserved = toSortedBranchList(maps.reserved)
     byProduct[productId] = {
-      released: toSortedBranchList(maps.released),
-      reserved: toSortedBranchList(maps.reserved),
+      released,
+      reserved,
+      releasedQty: sumBranchQty(released),
+      reservedQty: sumBranchQty(reserved),
     }
   }
 
@@ -137,4 +167,60 @@ export function formatBranchQtyLines(
 ): string {
   if (!rows.length) return emptyLabel
   return rows.map((r) => `${r.locationName}: ${r.quantity.toLocaleString()} pans`).join('\n')
+}
+
+/**
+ * Set products.released / reserved to open-order sums for a retail brand.
+ * Factory brands are skipped so intercompany Rel is not wiped.
+ * Returns the same aggregation used for Rel/Res hover.
+ */
+export async function syncProductRelResFromOpenOrders(
+  brandId: string
+): Promise<ProductStockByBranch> {
+  const stock = await loadProductStockByBranch(brandId)
+  if (!brandId) return stock
+
+  const { data: brand, error: brandError } = await supabase
+    .from('brands')
+    .select('id, slug, brand_role')
+    .eq('id', brandId)
+    .maybeSingle()
+  if (brandError) throw brandError
+  if (isFactoryBrand(brand)) return stock
+
+  const { data: products, error: productsError } = await supabase
+    .from('products')
+    .select('id, released, reserved')
+    .eq('brand_id', brandId)
+  if (productsError) throw productsError
+
+  const mismatched = (products || []).filter((product) => {
+    const live = stock.byProduct[product.id]
+    const released = live ? live.releasedQty : 0
+    const reserved = live ? live.reservedQty : 0
+    return (Number(product.released) || 0) !== released || (Number(product.reserved) || 0) !== reserved
+  })
+
+  const now = new Date().toISOString()
+  const chunkSize = 8
+  for (let i = 0; i < mismatched.length; i += chunkSize) {
+    const chunk = mismatched.slice(i, i + chunkSize)
+    const results = await Promise.all(
+      chunk.map((product) => {
+        const live = stock.byProduct[product.id]
+        return supabase
+          .from('products')
+          .update({
+            released: live ? live.releasedQty : 0,
+            reserved: live ? live.reservedQty : 0,
+            updated_at: now,
+          })
+          .eq('id', product.id)
+      })
+    )
+    const failed = results.find((r) => r.error)
+    if (failed?.error) throw failed.error
+  }
+
+  return stock
 }
