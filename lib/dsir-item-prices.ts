@@ -36,9 +36,21 @@ export function dayBefore(isoDate: string): string {
 }
 
 export function todayIsoDate(): string {
-  const now = new Date()
-  const yy = now.getFullYear()
-  const mm = String(now.getMonth() + 1).padStart(2, '0')
-  const dd = String(now.getDate()).padStart(2, '0')
-  return `${yy}-${mm}-${dd}`
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' })
+}
+
+export function soldFromInventoryCounts(row: {
+  beginning_inventory?: unknown
+  arrival?: unknown
+  pull_out?: unknown
+  ending_inventory?: unknown
+}): number {
+  const beg = parseInt(String(row.beginning_inventory ?? '0'), 10) || 0
+  const arrival = parseInt(String(row.arrival ?? '0'), 10) || 0
+  const pullOut = parseInt(String(row.pull_out ?? '0'), 10) || 0
+  const endRaw = row.ending_inventory
+  if (endRaw === null || endRaw === undefined || endRaw === '') return 0
+  const endInv = parseInt(String(endRaw), 10) || 0
+  const newInv = beg + arrival - pullOut
+  return endInv === 0 ? newInv : newInv - endInv
 }

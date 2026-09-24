@@ -939,9 +939,11 @@ export function DSIRViewer({
   }
 
   const resolveSalesUnitPrice = (lineItem: any, itemName: string, predefinedPrice?: number | null): number => {
+    const dated = catalogPriceForItem(itemName, null)
+    if (dated > 0) return dated
     const stored = parseFloat(lineItem?.price?.toString() || '0') || 0
     if (stored > 0) return stored
-    return catalogPriceForItem(itemName, predefinedPrice)
+    return predefinedPrice ?? 0
   }
 
   const getSales = (item: any, itemId: string, itemName: string, predefinedPrice?: number | null) => {
@@ -951,12 +953,7 @@ export function DSIRViewer({
       return ''
     }
 
-    const stored = parseFloat(item?.price?.toString() || '0') || 0
-    if (stored > 0) {
-      return sold * stored
-    }
-
-    const price = catalogPriceForItem(itemName, predefinedPrice)
+    const price = resolveSalesUnitPrice(item, itemName, predefinedPrice)
     if (!price) {
       return ''
     }
@@ -2170,7 +2167,7 @@ export function DSIRViewer({
           const storedPrice = parseFloat(row.price?.toString() || '0') || 0
           const predefined = predefinedSalesItems.find((p) => p.name === row.item_name)
           const catalogPrice = catalogPriceForItem(row.item_name, predefined?.price)
-          const price = storedPrice > 0 ? storedPrice : (catalogPrice || 0)
+          const price = catalogPrice > 0 ? catalogPrice : (storedPrice || 0)
 
           const beg = parseInt(row.beginning_inventory?.toString() || '0') || 0
           const arrival = parseInt(row.arrival?.toString() || '0') || 0

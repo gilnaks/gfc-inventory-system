@@ -7,7 +7,12 @@ import { useAdminPasswordConfirm } from '../hooks/useAdminPasswordConfirm'
 import { Modal } from './Modal'
 import { DSIRStoreInventoryPanel } from './DSIRStoreInventoryPanel'
 import { sumOnHandForLocation, isDsirStorePulloutsEnabled, setDsirStorePulloutsEnabled } from '../../lib/dsir-store-inventory'
-import { dayBefore, todayIsoDate, type DsirItemPriceRange } from '../../lib/dsir-item-prices'
+import { dayBefore, soldFromInventoryCounts, todayIsoDate, type DsirItemPriceRange } from '../../lib/dsir-item-prices'
+import {
+  applyDsirTotals,
+  computeAndPersistDsirReportTotals,
+  loadBrandSalesPriceRangesByName,
+} from '../../lib/dsir-report-totals'
 
 interface Brand {
   id: string
@@ -588,11 +593,23 @@ export function DSIRReportsViewer({
       // Set pagination info
       setTotalReports(count || 0)
       setTotalPages(Math.ceil((count || 0) / reportsPerPage))
+
+      let rows = data || []
+      const submitted = rows.filter((report) => report.status !== 'draft')
+      if (submitted.length > 0) {
+        try {
+          const ranges = await loadBrandSalesPriceRangesByName(selectedBrand.id)
+          const totals = await computeAndPersistDsirReportTotals(submitted, ranges)
+          rows = applyDsirTotals(rows, totals)
+        } catch (syncError) {
+          console.error('Error syncing DSIR list totals:', syncError)
+        }
+      }
       
       if (append) {
-        setReports(prev => [...prev, ...(data || [])])
+        setReports(prev => [...prev, ...rows])
       } else {
-        setReports(data || [])
+        setReports(rows)
       }
       
       // Check for inventory differences for loaded reports
@@ -1118,6 +1135,98 @@ export function DSIRReportsViewer({
     }
   }
 
+  const applyPriceToDsirLinesFromDate = async (
+    itemName: string,
+    price: number,
+    from: string
+  ) => {
+    const { data: locs, error: locErr } = await supabase
+      .from('locations')
+      .select('id')
+      .eq('brand_id', selectedBrand.id)
+    if (locErr) throw locErr
+    const locationIds = (locs || []).map((l) => l.id)
+    if (locationIds.length === 0) return
+
+    const { data: reports, error: reportErr } = await supabase
+      .from('dsir_reports')
+      .select('id, report_date, status')
+      .in('location_id', locationIds)
+      .gte('report_date', from)
+    if (reportErr) throw reportErr
+    const reportIds = (reports || []).map((r) => r.id)
+    if (reportIds.length === 0) return
+
+    const chunkSize = 100
+    for (let i = 0; i < reportIds.length; i += chunkSize) {
+      const chunk = reportIds.slice(i, i + chunkSize)
+      const { data: rows, error: rowsErr } = await supabase
+        .from('dsir_sales_inventory')
+        .select('id, beginning_inventory, arrival, pull_out, ending_inventory')
+        .in('dsir_report_id', chunk)
+        .eq('item_name', itemName)
+      if (rowsErr) throw rowsErr
+
+      for (const row of rows || []) {
+        const sold = soldFromInventoryCounts(row)
+        const { error: lineErr } = await supabase
+          .from('dsir_sales_inventory')
+          .update({ price, sales: sold * price })
+          .eq('id', row.id)
+        if (lineErr) throw lineErr
+      }
+    }
+
+    const ranges = await loadBrandSalesPriceRangesByName(selectedBrand.id)
+    await computeAndPersistDsirReportTotals(reports || [], ranges)
+  }
+
+  const replacePriceRangesFromDate = async (itemId: string, price: number, from: string) => {
+    const { data: ranges, error } = await supabase
+      .from('dsir_predefined_item_prices')
+      .select('id, price, effective_from, effective_to')
+      .eq('predefined_item_id', itemId)
+      .order('effective_from', { ascending: true })
+    if (error) throw error
+
+    const rows = (ranges || []).map((r) => ({
+      id: r.id as string,
+      effective_from: String(r.effective_from).slice(0, 10),
+      effective_to: r.effective_to != null ? String(r.effective_to).slice(0, 10) : null,
+    }))
+
+    const covering = rows.find(
+      (r) => r.effective_from < from && (r.effective_to == null || r.effective_to >= from)
+    )
+    if (covering) {
+      const closeTo = dayBefore(from)
+      const { error: closeErr } = await supabase
+        .from('dsir_predefined_item_prices')
+        .update({ effective_to: closeTo })
+        .eq('id', covering.id)
+      if (closeErr) throw closeErr
+    }
+
+    const toDelete = rows.filter((r) => r.effective_from >= from)
+    if (toDelete.length > 0) {
+      const { error: delErr } = await supabase
+        .from('dsir_predefined_item_prices')
+        .delete()
+        .in('id', toDelete.map((r) => r.id))
+      if (delErr) throw delErr
+    }
+
+    const { error: insertErr } = await supabase
+      .from('dsir_predefined_item_prices')
+      .insert({
+        predefined_item_id: itemId,
+        price,
+        effective_from: from,
+        effective_to: null,
+      })
+    if (insertErr) throw insertErr
+  }
+
   const mergeAdjacentSamePriceRanges = async (itemId: string) => {
     const { data: rows, error } = await supabase
       .from('dsir_predefined_item_prices')
@@ -1177,7 +1286,7 @@ export function DSIRReportsViewer({
       message: 'Enter admin password to save changes to this predefined item.',
       confirmLabel: 'Save',
     })
-    if (!confirmed) return
+    if (!confirmed) return false
 
     setSavingItems(true)
     try {
@@ -1185,63 +1294,16 @@ export function DSIRReportsViewer({
       const previousPrice = Number(existing?.price) || 0
       const priceChanged = category === 'sales' && Math.abs(previousPrice - price) > 0.0001
 
+      const from = (effectiveFrom || todayIsoDate()).slice(0, 10)
+      const shouldRefreshReports =
+        category === 'sales' &&
+        (priceChanged || Boolean(effectiveFrom && effectiveFrom !== todayIsoDate()))
+
       if (priceChanged) {
-        const from = (effectiveFrom || todayIsoDate()).slice(0, 10)
-        const { data: openRows, error: openErr } = await supabase
-          .from('dsir_predefined_item_prices')
-          .select('id, effective_from')
-          .eq('predefined_item_id', id)
-          .is('effective_to', null)
-          .order('effective_from', { ascending: false })
-          .limit(1)
-        if (openErr) throw openErr
-
-        const openRow = openRows?.[0]
-        if (openRow) {
-          const openFrom = String(openRow.effective_from).slice(0, 10)
-          if (from < openFrom) {
-            setError(
-              `Effective from (${from}) must be on or after the current range start (${openFrom}).`
-            )
-            return
-          }
-
-          if (from === openFrom) {
-            // Same-day correction: update open range; merge step discards net-no-change
-            const { error: updatePriceErr } = await supabase
-              .from('dsir_predefined_item_prices')
-              .update({ price })
-              .eq('id', openRow.id)
-            if (updatePriceErr) throw updatePriceErr
-          } else {
-            const closeTo = dayBefore(from)
-            const { error: closeErr } = await supabase
-              .from('dsir_predefined_item_prices')
-              .update({ effective_to: closeTo })
-              .eq('id', openRow.id)
-            if (closeErr) throw closeErr
-
-            const { error: insertPriceErr } = await supabase
-              .from('dsir_predefined_item_prices')
-              .insert({
-                predefined_item_id: id,
-                price,
-                effective_from: from,
-                effective_to: null,
-              })
-            if (insertPriceErr) throw insertPriceErr
-          }
-        } else {
-          const { error: insertPriceErr } = await supabase
-            .from('dsir_predefined_item_prices')
-            .insert({
-              predefined_item_id: id,
-              price,
-              effective_from: from,
-              effective_to: null,
-            })
-          if (insertPriceErr) throw insertPriceErr
-        }
+        await replacePriceRangesFromDate(id, price, from)
+      }
+      if (shouldRefreshReports) {
+        await applyPriceToDsirLinesFromDate(name.trim() || existing?.name || '', price, from)
       }
 
       const updateData: any = { 
@@ -1268,11 +1330,20 @@ export function DSIRReportsViewer({
       }
 
       await loadPredefinedItems()
+      if (shouldRefreshReports) {
+        await loadReports()
+      }
       setError('')
-      setSuccess('Item updated successfully!')
+      setSuccess(
+        shouldRefreshReports
+          ? 'Item updated. Net sales and discrepancies were recalculated on the report list.'
+          : 'Item updated successfully!'
+      )
+      return true
     } catch (error) {
       console.error('Error updating predefined item:', error)
       setError('Failed to update item')
+      return false
     } finally {
       setSavingItems(false)
     }
@@ -2580,7 +2651,7 @@ function EditableItemRow({
     show_in_local: boolean,
     show_in_remote: boolean,
     effectiveFrom?: string
-  ) => void
+  ) => void | Promise<boolean | void>
   onDelete: (id: string) => void
   saving: boolean
   editingItemId: string | null
@@ -2597,21 +2668,23 @@ function EditableItemRow({
   const priceChanged =
     editCategory === 'sales' && Math.abs((Number(item.price) || 0) - (Number(editPrice) || 0)) > 0.0001
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (editName.trim() && editCategory) {
       if (editCategory === 'sales' && editPrice <= 0) {
         return
       }
-      onUpdate(
+      const saved = await onUpdate(
         item.id,
         editName,
         editPrice,
         editCategory,
         editShowInLocal,
         editShowInRemote,
-        priceChanged ? editEffectiveFrom : undefined
+        editCategory === 'sales' ? editEffectiveFrom : undefined
       )
-      setEditingItemId(null)
+      if (saved !== false) {
+        setEditingItemId(null)
+      }
     }
   }
 
@@ -2675,7 +2748,7 @@ function EditableItemRow({
                 />
               </div>
             )}
-            {editCategory === 'sales' && priceChanged && (
+            {editCategory === 'sales' && (
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Effective from</label>
                 <input

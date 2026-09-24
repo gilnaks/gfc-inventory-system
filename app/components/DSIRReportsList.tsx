@@ -3,6 +3,11 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
 import { DSIRViewer } from './DSIRViewer'
 import { FileText, Calendar, MapPin, User, Eye, ArrowLeft, Trash2, Edit3, RefreshCw } from 'lucide-react'
+import {
+  applyDsirTotals,
+  computeAndPersistDsirReportTotals,
+  loadBrandSalesPriceRangesByName,
+} from '../../lib/dsir-report-totals'
 
 interface Brand {
   id: string
@@ -160,7 +165,19 @@ export function DSIRReportsList({ selectedBrand, selectedLocation, theme = 'blue
 
       if (error) throw error
 
-      setReports(data || [])
+      let rows = data || []
+      const submitted = rows.filter((report) => report.status !== 'draft')
+      if (submitted.length > 0 && selectedBrand?.id) {
+        try {
+          const ranges = await loadBrandSalesPriceRangesByName(selectedBrand.id)
+          const totals = await computeAndPersistDsirReportTotals(submitted, ranges)
+          rows = applyDsirTotals(rows, totals)
+        } catch (syncError) {
+          console.error('Error syncing DSIR list totals:', syncError)
+        }
+      }
+
+      setReports(rows)
     } catch (error) {
       console.error('Error loading DSIR reports:', error)
       setError('Failed to load DSIR reports')
