@@ -136,7 +136,15 @@ export function RecipeBook({ book }: { book: RecipeBookData }) {
                           {number}
                         </span>
                         <div className="min-w-0 flex-1">
-                          {step.quantity ? (
+                          {step.quantity && step.method === 'machine' ? (
+                            <p className="text-base leading-tight">
+                              Pour <span className="text-lg font-bold">{step.quantity}</span> {step.name} in the machine
+                            </p>
+                          ) : step.quantity && step.method === 'blend' ? (
+                            <p className="text-base leading-tight">
+                              Blend <span className="text-lg font-bold">{step.quantity}</span> {step.name} into the Ice Cream Base
+                            </p>
+                          ) : step.quantity ? (
                             <p className="leading-tight">
                               <span className="text-lg font-bold">{step.quantity}</span>{' '}
                               <span className="text-base">{step.name}</span>

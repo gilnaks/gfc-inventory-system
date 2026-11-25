@@ -33,12 +33,12 @@ export const myChoiceRecipes: RecipeBook = {
     {
       method: 'blend',
       label: 'Blend',
-      description: 'Blend into the Ice Cream Base',
+      description: 'Blend the ingredient into the Ice Cream Base',
     },
     {
       method: 'machine',
       label: 'Machine',
-      description: 'Pour in the machine',
+      description: 'Pour the ingredient in the machine',
     },
     {
       method: 'drizzle',
